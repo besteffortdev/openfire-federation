@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Federation</title>
+    <meta charset="UTF-8">
+    <style>
+        /* ── Layout ───────────────────────────────────────────────── */
+        #fed-root { font-family: inherit; max-width: 1100px; }
+
+        .fed-header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+        .fed-header h2 { margin: 0; }
+
+        .fed-badge {
+            display: inline-block; padding: 3px 10px; border-radius: 12px;
+            font-size: 12px; font-weight: 600; white-space: nowrap;
+        }
+        .fed-badge.ok      { background: #d4edda; color: #155724; }
+        .fed-badge.warn    { background: #fff3cd; color: #856404; }
+        .fed-badge.neutral { background: #e2e3e5; color: #383d41; }
+
+        /* ── Tabs ─────────────────────────────────────────────────── */
+        .fed-tabs { display: flex; gap: 0; border-bottom: 2px solid #dee2e6; margin-bottom: 20px; }
+        .fed-tab {
+            padding: 8px 20px; cursor: pointer; border: none; background: none;
+            font-size: 14px; font-weight: 500; color: #6c757d;
+            border-bottom: 2px solid transparent; margin-bottom: -2px;
+        }
+        .fed-tab.active { color: #0d6efd; border-bottom-color: #0d6efd; }
+        .fed-tab:hover  { color: #0d6efd; }
+
+        .fed-panel { display: none; }
+        .fed-panel.active { display: block; }
+
+        /* ── Tables ───────────────────────────────────────────────── */
+        .fed-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .fed-table th {
+            background: #f8f9fa; text-align: left; padding: 8px 12px;
+            border-bottom: 2px solid #dee2e6; font-weight: 600; color: #495057;
+        }
+        .fed-table td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+        .fed-table tr:last-child td { border-bottom: none; }
+        .fed-table td.empty { color: #999; font-style: italic; text-align: center; padding: 20px; }
+        .fed-table td.ts   { color: #999; font-size: 11px; }
+
+        /* ── Status dots ──────────────────────────────────────────── */
+        .status-dot {
+            display: inline-block; width: 9px; height: 9px;
+            border-radius: 50%; margin-right: 5px; vertical-align: middle;
+        }
+        .status-dot.green { background: #28a745; }
+        .status-dot.red   { background: #dc3545; }
+        .status-dot.grey  { background: #adb5bd; }
+
+        /* ── Forms ────────────────────────────────────────────────── */
+        .add-peer-form { display: flex; gap: 8px; margin-bottom: 16px; }
+        .add-peer-form input[type=text] {
+            flex: 1; padding: 6px 10px; border: 1px solid #ced4da; border-radius: 4px;
+            font-size: 13px;
+        }
+        .btn        { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+        .btn-primary{ background: #0d6efd; color: #fff; }
+        .btn-primary:hover { background: #0b5ed7; }
+        .btn-small  { padding: 3px 10px; font-size: 12px; border-radius: 3px; }
+        .btn-danger { background: #dc3545; color: #fff; }
+        .btn-danger:hover { background: #bb2d3b; }
+        .btn-warn   { background: #ffc107; color: #000; }
+        .btn-warn:hover { background: #e0a800; }
+
+        /* ── Room search ──────────────────────────────────────────── */
+        #room-search {
+            width: 280px; padding: 6px 10px; border: 1px solid #ced4da;
+            border-radius: 4px; font-size: 13px; margin-bottom: 12px;
+        }
+
+        /* ── Toggle switch ────────────────────────────────────────── */
+        .toggle { position: relative; display: inline-block; width: 38px; height: 20px; }
+        .toggle input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute; cursor: pointer; inset: 0;
+            background: #ccc; border-radius: 20px; transition: .2s;
+        }
+        .slider:before {
+            content: ""; position: absolute;
+            width: 14px; height: 14px; left: 3px; bottom: 3px;
+            background: #fff; border-radius: 50%; transition: .2s;
+        }
+        input:checked + .slider              { background: #0d6efd; }
+        input:checked + .slider:before       { transform: translateX(18px); }
+
+        /* ── Remote rooms ─────────────────────────────────────────── */
+        .peer-rooms { margin-bottom: 24px; }
+        .peer-rooms h4 {
+            font-size: 13px; font-weight: 600; color: #495057;
+            margin: 0 0 8px; padding: 6px 12px;
+            background: #f8f9fa; border-radius: 4px;
+        }
+        p.empty { color: #999; font-style: italic; }
+
+        .section-box {
+            border: 1px solid #dee2e6; border-radius: 6px;
+            overflow: hidden; margin-bottom: 24px;
+        }
+        .section-box-header {
+            background: #f8f9fa; padding: 10px 16px;
+            font-weight: 600; font-size: 13px; color: #495057;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .section-box-body { padding: 16px; }
+
+        /* ── Direction badges ─────────────────────────────────────── */
+        .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 10px;
+            font-size: 11px; font-weight: 600; white-space: nowrap;
+        }
+        .badge-out  { background: #cfe2ff; color: #084298; }
+        .badge-in   { background: #d1e7dd; color: #0a3622; }
+        .badge-fed  { background: #fff3cd; color: #664d03; margin-left: 4px; }
+        .badge-tls  { background: #f8d7da; color: #58151c; margin-left: 4px; }
+        .badge-tls-ok { background: #d1e7dd; color: #0a3622; margin-left: 4px; }
+    </style>
+</head>
+<body>
+<div id="fed-root">
+
+    <div class="fed-header">
+        <h2>Federation</h2>
+        <span id="fed-status-badge" class="fed-badge neutral">Loading…</span>
+        <small style="color:#999">This server: <strong id="local-domain">…</strong>
+               &nbsp;·&nbsp; Auto-refreshes every 5 s</small>
+    </div>
+
+    <!-- Tabs -->
+    <div class="fed-tabs">
+        <button class="fed-tab active" data-tab="peers">Peer Servers</button>
+        <button class="fed-tab"        data-tab="routing">Routing Table</button>
+        <button class="fed-tab"        data-tab="rooms">Rooms</button>
+    </div>
+
+    <!-- ── Peers panel ──────────────────────────────────────────────────────── -->
+    <div id="panel-peers" class="fed-panel active">
+
+        <div class="section-box">
+            <div class="section-box-header">Add peer server</div>
+            <div class="section-box-body">
+                <form id="form-add-peer" class="add-peer-form">
+                    <input type="text" id="input-peer-domain"
+                           placeholder="xmpp.example.com"
+                           required autocomplete="off">
+                    <button type="submit" class="btn btn-primary">Add peer</button>
+                </form>
+                <small style="color:#999">
+                    Enter the XMPP domain of the other Openfire server.
+                    An S2S connection will be established automatically.
+                </small>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Configured peers</div>
+            <table class="fed-table">
+                <thead>
+                    <tr>
+                        <th>Domain</th>
+                        <th>Status</th>
+                        <th>Last seen</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="peers-tbody">
+                    <tr><td colspan="4" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Active S2S sessions</div>
+            <table class="fed-table">
+                <thead>
+                    <tr>
+                        <th>Remote domain</th>
+                        <th>Direction</th>
+                        <th>Connected since</th>
+                        <th>TLS</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="s2s-tbody">
+                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ── Routing table panel ──────────────────────────────────────────────── -->
+    <div id="panel-routing" class="fed-panel">
+        <div class="section-box">
+            <div class="section-box-header">Federation routing table</div>
+            <table class="fed-table">
+                <thead>
+                    <tr>
+                        <th>Destination</th>
+                        <th>Next hop</th>
+                        <th>Hops</th>
+                        <th>Last updated</th>
+                    </tr>
+                </thead>
+                <tbody id="routing-tbody">
+                    <tr><td colspan="4" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <p style="font-size:12px;color:#999">
+            A hop count of 1 means directly connected via S2S.
+            Routes are learned automatically through gossip when peers connect.
+            Stale routes are removed when a peer goes offline.
+        </p>
+    </div>
+
+    <!-- ── Rooms panel ──────────────────────────────────────────────────────── -->
+    <div id="panel-rooms" class="fed-panel">
+
+        <div class="section-box">
+            <div class="section-box-header">Local rooms — enable federation per room</div>
+            <div class="section-box-body" style="padding-bottom:0">
+                <input type="text" id="room-search" placeholder="Filter rooms…">
+            </div>
+            <table class="fed-table">
+                <thead>
+                    <tr>
+                        <th>Room</th>
+                        <th>Description</th>
+                        <th>Occupants</th>
+                        <th>Federated</th>
+                        <th>Mapped to</th>
+                    </tr>
+                </thead>
+                <tbody id="local-rooms-tbody">
+                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Remote rooms (advertised by peers)</div>
+            <div class="section-box-body" id="remote-rooms-container">
+                <p class="empty">Loading…</p>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script src="federation.js"></script>
+</body>
+</html>
