@@ -102,9 +102,19 @@ public class FederationIQHandler extends IQHandler {
         }
 
         manager.getRoutingTable().addDirectPeer(fromDomain);
+
+        // Only reply with full gossip if we didn't already initiate this exchange.
+        // If the peer is already REACHABLE, S2SMonitor already sent our gossip and
+        // this is just the remote's reply — replying again creates an infinite loop.
+        boolean wasReachable = manager.getPeerRegistry().getPeer(fromDomain)
+                .map(p -> p.getStatus() == PeerServer.Status.REACHABLE)
+                .orElse(false);
+
         manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.REACHABLE);
 
-        manager.sendFullGossip(fromDomain);
+        if (!wasReachable) {
+            manager.sendFullGossip(fromDomain);
+        }
 
         if (isNew) {
             manager.propagateRoutingToAll(fromDomain);
