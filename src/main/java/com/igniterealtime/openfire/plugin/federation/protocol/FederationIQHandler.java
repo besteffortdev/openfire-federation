@@ -145,6 +145,12 @@ public class FederationIQHandler extends IQHandler {
 
         String sourceDomain = (origin != null) ? origin : fromDomain;
 
+        // Ignore advertisements about our own rooms bouncing back from peers.
+        if (localDomain.equals(sourceDomain)) {
+            Log.debug("room-advertisement origin is our own domain, ignoring");
+            return;
+        }
+
         List<FederatedRoom> rooms = new ArrayList<>();
         for (Element r : el.elements("room")) {
             String jid  = r.attributeValue("jid");

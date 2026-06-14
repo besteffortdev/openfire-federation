@@ -315,6 +315,7 @@ public class FederationManager {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         for (Map.Entry<String, List<FederatedRoom>> entry : roomManager.getRemoteRooms().entrySet()) {
             String originDomain = entry.getKey();
+            if (originDomain.equals(toDomain)) continue;  // don't send a server its own rooms
             List<FederatedRoom> rooms = entry.getValue();
             if (rooms.isEmpty()) continue;
             try {
