@@ -1,0 +1,114 @@
+package com.igniterealtime.openfire.plugin.federation;
+
+import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
+import org.jivesoftware.openfire.XMPPServer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Distance-vector routing table for the federation overlay network.
+ *
+ * Each entry says: "to reach <destination>, send via <nextHop> — it's <hops> hops away."
+ * Updates arrive as gossip from peers.  When a peer goes down, all routes
+ * learned through it are purged, and the change can be gossiped outward.
+ *
+ * This is deliberately simple (Bellman-Ford, no triggered updates yet).
+ * Convergence happens on the next polling cycle.
+ */
+public class FederationRoutingTable {
+
+    private static final Logger Log = LoggerFactory.getLogger(FederationRoutingTable.class);
+    static final int INFINITY = 16;   // anything >= 16 is considered unreachable
+
+    /** destination → best known route */
+    private final ConcurrentHashMap<String, RouteEntry> table = new ConcurrentHashMap<>();
+    /** peer domain → destinations learned from that peer (for cleanup) */
+    private final ConcurrentHashMap<String, Set<String>> routesLearnedFrom = new ConcurrentHashMap<>();
+
+    /**
+     * Registers a directly-connected peer (hop count = 1).
+     * Called by S2SMonitor when a peer transitions to REACHABLE.
+     */
+    public void addDirectPeer(String domain) {
+        table.put(domain, new RouteEntry(domain, domain, 1));
+        routesLearnedFrom.computeIfAbsent(domain, k -> ConcurrentHashMap.newKeySet()).add(domain);
+        Log.debug("Routing: direct peer added — {}", domain);
+    }
+
+    /**
+     * Merges a routing table received from a peer via gossip.
+     * Returns the set of destinations that are new or improved (for further propagation).
+     */
+    public Set<String> updateFromPeer(String fromPeer, List<RouteEntry> peerTable) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        Set<String> improved = new HashSet<>();
+        Set<String> learnedSet = routesLearnedFrom.computeIfAbsent(fromPeer, k -> ConcurrentHashMap.newKeySet());
+
+        for (RouteEntry remote : peerTable) {
+            if (remote.hops() >= INFINITY) continue;
+
+            int candidate = remote.hops() + 1;
+            if (candidate >= INFINITY) continue;
+
+            String dest = remote.destination();
+            // Never add a route to ourselves — we don't need to route to our own domain.
+            if (dest.equals(localDomain)) continue;
+            RouteEntry current = table.get(dest);
+
+            if (current == null || candidate < current.hops()) {
+                table.put(dest, new RouteEntry(dest, fromPeer, candidate));
+                learnedSet.add(dest);
+                improved.add(dest);
+                Log.debug("Routing: {} via {} in {} hop(s)", dest, fromPeer, candidate);
+            }
+        }
+        return improved;
+    }
+
+    /**
+     * Removes all routes associated with a peer that went down.
+     * Returns the destinations that were removed (so we can gossip the withdrawal).
+     */
+    public Set<String> removePeer(String domain) {
+        Set<String> removed = new HashSet<>();
+
+        // Remove the direct entry
+        if (table.remove(domain) != null) removed.add(domain);
+
+        // Remove everything learned via this peer
+        Set<String> learned = routesLearnedFrom.remove(domain);
+        if (learned != null) {
+            for (String dest : learned) {
+                RouteEntry entry = table.get(dest);
+                if (entry != null && entry.nextHop().equals(domain)) {
+                    table.remove(dest);
+                    removed.add(dest);
+                }
+            }
+        }
+
+        if (!removed.isEmpty()) {
+            Log.info("Routing: peer {} down — purged routes to {}", domain, removed);
+        }
+        return removed;
+    }
+
+    /**
+     * Returns the next-hop domain for reaching destination, or empty if unreachable.
+     */
+    public Optional<String> findNextHop(String destination) {
+        return Optional.ofNullable(table.get(destination)).map(RouteEntry::nextHop);
+    }
+
+    public boolean isReachable(String destination) {
+        return table.containsKey(destination);
+    }
+
+    /** Snapshot of the full table for gossip serialisation and UI display. */
+    public Collection<RouteEntry> getAll() {
+        return Collections.unmodifiableCollection(table.values());
+    }
+}
