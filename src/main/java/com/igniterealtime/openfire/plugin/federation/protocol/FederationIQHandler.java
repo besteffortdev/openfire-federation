@@ -124,10 +124,10 @@ public class FederationIQHandler extends IQHandler {
     // ── peer-withdraw ──────────────────────────────────────────────────────────
 
     private void handlePeerWithdraw(String fromDomain) {
-        Log.info("peer-withdraw from {} — clearing cached state", fromDomain);
+        Log.info("peer-withdraw from {} — marking WITHDRAWN and clearing cached state", fromDomain);
         manager.getRoomManager().clearRemoteRooms(fromDomain);
         manager.getRoutingTable().removePeer(fromDomain);
-        manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.UNREACHABLE);
+        manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.WITHDRAWN);
     }
 
     // ── routing-update ─────────────────────────────────────────────────────────
@@ -186,7 +186,7 @@ public class FederationIQHandler extends IQHandler {
                 rooms.add(new FederatedRoom(jid, name, desc, sourceDomain));
             }
         }
-        manager.getRoomManager().updateRemoteRooms(sourceDomain, rooms);
+        manager.getRoomManager().updateRemoteRooms(sourceDomain, fromDomain, rooms);
         Log.debug("room-advertisement from {} (source={}) — {} room(s)", fromDomain, sourceDomain, rooms.size());
 
         if (!rooms.isEmpty()) {

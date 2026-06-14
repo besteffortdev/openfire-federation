@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class PeerServer {
 
-    public enum Status { UNKNOWN, REACHABLE, UNREACHABLE }
+    public enum Status { UNKNOWN, REACHABLE, UNREACHABLE, WITHDRAWN }
 
     private final String domain;
     private final AtomicReference<Status> status = new AtomicReference<>(Status.UNKNOWN);

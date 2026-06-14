@@ -85,17 +85,20 @@ function renderPeers(peers) {
         return;
     }
     tbody.innerHTML = peers.map(p => {
-        const retryBtn = (p.status === 'UNREACHABLE' || p.status === 'UNKNOWN')
+        const isWithdrawn = p.status === 'WITHDRAWN';
+        const needsAction = isWithdrawn || p.status === 'UNREACHABLE' || p.status === 'UNKNOWN';
+        const actionBtn = needsAction
             ? `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="retryPeer('${escHtml(p.domain)}')">Retry</button>`
+                       onclick="retryPeer('${escHtml(p.domain)}')">${isWithdrawn ? 'Reconnect' : 'Retry'}</button>`
             : '';
+        const statusLabel = isWithdrawn ? 'Disconnected by remote' : p.status;
         return `
         <tr>
             <td>${escHtml(p.domain)}</td>
-            <td><span class="status-dot ${statusClass(p.status)}"></span> ${p.status}</td>
+            <td><span class="status-dot ${statusClass(p.status)}"></span> ${statusLabel}</td>
             <td>${p.lastSeen ? new Date(p.lastSeen).toLocaleString() : '—'}</td>
             <td style="white-space:nowrap">
-                ${retryBtn}
+                ${actionBtn}
                 <button class="btn-small btn-danger"
                         onclick="removePeer('${escHtml(p.domain)}')">Remove</button>
             </td>
@@ -115,24 +118,45 @@ function renderS2SSessions(sessions) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty">No active S2S sessions.</td></tr>';
         return;
     }
-    tbody.innerHTML = sessions.map(s => {
-        const dirBadge = s.direction === 'outgoing'
-            ? '<span class="badge badge-out">↑ outgoing</span>'
-            : '<span class="badge badge-in">↓ incoming</span>';
-        const fedBadge = s.fedPeer ? '<span class="badge badge-fed">federation</span>' : '';
-        const tlsBadge = s.encrypted
+
+    // Group by domain — one row per peer, show both directions when present.
+    const byDomain = {};
+    for (const s of sessions) {
+        if (!byDomain[s.domain]) byDomain[s.domain] = [];
+        byDomain[s.domain].push(s);
+    }
+
+    tbody.innerHTML = Object.entries(byDomain).map(([domain, domSessions]) => {
+        const hasOut   = domSessions.some(s => s.direction === 'outgoing');
+        const hasIn    = domSessions.some(s => s.direction === 'incoming');
+        const isFed    = domSessions.some(s => s.fedPeer);
+        const isTls    = domSessions.some(s => s.encrypted);
+        const earliest = Math.min(...domSessions.map(s => s.since));
+
+        const dirBadges = [
+            hasOut ? '<span class="badge badge-out">↑ outgoing</span>' : '',
+            hasIn  ? '<span class="badge badge-in">↓ incoming</span>'  : ''
+        ].filter(Boolean).join(' ');
+
+        const fedBadge = isFed ? '<span class="badge badge-fed">federation</span>' : '';
+        const tlsBadge = isTls
             ? '<span class="badge badge-tls-ok">TLS</span>'
             : '<span class="badge badge-tls">plain</span>';
+
+        const killBtns = domSessions.map(s =>
+            `<button class="btn-small btn-danger" style="margin-left:4px"
+                     onclick="killSession('${escHtml(domain)}','${escHtml(s.direction)}')">
+                 Kill ${s.direction === 'outgoing' ? '↑' : '↓'}
+             </button>`
+        ).join('');
+
         return `
         <tr>
-            <td><strong>${escHtml(s.domain)}</strong>${fedBadge}</td>
-            <td>${dirBadge}</td>
-            <td class="ts">${new Date(s.since).toLocaleString()}</td>
+            <td><strong>${escHtml(domain)}</strong>${fedBadge}</td>
+            <td>${dirBadges}</td>
+            <td class="ts">${new Date(earliest).toLocaleString()}</td>
             <td>${tlsBadge}</td>
-            <td>
-                <button class="btn-small btn-danger"
-                        onclick="killSession('${escHtml(s.domain)}','${escHtml(s.direction)}')">Kill</button>
-            </td>
+            <td style="white-space:nowrap">${killBtns}</td>
         </tr>`;
     }).join('');
 }
@@ -148,7 +172,10 @@ function removePeer(domain) {
 }
 
 function statusClass(s) {
-    return s === 'REACHABLE' ? 'green' : s === 'UNREACHABLE' ? 'red' : 'grey';
+    if (s === 'REACHABLE')  return 'green';
+    if (s === 'UNREACHABLE') return 'red';
+    if (s === 'WITHDRAWN')   return 'orange';
+    return 'grey';
 }
 
 // ── Routing table tab ─────────────────────────────────────────────────────────

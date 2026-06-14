@@ -65,6 +65,9 @@ public class S2SMonitor {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         for (PeerServer peer : peerRegistry.getPeers()) {
+            // WITHDRAWN peers intentionally disconnected — skip until admin reconnects.
+            if (peer.getStatus() == PeerServer.Status.WITHDRAWN) continue;
+
             String domain = peer.getDomain();
             boolean s2sUp;
             try {

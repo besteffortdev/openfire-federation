@@ -90,6 +90,12 @@ public class FederationManager {
 
     public void retryPeer(String domain) {
         Log.info("Retrying S2S for peer: {}", domain);
+        // Clear WITHDRAWN so S2SMonitor will track this peer again.
+        peerRegistry.getPeer(domain).ifPresent(p -> {
+            if (p.getStatus() == PeerServer.Status.WITHDRAWN) {
+                peerRegistry.updateStatus(domain, PeerServer.Status.UNKNOWN);
+            }
+        });
         sendPeerAnnounce(domain);
     }
 
@@ -150,6 +156,9 @@ public class FederationManager {
                 }
             }
         });
+        // Kill S2S sessions so the remote side detects the disconnect immediately.
+        killSession(domain, "outgoing");
+        killSession(domain, "incoming");
         boolean removed = peerRegistry.removePeer(domain);
         if (removed) {
             routingTable.removePeer(domain);

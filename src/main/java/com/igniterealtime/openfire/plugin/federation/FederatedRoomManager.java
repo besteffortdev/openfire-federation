@@ -42,6 +42,9 @@ public class FederatedRoomManager {
     /** peer domain → rooms that peer has advertised as federatable. */
     private final ConcurrentHashMap<String, List<FederatedRoom>> remoteRooms = new ConcurrentHashMap<>();
 
+    /** origin domain → which direct S2S neighbor last relayed that origin's rooms to us. */
+    private final ConcurrentHashMap<String, String> roomRelaySource = new ConcurrentHashMap<>();
+
     /** localRoomJid → list of confirmed mappings (one per remote domain). */
     private final ConcurrentHashMap<String, List<RoomMapping>> localMappings = new ConcurrentHashMap<>();
 
@@ -270,12 +273,23 @@ public class FederatedRoomManager {
 
     // ── Remote room list ──────────────────────────────────────────────────────
 
-    public void updateRemoteRooms(String sourceDomain, List<FederatedRoom> rooms) {
+    public void updateRemoteRooms(String sourceDomain, String fromDomain, List<FederatedRoom> rooms) {
         remoteRooms.put(sourceDomain, Collections.unmodifiableList(new ArrayList<>(rooms)));
+        roomRelaySource.put(sourceDomain, fromDomain);
     }
 
     public void clearRemoteRooms(String peerDomain) {
+        // Clear rooms that originated directly from this peer.
         remoteRooms.remove(peerDomain);
+        roomRelaySource.remove(peerDomain);
+        // Also clear rooms that were relayed TO us through this peer — they're now unreachable.
+        roomRelaySource.entrySet().removeIf(e -> {
+            if (peerDomain.equals(e.getValue())) {
+                remoteRooms.remove(e.getKey());
+                return true;
+            }
+            return false;
+        });
     }
 
     public Map<String, List<FederatedRoom>> getRemoteRooms() {
