@@ -29,6 +29,10 @@ SERVERS=(
      "deploy-user@192.0.2.1:xmpp"
      "deploy-user@192.0.2.2:xmpp"
      "deploy-user@192.0.2.3:xmpp"
+     "deploy-user@192.0.2.4:xmpp"
+     "deploy-user@192.0.2.5:xmpp"
+     "deploy-user@192.0.2.6:xmpp"
+     "deploy-user@192.0.2.7:xmpp"
 )
 
 # Path to a file containing the SSH password (chmod 600).
@@ -38,8 +42,11 @@ SSH_PASS_FILE="${SSH_PASS_FILE:-.ssh_pass}"
 OPENFIRE_PLUGIN_DIR="/var/lib/openfire/plugins"   # path INSIDE the container
 PLUGIN_NAME="federation"
 # The assembly plugin outputs target/federation.jar (the proper plugin archive).
-# This is distinct from target/federation-1.0.0-SNAPSHOT.jar (the classes-only JAR).
+# This is distinct from target/federation-1.2.0.jar (the classes-only JAR).
 JAR="target/${PLUGIN_NAME}.jar"
+# Seconds to wait after removing the old plugin before copying the new one.
+# Openfire's plugin watcher polls every ~4 s; 6 s gives it time to unload cleanly.
+RELOAD_WAIT=6
 # ───────────────────────────────────────────────────────────────────────────────
 
 if [[ ${#SERVERS[@]} -eq 0 ]]; then
@@ -82,20 +89,30 @@ for entry in "${SERVERS[@]}"; do
     echo ""
     echo "──> Deploying to ${SSH_TARGET} (container: ${CONTAINER})"
 
-    # Copy JAR to a temp location on the host
-    $SSH_PREFIX scp -q "${SSH_OPTS[@]}" \
-        "$JAR" "${SSH_TARGET}:/tmp/${PLUGIN_NAME}.jar"
-
-    # Remove old extracted plugin dir (triggers Openfire hot-reload), then copy new JAR
+    # Step 1: remove old plugin files so Openfire's watcher unloads the plugin.
     $SSH_PREFIX ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "
         set -e
         docker exec '$CONTAINER' bash -c \
             'rm -rf \"${OPENFIRE_PLUGIN_DIR}/${PLUGIN_NAME}\" \
                     \"${OPENFIRE_PLUGIN_DIR}/${PLUGIN_NAME}.jar\"'
+        echo '    Old plugin removed.'
+    "
+
+    # Give Openfire's plugin watcher time to detect the removal and unload the plugin
+    # before the new JAR lands (watcher polls every ~4 s).
+    echo "    Waiting ${RELOAD_WAIT}s for Openfire to unload…"
+    sleep "$RELOAD_WAIT"
+
+    # Step 2: push the new JAR — Openfire will pick it up and hot-load it.
+    $SSH_PREFIX scp -q "${SSH_OPTS[@]}" \
+        "$JAR" "${SSH_TARGET}:/tmp/${PLUGIN_NAME}.jar"
+
+    $SSH_PREFIX ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "
+        set -e
         docker cp '/tmp/${PLUGIN_NAME}.jar' \
                   '${CONTAINER}:${OPENFIRE_PLUGIN_DIR}/${PLUGIN_NAME}.jar'
         rm -f '/tmp/${PLUGIN_NAME}.jar'
-        echo '    Plugin deployed — Openfire is hot-reloading.'
+        echo '    New JAR deployed — Openfire is loading it.'
     "
 done
 
