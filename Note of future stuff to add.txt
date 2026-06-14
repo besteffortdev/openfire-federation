@@ -1,0 +1,1 @@
+One config note: Openfire MUC rooms by default reject messages from non-occupants. For injected messages to appear in the remote room, the room's "Allow anyone to send messages" setting must be enabled, or the plugin needs a direct MUC API call (which we can add next if needed).
