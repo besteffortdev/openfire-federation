@@ -80,16 +80,20 @@ public final class FederationStanzaFactory {
     /**
      * Builds a relayed room-advertisement carrying an origin attribute so the
      * receiver knows the rooms belong to {@code originDomain}, not to the
-     * immediate sender. Receivers must NOT re-relay advertisements that already
-     * have an origin (prevents flooding loops).
+     * immediate sender.  The {@code via} trail (comma-separated server domains)
+     * prevents flooding loops across multi-hop paths.
      */
     public static IQ roomAdvertisement(String toDomain, List<FederatedRoom> rooms, String originDomain) {
+        return roomAdvertisement(toDomain, rooms, originDomain, null);
+    }
+
+    public static IQ roomAdvertisement(String toDomain, List<FederatedRoom> rooms,
+                                       String originDomain, String via) {
         IQ iq = base(toDomain);
         Element fed = iq.setChildElement("federation", NS);
         Element adv = fed.addElement("room-advertisement");
-        if (originDomain != null) {
-            adv.addAttribute("origin", originDomain);
-        }
+        if (originDomain != null) adv.addAttribute("origin", originDomain);
+        if (via != null && !via.isEmpty()) adv.addAttribute("via", via);
         for (FederatedRoom room : rooms) {
             Element r = adv.addElement("room");
             r.addAttribute("jid",         room.jid());

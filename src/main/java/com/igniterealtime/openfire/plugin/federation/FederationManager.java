@@ -277,14 +277,16 @@ public class FederationManager {
         }
     }
 
-    public void relayRoomAdvertisement(String excludeDomain, String originDomain, List<FederatedRoom> rooms) {
+    public void relayRoomAdvertisement(String excludeDomain, String originDomain,
+                                       List<FederatedRoom> rooms, String via) {
         for (PeerServer peer : peerRegistry.getPeers()) {
-            if (!peer.getDomain().equals(excludeDomain)
-                    && peer.getStatus() == PeerServer.Status.REACHABLE) {
+            if (peer.getDomain().equals(excludeDomain)) continue;
+            if (via != null && via.contains(peer.getDomain())) continue;
+            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 try {
                     XMPPServer.getInstance().getPacketRouter()
                               .route(FederationStanzaFactory.roomAdvertisement(
-                                  peer.getDomain(), rooms, originDomain));
+                                  peer.getDomain(), rooms, originDomain, via));
                 } catch (Exception e) {
                     Log.warn("Failed to relay room-advertisement to {}: {}", peer.getDomain(), e.getMessage());
                 }
@@ -299,6 +301,31 @@ public class FederationManager {
         sendPeerAnnounce(toDomain);
         sendRoutingUpdate(toDomain);
         sendRoomAdvertisement(toDomain);
+        sendCachedRemoteRoomAdvertisements(toDomain);
+    }
+
+    /**
+     * Replays every remote room advertisement this server has cached to a
+     * newly-connected peer.  Without this, a server that joins mid-session
+     * would never see rooms that were advertised before it connected.
+     * The local domain is set as the via trail so the recipient can relay
+     * further without bouncing back to us.
+     */
+    public void sendCachedRemoteRoomAdvertisements(String toDomain) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        for (Map.Entry<String, List<FederatedRoom>> entry : roomManager.getRemoteRooms().entrySet()) {
+            String originDomain = entry.getKey();
+            List<FederatedRoom> rooms = entry.getValue();
+            if (rooms.isEmpty()) continue;
+            try {
+                XMPPServer.getInstance().getPacketRouter()
+                          .route(FederationStanzaFactory.roomAdvertisement(
+                              toDomain, rooms, originDomain, localDomain));
+            } catch (Exception e) {
+                Log.warn("Failed to send cached room-advertisement for {} to {}: {}",
+                         originDomain, toDomain, e.getMessage());
+            }
+        }
     }
 
     public void sendPeerAnnounce(String toDomain) {

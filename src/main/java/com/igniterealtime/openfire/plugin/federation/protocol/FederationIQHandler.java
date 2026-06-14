@@ -133,7 +133,16 @@ public class FederationIQHandler extends IQHandler {
     // ── room-advertisement ────────────────────────────────────────────────────
 
     private void handleRoomAdvertisement(String fromDomain, Element el) {
-        String origin       = el.attributeValue("origin");
+        String origin      = el.attributeValue("origin");
+        String via         = el.attributeValue("via", "");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        // Drop if this server already forwarded this advertisement (loop guard).
+        if (via.contains(localDomain)) {
+            Log.debug("room-advertisement loop detected (via={}), dropping", via);
+            return;
+        }
+
         String sourceDomain = (origin != null) ? origin : fromDomain;
 
         List<FederatedRoom> rooms = new ArrayList<>();
@@ -148,8 +157,10 @@ public class FederationIQHandler extends IQHandler {
         manager.getRoomManager().updateRemoteRooms(sourceDomain, rooms);
         Log.debug("room-advertisement from {} (source={}) — {} room(s)", fromDomain, sourceDomain, rooms.size());
 
-        if (origin == null && !rooms.isEmpty()) {
-            manager.relayRoomAdvertisement(fromDomain, fromDomain, rooms);
+        if (!rooms.isEmpty()) {
+            // Append our domain to the via trail and relay to all other peers.
+            String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+            manager.relayRoomAdvertisement(fromDomain, sourceDomain, rooms, newVia);
         }
     }
 
