@@ -87,13 +87,32 @@
         input:checked + .slider              { background: #0d6efd; }
         input:checked + .slider:before       { transform: translateX(18px); }
 
-        /* ── Remote rooms ─────────────────────────────────────────── */
-        .peer-rooms { margin-bottom: 24px; }
-        .peer-rooms h4 {
-            font-size: 13px; font-weight: 600; color: #495057;
-            margin: 0 0 8px; padding: 6px 12px;
-            background: #f8f9fa; border-radius: 4px;
+        /* ── Mapping rows in local rooms table ────────────────────── */
+        .mapping-row {
+            display: flex; align-items: center; gap: 4px; margin-bottom: 3px;
         }
+        .mapping-row:last-child { margin-bottom: 0; }
+
+        /* ── Collapsible peer sections (remote rooms) ─────────────── */
+        .peer-section {
+            border: 1px solid #dee2e6; border-radius: 6px;
+            overflow: hidden; margin-bottom: 12px;
+        }
+        .peer-section-header {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 14px; cursor: pointer;
+            background: #f8f9fa; user-select: none;
+        }
+        .peer-section-header:hover { background: #e9ecef; }
+        .peer-collapse-icon { font-size: 10px; color: #6c757d; width: 10px; }
+        .peer-room-count    { color: #6c757d; font-size: 12px; }
+        .peer-map-count     {
+            margin-left: auto; background: #d1e7dd; color: #0a3622;
+            border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600;
+        }
+        .peer-section-body  { border-top: 1px solid #dee2e6; }
+
+        /* ── Section boxes ────────────────────────────────────────── */
         p.empty { color: #999; font-style: italic; }
 
         .section-box {
@@ -112,10 +131,10 @@
             display: inline-block; padding: 2px 8px; border-radius: 10px;
             font-size: 11px; font-weight: 600; white-space: nowrap;
         }
-        .badge-out  { background: #cfe2ff; color: #084298; }
-        .badge-in   { background: #d1e7dd; color: #0a3622; }
-        .badge-fed  { background: #fff3cd; color: #664d03; margin-left: 4px; }
-        .badge-tls  { background: #f8d7da; color: #58151c; margin-left: 4px; }
+        .badge-out    { background: #cfe2ff; color: #084298; }
+        .badge-in     { background: #d1e7dd; color: #0a3622; }
+        .badge-fed    { background: #fff3cd; color: #664d03; margin-left: 4px; }
+        .badge-tls    { background: #f8d7da; color: #58151c; margin-left: 4px; }
         .badge-tls-ok { background: #d1e7dd; color: #0a3622; margin-left: 4px; }
     </style>
 </head>

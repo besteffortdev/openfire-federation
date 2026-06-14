@@ -84,19 +84,15 @@ public class FederationManager {
     public PeerServer addPeer(String domain) {
         PeerServer peer = peerRegistry.addPeer(domain);
         Log.info("Peer added: {}", domain);
-        // Route a stanza to trigger Openfire S2S establishment (packets are queued
-        // until the session authenticates, then delivered automatically).
         sendPeerAnnounce(domain);
         return peer;
     }
 
-    /** Re-sends a peer-announce to trigger/retry S2S for a configured peer. */
     public void retryPeer(String domain) {
         Log.info("Retrying S2S for peer: {}", domain);
         sendPeerAnnounce(domain);
     }
 
-    /** Returns a snapshot of all active incoming and outgoing S2S sessions. */
     public List<Map<String, Object>> getS2SSessions() {
         SessionManager sm = XMPPServer.getInstance().getSessionManager();
         List<Map<String, Object>> result = new ArrayList<>();
@@ -128,7 +124,6 @@ public class FederationManager {
         return result;
     }
 
-    /** Closes all S2S sessions in the given direction for a remote domain. */
     public void killSession(String domain, String direction) {
         SessionManager sm = XMPPServer.getInstance().getSessionManager();
         if ("outgoing".equals(direction)) {
@@ -157,15 +152,12 @@ public class FederationManager {
 
     public void setRoomFederated(String roomJid, boolean federated) {
         if (!federated) {
-            // If an active mapping exists for this room, tear it down first:
-            // sends virtual leaves to both sides and notifies the remote server.
-            RoomMapping existing = roomManager.getMappingForLocal(roomJid);
-            if (existing != null) {
+            // Tear down all active mappings before clearing the federation tag.
+            if (!roomManager.getMappingsForLocal(roomJid).isEmpty()) {
                 unmapRooms(roomJid);
             }
         }
         roomManager.setFederated(roomJid, federated);
-        // Advertise the updated room list to all reachable peers
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 sendRoomAdvertisement(peer.getDomain());
@@ -176,14 +168,12 @@ public class FederationManager {
     // ── Room mapping ──────────────────────────────────────────────────────────
 
     /**
-     * Stores a local room mapping and notifies the remote server so both sides
-     * record the same pairing.  Routing to the remote domain uses Openfire's
-     * normal S2S (which will establish a connection if one doesn't exist yet).
+     * Adds one spoke mapping (localJid ↔ remoteJid on remoteDomain) and notifies
+     * the remote server.  Can be called multiple times on the hub to connect
+     * additional spokes to the same local room.
      */
     public void mapRooms(String localJid, String remoteJid, String remoteDomain) {
         roomManager.addMapping(localJid, remoteJid, remoteDomain);
-        // Immediately push our current occupants to the remote room so both sides
-        // see each other's participants without waiting for someone to join/leave.
         pushVirtualPresences(localJid, remoteDomain, remoteJid, false);
         try {
             XMPPServer.getInstance().getPacketRouter()
@@ -193,16 +183,14 @@ public class FederationManager {
         }
     }
 
-    /** Removes a local room mapping and notifies the remote server. */
+    /** Removes ALL spoke mappings for localJid and notifies every remote. */
     public void unmapRooms(String localJid) {
-        RoomMapping m = roomManager.getMappingForLocal(localJid);
-        if (m != null) {
-            // Push virtual leaves for our local occupants BEFORE removing the mapping
-            // so the remote side's clients see our users depart cleanly.
+        List<RoomMapping> mappings = new ArrayList<>(roomManager.getMappingsForLocal(localJid));
+        for (RoomMapping m : mappings) {
             pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         }
         roomManager.removeMapping(localJid);
-        if (m != null) {
+        for (RoomMapping m : mappings) {
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.roomUnmapping(
@@ -213,11 +201,26 @@ public class FederationManager {
         }
     }
 
+    /** Removes only the mapping from localJid toward remoteDomain and notifies that remote. */
+    public void unmapRoom(String localJid, String remoteDomain) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        if (m == null) return;
+        pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
+        roomManager.removeMapping(localJid, remoteDomain);
+        try {
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.roomUnmapping(
+                          m.remoteDomain(), localJid, m.remoteRoomJid()));
+        } catch (Exception e) {
+            Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
+        }
+    }
+
     /**
      * Sends a synthetic join or leave presence for every current occupant of
-     * localRoom toward remoteRoomJid on remoteDomain.  Called when establishing
-     * or tearing down a room mapping so clients on both sides immediately see
-     * the correct occupant state.
+     * localRoom toward remoteRoomJid on remoteDomain.  Used when establishing
+     * or tearing down a specific spoke so both sides immediately see the correct
+     * occupant state.
      *
      * Presences are marked with fed-origin so the receiving server's
      * injectPresence does not trigger a recursive sync.
@@ -250,8 +253,7 @@ public class FederationManager {
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(
                         FederationStanzaFactory.mucForward(
-                            nextHop, remoteDomain, remoteRoomJid, localDomain, p)
-                    );
+                            nextHop, remoteDomain, remoteRoomJid, localDomain, p));
                 } catch (Exception ex) {
                     Log.warn("pushVirtualPresences: failed to push {} for {}: {}",
                              leaving ? "leave" : "join", occupant.getUserAddress(), ex.getMessage());
@@ -266,9 +268,6 @@ public class FederationManager {
 
     // ── Routing propagation ────────────────────────────────────────────────────
 
-    /**
-     * Sends our current routing table to every REACHABLE peer except excludeDomain.
-     */
     public void propagateRoutingToAll(String excludeDomain) {
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (!peer.getDomain().equals(excludeDomain)
@@ -278,11 +277,6 @@ public class FederationManager {
         }
     }
 
-    /**
-     * Relays a room-advertisement (received from originDomain) to all REACHABLE
-     * peers except the one we received it from.  The origin attribute prevents
-     * the next recipient from re-relaying (single-hop flood to avoid loops).
-     */
     public void relayRoomAdvertisement(String excludeDomain, String originDomain, List<FederatedRoom> rooms) {
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (!peer.getDomain().equals(excludeDomain)
@@ -300,12 +294,6 @@ public class FederationManager {
 
     // ── Gossip sending ─────────────────────────────────────────────────────────
 
-    /**
-     * Sends the complete local state to a peer:
-     *   1. peer-announce  (who we are)
-     *   2. routing-update (our routing table)
-     *   3. room-advertisement (our federated rooms)
-     */
     public void sendFullGossip(String toDomain) {
         Log.debug("Sending full gossip to {}", toDomain);
         sendPeerAnnounce(toDomain);

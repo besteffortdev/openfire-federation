@@ -6,6 +6,9 @@ const POLL_MS = 5000;
 let pollTimer  = null;
 let roomFilter = '';
 
+// Tracks which peer sections are manually collapsed across refreshes.
+const collapsedPeers = new Set();
+
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -44,7 +47,7 @@ function refresh() {
             renderPeers(data.peers || []);
             renderS2SSessions(data.s2sSessions || []);
             renderRouting(data.routing || []);
-            renderLocalRooms(localRooms, mappings);
+            renderLocalRooms(localRooms);
             renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
             updateStatusBadge(data.peers || []);
         })
@@ -178,21 +181,23 @@ function bindRoomSearch() {
     });
 }
 
-// ── Local rooms tab ───────────────────────────────────────────────────────────
+// ── Local rooms ───────────────────────────────────────────────────────────────
 
-function renderLocalRooms(rooms, mappings) {
+function renderLocalRooms(rooms) {
     const tbody = document.getElementById('local-rooms-tbody');
     if (rooms.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty">No local MUC rooms found.</td></tr>';
         return;
     }
     tbody.innerHTML = rooms.map(r => {
-        const mapping = mappings[r.jid];
         let mappedCell;
-        if (mapping) {
-            mappedCell = `<span class="badge badge-fed" title="${escHtml(mapping.remoteDomain)}">${escHtml(mapping.remoteRoomJid)}</span>
-                          <button class="btn-small btn-danger" style="margin-left:4px"
-                                  onclick="unmapRoom('${escHtml(r.jid)}')">Unmap</button>`;
+        if (r.mappings && r.mappings.length > 0) {
+            mappedCell = r.mappings.map(m => `
+                <div class="mapping-row">
+                    <span class="badge badge-fed" title="${escHtml(m.remoteDomain)}">${escHtml(m.remoteRoomJid)}</span>
+                    <button class="btn-small btn-danger"
+                            onclick="unmapRoom('${escHtml(r.jid)}','${escHtml(m.remoteDomain)}')">Unmap</button>
+                </div>`).join('');
         } else {
             mappedCell = '<span style="color:#999;font-size:11px">not mapped</span>';
         }
@@ -218,12 +223,19 @@ function setRoomFederated(jid, federated) {
     post({ action: 'set-room', jid, federated: federated.toString() }).then(refresh);
 }
 
-function unmapRoom(localJid) {
-    if (!confirm('Remove mapping for ' + localJid + '?')) return;
-    post({ action: 'unmap-room', localJid }).then(refresh);
+/**
+ * Removes a mapping.  If remoteDomain is provided, only that spoke's mapping
+ * is removed (targeted unmap).  If omitted, all mappings for the room are removed.
+ */
+function unmapRoom(localJid, remoteDomain) {
+    const target = remoteDomain || 'all peers';
+    if (!confirm('Remove mapping between ' + localJid + ' and ' + target + '?')) return;
+    const params = { action: 'unmap-room', localJid };
+    if (remoteDomain) params.remoteDomain = remoteDomain;
+    post(params).then(refresh);
 }
 
-// ── Remote rooms tab ──────────────────────────────────────────────────────────
+// ── Remote rooms (collapsible per peer) ───────────────────────────────────────
 
 function renderRemoteRooms(remoteRooms, localRooms, mappings) {
     const container = document.getElementById('remote-rooms-container');
@@ -233,31 +245,40 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
         return;
     }
 
-    // Reverse index: remoteRoomJid → localJid (so we can show "already mapped" state)
+    // Reverse index: remoteRoomJid → {localJid, remoteDomain}
     const reverseMap = {};
-    for (const [localJid, m] of Object.entries(mappings)) {
-        reverseMap[m.remoteRoomJid] = localJid;
+    for (const [localJid, mList] of Object.entries(mappings)) {
+        for (const m of mList) {
+            reverseMap[m.remoteRoomJid] = { localJid, remoteDomain: m.remoteDomain };
+        }
     }
 
-    // Local federated rooms that are not yet mapped — candidates for new mappings
-    const mappedLocalJids = new Set(Object.keys(mappings));
-    const available = localRooms.filter(r => r.federated && !mappedLocalJids.has(r.jid));
-
     container.innerHTML = peers.map(peer => {
-        const rooms = remoteRooms[peer];
+        const rooms      = remoteRooms[peer];
+        const peerId     = jidToElemId(peer);
+        const isCollapsed = collapsedPeers.has(peer);
+
+        // Federated local rooms not already mapped to this specific peer.
+        const mappedToPeer = new Set(
+            Object.entries(mappings)
+                .filter(([, mList]) => mList.some(m => m.remoteDomain === peer))
+                .map(([localJid]) => localJid)
+        );
+        const available = localRooms.filter(r => r.federated && !mappedToPeer.has(r.jid));
+
         const rows = rooms.length === 0
             ? '<tr><td colspan="3" class="empty">No federated rooms on this server.</td></tr>'
             : rooms.map(r => {
-                const localJid = reverseMap[r.jid];
+                const mapped = reverseMap[r.jid];
                 let mapCell;
-                if (localJid) {
-                    mapCell = `<span class="badge badge-fed">↔ ${escHtml(localJid)}</span>
+                if (mapped) {
+                    mapCell = `<span class="badge badge-fed">↔ ${escHtml(mapped.localJid)}</span>
                                <button class="btn-small btn-danger" style="margin-left:4px"
-                                       onclick="unmapRoom('${escHtml(localJid)}')">Unmap</button>`;
+                                       onclick="unmapRoom('${escHtml(mapped.localJid)}','${escHtml(mapped.remoteDomain)}')">Unmap</button>`;
                 } else if (available.length === 0) {
-                    mapCell = '<span style="color:#999;font-size:11px">no local rooms available<br>(enable a room for federation first)</span>';
+                    mapCell = '<span style="color:#999;font-size:11px">no local rooms available<br>(enable federation on a local room first)</span>';
                 } else {
-                    const selId = jidToElemId(r.jid);
+                    const selId = 'mapsel_' + peerId + '_' + jidToElemId(r.jid);
                     const options = available.map(l =>
                         `<option value="${escHtml(l.jid)}">${escHtml(l.jid)}</option>`
                     ).join('');
@@ -276,15 +297,42 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
                 </tr>`;
             }).join('');
 
+        // Count active mappings for this peer (shown in header when collapsed).
+        const activeMappings = Object.values(mappings)
+            .flat()
+            .filter(m => m.remoteDomain === peer).length;
+        const mapInfo = activeMappings > 0
+            ? `<span class="peer-map-count">${activeMappings} mapped</span>`
+            : '';
+
         return `
-            <div class="peer-rooms">
-                <h4>${escHtml(peer)}</h4>
+        <div class="peer-section">
+            <div class="peer-section-header" onclick="togglePeer('${escHtml(peer)}')">
+                <span class="peer-collapse-icon" id="peer-icon-${peerId}">${isCollapsed ? '▶' : '▼'}</span>
+                <strong>${escHtml(peer)}</strong>
+                <span class="peer-room-count">${rooms.length} room(s)</span>
+                ${mapInfo}
+            </div>
+            <div class="peer-section-body" id="peer-body-${peerId}"
+                 style="${isCollapsed ? 'display:none' : ''}">
                 <table class="fed-table">
                     <thead><tr><th>Remote room</th><th>Description</th><th>Local mapping</th></tr></thead>
                     <tbody>${rows}</tbody>
                 </table>
-            </div>`;
+            </div>
+        </div>`;
     }).join('');
+}
+
+function togglePeer(peer) {
+    const wasCollapsed = collapsedPeers.has(peer);
+    if (wasCollapsed) collapsedPeers.delete(peer); else collapsedPeers.add(peer);
+
+    const peerId = jidToElemId(peer);
+    const body   = document.getElementById('peer-body-' + peerId);
+    const icon   = document.getElementById('peer-icon-' + peerId);
+    if (body) body.style.display = wasCollapsed ? '' : 'none';
+    if (icon) icon.textContent   = wasCollapsed ? '▼' : '▶';
 }
 
 function mapRoom(remoteJid, remoteDomain, selId) {
@@ -296,12 +344,11 @@ function mapRoom(remoteJid, remoteDomain, selId) {
     post({ action: 'map-room', localJid: sel.value, remoteJid, remoteDomain }).then(refresh);
 }
 
-/** Converts a room JID into a safe HTML element id. */
-function jidToElemId(jid) {
-    return 'mapsel_' + jid.replace(/[^a-zA-Z0-9]/g, '_');
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function jidToElemId(jid) {
+    return jid.replace(/[^a-zA-Z0-9]/g, '_');
+}
 
 function post(params) {
     const body = new URLSearchParams(params);

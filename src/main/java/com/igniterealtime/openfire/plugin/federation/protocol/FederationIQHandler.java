@@ -34,8 +34,9 @@ import java.util.Set;
  * room-advertisement → update cached list of remote federatable rooms;
  *                      relay to all other reachable peers (transitive, single hop)
  * room-mapping       → store a bilateral room pairing confirmed by the remote admin
- * room-unmap         → remove a previously confirmed mapping
- * muc-forward        → relay or inject a MUC packet depending on destination
+ * room-unmap         → remove a previously confirmed mapping (sender's spoke only)
+ * muc-forward        → relay or inject a MUC packet; if we are the hub, fan out to
+ *                      all other mapped spokes after injecting locally
  */
 public class FederationIQHandler extends IQHandler {
 
@@ -89,21 +90,16 @@ public class FederationIQHandler extends IQHandler {
         boolean isNew = !manager.getPeerRegistry().contains(fromDomain);
 
         if (isNew) {
-            // Auto-register: a server running the federation plugin connected to us.
             manager.getPeerRegistry().addPeer(fromDomain);
             Log.info("Auto-registered federation peer via incoming connection: {}", fromDomain);
         }
 
-        // IQ arrived over an active S2S session — mark directly reachable now.
         manager.getRoutingTable().addDirectPeer(fromDomain);
         manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.REACHABLE);
 
-        // Reply with our full state so both sides synchronise immediately.
         manager.sendFullGossip(fromDomain);
 
         if (isNew) {
-            // Push routing table to every other reachable peer so they build
-            // multi-hop paths through us to the newly-registered peer.
             manager.propagateRoutingToAll(fromDomain);
         }
     }
@@ -129,7 +125,6 @@ public class FederationIQHandler extends IQHandler {
         Set<String> improved = manager.getRoutingTable().updateFromPeer(fromDomain, received);
         Log.debug("routing-update from {} — {} entries, {} improved", fromDomain, received.size(), improved.size());
 
-        // Triggered update: propagate to all peers (except sender) when routes improve.
         if (!improved.isEmpty()) {
             manager.propagateRoutingToAll(fromDomain);
         }
@@ -138,8 +133,6 @@ public class FederationIQHandler extends IQHandler {
     // ── room-advertisement ────────────────────────────────────────────────────
 
     private void handleRoomAdvertisement(String fromDomain, Element el) {
-        // If 'origin' is absent this is a direct advertisement from the sender;
-        // if present this is an already-relayed advertisement — don't relay again.
         String origin       = el.attributeValue("origin");
         String sourceDomain = (origin != null) ? origin : fromDomain;
 
@@ -155,8 +148,6 @@ public class FederationIQHandler extends IQHandler {
         manager.getRoomManager().updateRemoteRooms(sourceDomain, rooms);
         Log.debug("room-advertisement from {} (source={}) — {} room(s)", fromDomain, sourceDomain, rooms.size());
 
-        // Relay to all other reachable peers so non-direct nodes learn about the rooms.
-        // Only the first recipient relays (origin == null means first hop).
         if (origin == null && !rooms.isEmpty()) {
             manager.relayRoomAdvertisement(fromDomain, fromDomain, rooms);
         }
@@ -166,17 +157,14 @@ public class FederationIQHandler extends IQHandler {
 
     private void handleRoomMapping(String fromDomain, Element el) {
         for (Element map : el.elements("map")) {
-            // "local"  = their local room JID (= our remote room)
-            // "remote" = their remote room JID (= our local room)
+            // "local"  = sender's local room JID (= our remote room)
+            // "remote" = sender's remote room JID (= our local room)
             String theirLocal  = map.attributeValue("local");
             String theirRemote = map.attributeValue("remote");
             if (theirLocal != null && theirRemote != null) {
-                // From our perspective: our local = theirRemote, our remote = theirLocal
                 manager.getRoomManager().addMapping(theirRemote, theirLocal, fromDomain);
                 Log.info("Room mapping received from {}: local={} ↔ remote={}",
                          fromDomain, theirRemote, theirLocal);
-                // Push our current occupants to the sender immediately so both
-                // sides see each other's participants as soon as the mapping is live.
                 manager.pushVirtualPresences(theirRemote, fromDomain, theirLocal, false);
             }
         }
@@ -186,15 +174,14 @@ public class FederationIQHandler extends IQHandler {
 
     private void handleRoomUnmap(String fromDomain, Element el) {
         for (Element map : el.elements("map")) {
-            String theirLocal  = map.attributeValue("local");   // their local  = our remote room
-            String theirRemote = map.attributeValue("remote");  // their remote = our local room
+            String theirLocal  = map.attributeValue("local");   // sender's local  = our remote
+            String theirRemote = map.attributeValue("remote");  // sender's remote = our local
             if (theirRemote != null) {
-                // Before removing the mapping, push virtual leaves for our local
-                // occupants so the initiating server's clients see them depart.
                 if (theirLocal != null) {
                     manager.pushVirtualPresences(theirRemote, fromDomain, theirLocal, true);
                 }
-                manager.getRoomManager().removeMapping(theirRemote);
+                // Only remove the mapping for this specific sender — other spokes stay connected.
+                manager.getRoomManager().removeMapping(theirRemote, fromDomain);
                 Log.info("Room mapping removed by remote {}: local={}", fromDomain, theirRemote);
             }
         }
@@ -203,12 +190,11 @@ public class FederationIQHandler extends IQHandler {
     // ── muc-forward ───────────────────────────────────────────────────────────
 
     private void handleMucForward(String fromDomain, Element el) {
-        String finalDest  = el.attributeValue("destination");
-        String targetRoom = el.attributeValue("targetRoom");
-        String via        = el.attributeValue("via", "");
+        String finalDest   = el.attributeValue("destination");
+        String targetRoom  = el.attributeValue("targetRoom");
+        String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        // Loop guard
         if (via.contains(localDomain)) {
             Log.warn("muc-forward loop detected (via={}), dropping", via);
             return;
@@ -222,7 +208,9 @@ public class FederationIQHandler extends IQHandler {
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             // We are the destination — inject into the local MUC room.
-            injectLocally(payloadEl, via, targetRoom);
+            injectLocally(payloadEl, via, targetRoom, fromDomain);
+            // Hub behavior: fan out to all other mapped spokes.
+            fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via);
         } else {
             // We are an intermediate hop — forward to the next hop.
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
@@ -242,11 +230,11 @@ public class FederationIQHandler extends IQHandler {
         }
     }
 
-    private void injectLocally(Element payloadEl, String via, String targetRoom) {
+    private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain) {
         try {
             switch (payloadEl.getName()) {
                 case "message"  -> injectMessage(payloadEl, targetRoom);
-                case "presence" -> injectPresence(payloadEl, targetRoom);
+                case "presence" -> injectPresence(payloadEl, targetRoom, fromDomain);
                 default -> Log.warn("injectLocally: unexpected payload type '{}'", payloadEl.getName());
             }
         } catch (Exception e) {
@@ -255,11 +243,43 @@ public class FederationIQHandler extends IQHandler {
     }
 
     /**
+     * Relays the incoming payload to every other mapped spoke, skipping the
+     * original sender and any domain already in the via trail.  This is what
+     * makes a hub server automatically bridge messages between all its spokes.
+     */
+    private void fanOutToOtherMappings(String fromDomain, Element payloadEl,
+                                       String targetRoom, String viaTrail) {
+        if (targetRoom == null) return;
+        List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(targetRoom);
+        if (mappings.size() <= 1) return;
+
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String newVia = viaTrail.isEmpty() ? localDomain : viaTrail + "," + localDomain;
+
+        for (RoomMapping m : mappings) {
+            if (m.remoteDomain().equals(fromDomain)) continue;
+            if (newVia.contains(m.remoteDomain())) continue;
+
+            String nextHop = manager.getRoutingTable()
+                                    .findNextHop(m.remoteDomain())
+                                    .orElse(m.remoteDomain());
+            try {
+                Packet embedded = parsePacket(payloadEl);
+                XMPPServer.getInstance().getPacketRouter()
+                          .route(FederationStanzaFactory.mucForward(
+                              nextHop, m.remoteDomain(), m.remoteRoomJid(), newVia, embedded));
+                Log.debug("fanOut: relayed from {} to {} via {}",
+                          fromDomain, m.remoteDomain(), nextHop);
+            } catch (Exception e) {
+                Log.warn("fanOutToOtherMappings: failed to relay to {}: {}",
+                         m.remoteDomain(), e.getMessage());
+            }
+        }
+    }
+
+    /**
      * Delivers a forwarded groupchat message directly to each occupant of the
      * target room, bypassing MUC's non-occupant check entirely.
-     *
-     * The message uses a synthetic from="room@conf/nick" where nick encodes the
-     * original sender's user@domain so clients can attribute the text correctly.
      */
     private void injectMessage(Element msgEl, String targetRoom) {
         MUCRoom room = findLocalRoom(targetRoom);
@@ -287,13 +307,10 @@ public class FederationIQHandler extends IQHandler {
 
     /**
      * Broadcasts a virtual-occupant join/leave presence to each current occupant
-     * of the target room, delivered directly (not through MUC processing).
-     *
-     * This means the remote room never does a real join for the remote user —
-     * no roster or history is sent back to their client. Clients on this server
-     * see the remote user in the occupant list with nick "user@remote-domain".
+     * of the target room.  On join, also triggers a sync of local occupants back
+     * to the sender so the joining user immediately sees who is already in the room.
      */
-    private void injectPresence(Element presEl, String targetRoom) {
+    private void injectPresence(Element presEl, String targetRoom, String fromDomain) {
         MUCRoom room = findLocalRoom(targetRoom);
         if (room == null) {
             Log.warn("injectPresence: room {} not found locally", targetRoom);
@@ -315,7 +332,6 @@ public class FederationIQHandler extends IQHandler {
             delivery.setTo(occupant.getUserAddress());
             if (leaving) delivery.setType(Presence.Type.unavailable);
 
-            // <x xmlns="http://jabber.org/protocol/muc#user"><item .../></x>
             Element x    = delivery.getElement().addElement("x", "http://jabber.org/protocol/muc#user");
             Element item = x.addElement("item");
             item.addAttribute("affiliation", "none");
@@ -328,23 +344,23 @@ public class FederationIQHandler extends IQHandler {
         Log.debug("injectPresence: {} virtual presence to {} occupant(s) in {}",
                   leaving ? "leave" : "join", occupants.size(), targetRoom);
 
-        // On join: push all current local occupants' presences back to the remote server
-        // so that any newly-joined remote user immediately sees the local side's participants.
-        // Skip when this IS already a sync presence (fed-origin set on payload element)
-        // to prevent ping-pong loops between the two servers.
+        // On join: push our local occupants back to the sender so they immediately
+        // see everyone already in the room (fixes join-ordering race).
+        // Skip for sync presences (fed-origin present) to prevent ping-pong loops.
         if (!leaving && presEl.element("fed-origin") == null) {
-            syncLocalOccupantsToRemote(targetRoom, occupants);
+            syncLocalOccupantsToRemote(targetRoom, occupants, fromDomain);
         }
     }
 
     /**
-     * Pushes a synthetic join presence for every occupant of localRoom to the
-     * remote mapped room.  Called after delivering a remote-side join so that
-     * the joining user's client on the remote server also learns about the
-     * local participants (fixes the join-ordering race).
+     * Pushes a synthetic join presence for every occupant of localRoom back to
+     * the spoke identified by fromDomain.  Only targets the single mapping for
+     * that domain so we don't double-push to other spokes.
      */
-    private void syncLocalOccupantsToRemote(String localRoom, Collection<MUCOccupant> occupants) {
-        RoomMapping mapping = manager.getRoomManager().getMappingForLocal(localRoom);
+    private void syncLocalOccupantsToRemote(String localRoom,
+                                            Collection<MUCOccupant> occupants,
+                                            String fromDomain) {
+        RoomMapping mapping = manager.getRoomManager().getMappingForLocal(localRoom, fromDomain);
         if (mapping == null) return;
 
         String remoteDomain  = mapping.remoteDomain();
@@ -355,14 +371,11 @@ public class FederationIQHandler extends IQHandler {
         for (MUCOccupant occupant : occupants) {
             Presence sync = new Presence();
             sync.setFrom(occupant.getUserAddress());
-            // Mark as forwarded so the receiving server's injectPresence skips
-            // triggering another sync (loop-break condition checked via element).
             FederationStanzaFactory.markAsForwarded(sync);
             try {
                 XMPPServer.getInstance().getPacketRouter().route(
                     FederationStanzaFactory.mucForward(
-                        nextHop, remoteDomain, remoteRoomJid, localDomain, sync)
-                );
+                        nextHop, remoteDomain, remoteRoomJid, localDomain, sync));
             } catch (Exception e) {
                 Log.warn("syncLocalOccupantsToRemote: failed to push {}: {}",
                          occupant.getUserAddress(), e.getMessage());
