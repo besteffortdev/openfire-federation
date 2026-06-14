@@ -52,6 +52,13 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    public static IQ peerWithdraw(String toDomain) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        fed.addElement("peer-withdraw");
+        return iq;
+    }
+
     // ── routing-update ─────────────────────────────────────────────────────────
 
     public static IQ routingUpdate(String toDomain, Collection<RouteEntry> table) {

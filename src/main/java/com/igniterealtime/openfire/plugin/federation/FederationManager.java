@@ -140,6 +140,16 @@ public class FederationManager {
     }
 
     public boolean removePeer(String domain) {
+        peerRegistry.getPeer(domain).ifPresent(peer -> {
+            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                try {
+                    XMPPServer.getInstance().getPacketRouter()
+                              .route(FederationStanzaFactory.peerWithdraw(domain));
+                } catch (Exception e) {
+                    Log.warn("Failed to send peer-withdraw to {}: {}", domain, e.getMessage());
+                }
+            }
+        });
         boolean removed = peerRegistry.removePeer(domain);
         if (removed) {
             routingTable.removePeer(domain);

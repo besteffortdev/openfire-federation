@@ -58,7 +58,13 @@ public class FederationIQHandler extends IQHandler {
 
     @Override
     public IQ handleIQ(IQ packet) throws UnauthorizedException {
-        if (packet.getType() != IQ.Type.set) {
+        IQ.Type type = packet.getType();
+        // Error/result bounce-backs must not be turned into result IQs — drop silently.
+        if (type == IQ.Type.error || type == IQ.Type.result) {
+            Log.debug("Ignoring IQ {} from {}", type, packet.getFrom());
+            return null;
+        }
+        if (type != IQ.Type.set) {
             return IQ.createResultIQ(packet);
         }
 
@@ -71,6 +77,7 @@ public class FederationIQHandler extends IQHandler {
 
         switch (child.getName()) {
             case "peer-announce"       -> handlePeerAnnounce(fromDomain, child);
+            case "peer-withdraw"       -> handlePeerWithdraw(fromDomain);
             case "routing-update"      -> handleRoutingUpdate(fromDomain, child);
             case "room-advertisement"  -> handleRoomAdvertisement(fromDomain, child);
             case "room-mapping"        -> handleRoomMapping(fromDomain, child);
@@ -102,6 +109,15 @@ public class FederationIQHandler extends IQHandler {
         if (isNew) {
             manager.propagateRoutingToAll(fromDomain);
         }
+    }
+
+    // ── peer-withdraw ──────────────────────────────────────────────────────────
+
+    private void handlePeerWithdraw(String fromDomain) {
+        Log.info("peer-withdraw from {} — clearing cached state", fromDomain);
+        manager.getRoomManager().clearRemoteRooms(fromDomain);
+        manager.getRoutingTable().removePeer(fromDomain);
+        manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.UNREACHABLE);
     }
 
     // ── routing-update ─────────────────────────────────────────────────────────
