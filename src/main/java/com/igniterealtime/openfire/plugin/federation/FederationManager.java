@@ -146,6 +146,16 @@ public class FederationManager {
     }
 
     public boolean removePeer(String domain) {
+        // Unmap every local room that has a mapping to this domain BEFORE killing
+        // the session.  This delivers room-unmap IQs and virtual leave presences
+        // while S2S is still open, AND clears the local mapping so the interceptor
+        // won't try to re-open S2S after the session is gone.
+        for (String localJid : new ArrayList<>(roomManager.getLocalMappings().keySet())) {
+            if (roomManager.getMappingForLocal(localJid, domain) != null) {
+                unmapRoom(localJid, domain);
+            }
+        }
+
         peerRegistry.getPeer(domain).ifPresent(peer -> {
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 try {

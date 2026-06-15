@@ -126,6 +126,12 @@ public class FederationIQHandler extends IQHandler {
 
     private void handlePeerWithdraw(String fromDomain) {
         Log.info("peer-withdraw from {} — marking WITHDRAWN and clearing cached state", fromDomain);
+        // The withdrawing peer should have sent room-unmap stanzas before this,
+        // but defensively remove any remaining local mappings to that domain so
+        // we stop fanning out traffic toward it (which would re-open S2S).
+        for (String localJid : new ArrayList<>(manager.getRoomManager().getLocalMappings().keySet())) {
+            manager.getRoomManager().removeMapping(localJid, fromDomain);
+        }
         manager.getRoomManager().clearRemoteRooms(fromDomain);
         manager.getRoutingTable().removePeer(fromDomain);
         manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.WITHDRAWN);
