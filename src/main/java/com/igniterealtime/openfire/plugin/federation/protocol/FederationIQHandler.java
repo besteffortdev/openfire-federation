@@ -199,16 +199,46 @@ public class FederationIQHandler extends IQHandler {
     // ── room-mapping ──────────────────────────────────────────────────────────
 
     private void handleRoomMapping(String fromDomain, Element el) {
+        String destination = el.attributeValue("destination");
+        String origin      = el.attributeValue("origin");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        // Relay if we are not the final destination (multi-hop topology).
+        if (destination != null && !localDomain.equals(destination)) {
+            manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
+                nextHop -> {
+                    for (Element map : el.elements("map")) {
+                        String theirLocal  = map.attributeValue("local");
+                        String theirRemote = map.attributeValue("remote");
+                        if (theirLocal != null && theirRemote != null) {
+                            try {
+                                XMPPServer.getInstance().getPacketRouter()
+                                          .route(FederationStanzaFactory.roomMapping(
+                                              nextHop, destination, origin, theirLocal, theirRemote));
+                            } catch (Exception e) {
+                                Log.warn("Could not relay room-mapping toward {}: {}", destination, e.getMessage());
+                            }
+                        }
+                    }
+                },
+                () -> Log.warn("room-mapping: no route to {}, dropping", destination)
+            );
+            return;
+        }
+
+        // We are the destination — store the mapping.
+        // Use origin attribute when present so multi-hop senders are correctly identified.
+        String actualOrigin = (origin != null) ? origin : fromDomain;
         for (Element map : el.elements("map")) {
-            // "local"  = sender's local room JID (= our remote room)
-            // "remote" = sender's remote room JID (= our local room)
+            // "local"  = originator's local room JID (= our remote room)
+            // "remote" = originator's remote room JID (= our local room)
             String theirLocal  = map.attributeValue("local");
             String theirRemote = map.attributeValue("remote");
             if (theirLocal != null && theirRemote != null) {
-                manager.getRoomManager().addMapping(theirRemote, theirLocal, fromDomain);
+                manager.getRoomManager().addMapping(theirRemote, theirLocal, actualOrigin);
                 Log.info("Room mapping received from {}: local={} ↔ remote={}",
-                         fromDomain, theirRemote, theirLocal);
-                manager.pushVirtualPresences(theirRemote, fromDomain, theirLocal, false);
+                         actualOrigin, theirRemote, theirLocal);
+                manager.pushVirtualPresences(theirRemote, actualOrigin, theirLocal, false);
             }
         }
     }
@@ -216,16 +246,44 @@ public class FederationIQHandler extends IQHandler {
     // ── room-unmap ────────────────────────────────────────────────────────────
 
     private void handleRoomUnmap(String fromDomain, Element el) {
+        String destination = el.attributeValue("destination");
+        String origin      = el.attributeValue("origin");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        // Relay if we are not the final destination (multi-hop topology).
+        if (destination != null && !localDomain.equals(destination)) {
+            manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
+                nextHop -> {
+                    for (Element map : el.elements("map")) {
+                        String theirLocal  = map.attributeValue("local");
+                        String theirRemote = map.attributeValue("remote");
+                        if (theirLocal != null && theirRemote != null) {
+                            try {
+                                XMPPServer.getInstance().getPacketRouter()
+                                          .route(FederationStanzaFactory.roomUnmapping(
+                                              nextHop, destination, origin, theirLocal, theirRemote));
+                            } catch (Exception e) {
+                                Log.warn("Could not relay room-unmap toward {}: {}", destination, e.getMessage());
+                            }
+                        }
+                    }
+                },
+                () -> Log.warn("room-unmap: no route to {}, dropping", destination)
+            );
+            return;
+        }
+
+        String actualOrigin = (origin != null) ? origin : fromDomain;
         for (Element map : el.elements("map")) {
-            String theirLocal  = map.attributeValue("local");   // sender's local  = our remote
-            String theirRemote = map.attributeValue("remote");  // sender's remote = our local
+            String theirLocal  = map.attributeValue("local");   // originator's local  = our remote
+            String theirRemote = map.attributeValue("remote");  // originator's remote = our local
             if (theirRemote != null) {
                 if (theirLocal != null) {
-                    manager.pushVirtualPresences(theirRemote, fromDomain, theirLocal, true);
+                    manager.pushVirtualPresences(theirRemote, actualOrigin, theirLocal, true);
                 }
-                // Only remove the mapping for this specific sender — other spokes stay connected.
-                manager.getRoomManager().removeMapping(theirRemote, fromDomain);
-                Log.info("Room mapping removed by remote {}: local={}", fromDomain, theirRemote);
+                // Only remove the mapping for this specific originator — other spokes stay connected.
+                manager.getRoomManager().removeMapping(theirRemote, actualOrigin);
+                Log.info("Room mapping removed by remote {}: local={}", actualOrigin, theirRemote);
             }
         }
     }

@@ -114,16 +114,24 @@ public final class FederationStanzaFactory {
 
     /**
      * Notifies a remote server that we are pairing our local room with one of
-     * their rooms.  The remote side interprets:
-     *   local  → the JID of the room on THIS server (sender's local)
-     *   remote → the JID of the room on THAT server (receiver's local)
+     * their rooms.  The IQ is addressed to {@code nextHop} (our direct S2S
+     * neighbour); {@code destination} carries the final target domain and
+     * {@code originDomain} carries the initiating server so intermediate hops
+     * can relay without losing the original sender identity.
      *
-     * So the receiver stores: localRoomJid=remote, remoteRoomJid=local.
+     * The receiver interprets:
+     *   local  → the JID of the room on the originating server
+     *   remote → the JID of the room on the destination server (receiver's local)
+     *
+     * So the destination stores: localRoomJid=remote, remoteRoomJid=local, remoteDomain=origin.
      */
-    public static IQ roomMapping(String toDomain, String localJid, String remoteJid) {
-        IQ iq = base(toDomain);
+    public static IQ roomMapping(String nextHop, String destination, String originDomain,
+                                 String localJid, String remoteJid) {
+        IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
         Element mapping = fed.addElement("room-mapping");
+        mapping.addAttribute("destination", destination);
+        mapping.addAttribute("origin",      originDomain);
         Element map = mapping.addElement("map");
         map.addAttribute("local",  localJid);
         map.addAttribute("remote", remoteJid);
@@ -132,12 +140,15 @@ public final class FederationStanzaFactory {
 
     /**
      * Notifies a remote server that a previously confirmed mapping has been
-     * dissolved by the local admin.
+     * dissolved by the local admin.  Routed hop-by-hop like room-mapping.
      */
-    public static IQ roomUnmapping(String toDomain, String localJid, String remoteJid) {
-        IQ iq = base(toDomain);
+    public static IQ roomUnmapping(String nextHop, String destination, String originDomain,
+                                   String localJid, String remoteJid) {
+        IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
         Element mapping = fed.addElement("room-unmap");
+        mapping.addAttribute("destination", destination);
+        mapping.addAttribute("origin",      originDomain);
         Element map = mapping.addElement("map");
         map.addAttribute("local",  localJid);
         map.addAttribute("remote", remoteJid);

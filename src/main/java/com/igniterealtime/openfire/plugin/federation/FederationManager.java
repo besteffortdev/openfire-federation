@@ -194,9 +194,12 @@ public class FederationManager {
     public void mapRooms(String localJid, String remoteJid, String remoteDomain) {
         roomManager.addMapping(localJid, remoteJid, remoteDomain);
         pushVirtualPresences(localJid, remoteDomain, remoteJid, false);
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
         try {
             XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.roomMapping(remoteDomain, localJid, remoteJid));
+                      .route(FederationStanzaFactory.roomMapping(
+                          nextHop, remoteDomain, localDomain, localJid, remoteJid));
         } catch (Exception e) {
             Log.warn("Failed to send room-mapping to {}: {}", remoteDomain, e.getMessage());
         }
@@ -209,11 +212,13 @@ public class FederationManager {
             pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         }
         roomManager.removeMapping(localJid);
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         for (RoomMapping m : mappings) {
+            String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.roomUnmapping(
-                              m.remoteDomain(), localJid, m.remoteRoomJid()));
+                              nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid()));
             } catch (Exception e) {
                 Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
             }
@@ -226,10 +231,12 @@ public class FederationManager {
         if (m == null) return;
         pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         roomManager.removeMapping(localJid, remoteDomain);
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
         try {
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.roomUnmapping(
-                          m.remoteDomain(), localJid, m.remoteRoomJid()));
+                          nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid()));
         } catch (Exception e) {
             Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
         }
