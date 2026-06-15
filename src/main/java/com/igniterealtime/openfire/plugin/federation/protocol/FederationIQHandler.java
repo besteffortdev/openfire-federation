@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Handles all incoming federation IQ stanzas (namespace urn:xmpp:federation:1).
@@ -454,36 +455,53 @@ public class FederationIQHandler extends IQHandler {
     }
 
     /**
-     * Pushes a synthetic join presence for every occupant of localRoom back to
-     * the spoke identified by fromDomain.  Only targets the single mapping for
-     * that domain so we don't double-push to other spokes.
+     * Pushes a synthetic join presence for every occupant of localRoom back toward
+     * the federation mapping that corresponds to {@code fromDomain}.
+     *
+     * In the direct-connection case {@code fromDomain} is the hub or spoke we
+     * have a room mapping with, so we push only to that mapping.
+     *
+     * In the multi-hop fan-out case {@code fromDomain} is an intermediate relay
+     * (e.g. server6 for a spoke on server7 whose mapping targets server2).  The
+     * direct lookup will return nothing, so we fall back to syncing through ALL
+     * our mappings.  This ensures occupants from multi-hop spokes become visible
+     * to late-joining clients instead of only being visible after the remote user
+     * re-joins.
      */
     private void syncLocalOccupantsToRemote(String localRoom,
                                             Collection<MUCOccupant> occupants,
                                             String fromDomain) {
-        RoomMapping mapping = manager.getRoomManager().getMappingForLocal(localRoom, fromDomain);
-        if (mapping == null) return;
+        List<RoomMapping> allMappings = manager.getRoomManager().getMappingsForLocal(localRoom);
+        if (allMappings.isEmpty()) return;
 
-        String remoteDomain  = mapping.remoteDomain();
-        String remoteRoomJid = mapping.remoteRoomJid();
-        String localDomain   = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = manager.getRoutingTable().findNextHop(remoteDomain).orElse(remoteDomain);
+        List<RoomMapping> targets = allMappings.stream()
+            .filter(m -> m.remoteDomain().equals(fromDomain))
+            .collect(Collectors.toList());
+        if (targets.isEmpty()) targets = allMappings;   // multi-hop relay: sync through all hubs
 
-        for (MUCOccupant occupant : occupants) {
-            Presence sync = new Presence();
-            sync.setFrom(occupant.getUserAddress());
-            FederationStanzaFactory.markAsForwarded(sync);
-            try {
-                XMPPServer.getInstance().getPacketRouter().route(
-                    FederationStanzaFactory.mucForward(
-                        nextHop, remoteDomain, remoteRoomJid, localDomain, sync));
-            } catch (Exception e) {
-                Log.warn("syncLocalOccupantsToRemote: failed to push {}: {}",
-                         occupant.getUserAddress(), e.getMessage());
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        for (RoomMapping mapping : targets) {
+            String remoteDomain  = mapping.remoteDomain();
+            String remoteRoomJid = mapping.remoteRoomJid();
+            String nextHop = manager.getRoutingTable().findNextHop(remoteDomain).orElse(remoteDomain);
+
+            for (MUCOccupant occupant : occupants) {
+                Presence sync = new Presence();
+                sync.setFrom(occupant.getUserAddress());
+                FederationStanzaFactory.markAsForwarded(sync);
+                try {
+                    XMPPServer.getInstance().getPacketRouter().route(
+                        FederationStanzaFactory.mucForward(
+                            nextHop, remoteDomain, remoteRoomJid, localDomain, sync));
+                } catch (Exception e) {
+                    Log.warn("syncLocalOccupantsToRemote: failed to push {}: {}",
+                             occupant.getUserAddress(), e.getMessage());
+                }
             }
+            Log.debug("syncLocalOccupantsToRemote: pushed {} occupant(s) from {} to {}",
+                      occupants.size(), localRoom, remoteRoomJid);
         }
-        Log.debug("syncLocalOccupantsToRemote: pushed {} occupant(s) from {} to {}",
-                  occupants.size(), localRoom, remoteRoomJid);
     }
 
     /** Derives a stable MUC nick from a full JID: "user@domain" (no resource). */
