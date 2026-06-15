@@ -209,6 +209,41 @@
                 </tbody>
             </table>
         </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Connection settings</div>
+            <div class="section-box-body">
+                <table class="settings-table">
+                    <tr>
+                        <td>
+                            <label for="keepalive-input" style="font-weight:600;font-size:13px">
+                                S2S keepalive interval
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                Sends a lightweight ping to each reachable peer at this interval to
+                                prevent Openfire from closing idle S2S sessions. Must be less than
+                                Openfire's <code style="font-size:11px">xmpp.server.idle</code> setting
+                                (milliseconds ÷ 1000 × 0.8). Minimum: 30 s. Default: 240 s — safe
+                                for Openfire's built-in 6-minute idle timeout.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="number" id="keepalive-input"
+                                   min="30" max="3600" step="10"
+                                   style="width:90px;padding:5px 8px;border:1px solid #ced4da;
+                                          border-radius:4px;font-size:13px;text-align:right">
+                            <span style="color:#6c757d;font-size:13px;margin-left:4px">s</span>
+                            <button class="btn btn-primary" style="margin-left:10px"
+                                    onclick="saveKeepalive()">Save</button>
+                            <span id="keepalive-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
     </div>
 
     <!-- ── Routing table panel ──────────────────────────────────────────────── -->

@@ -50,6 +50,7 @@ function refresh() {
             renderLocalRooms(localRooms);
             renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
             updateStatusBadge(data.peers || []);
+            updateKeepaliveInput(data.keepaliveSeconds);
         })
         .catch(err => console.error('Federation API error:', err));
 }
@@ -159,6 +160,36 @@ function renderS2SSessions(sessions) {
             <td style="white-space:nowrap">${killBtns}</td>
         </tr>`;
     }).join('');
+}
+
+// ── Connection settings ───────────────────────────────────────────────────────
+
+function updateKeepaliveInput(seconds) {
+    const inp = document.getElementById('keepalive-input');
+    // Don't overwrite while the user is actively editing the field.
+    if (inp && document.activeElement !== inp) {
+        inp.value = seconds != null ? seconds : 240;
+    }
+}
+
+function saveKeepalive() {
+    const inp = document.getElementById('keepalive-input');
+    const seconds = parseInt(inp ? inp.value : '', 10);
+    if (isNaN(seconds) || seconds < 30) {
+        alert('Keepalive interval must be at least 30 seconds.');
+        return;
+    }
+    post({ action: 'set-keepalive', seconds })
+        .then(result => {
+            if (result && result.ok) {
+                const badge = document.getElementById('keepalive-saved');
+                if (badge) {
+                    badge.style.display = 'inline';
+                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
+                }
+                refresh();
+            }
+        });
 }
 
 function killSession(domain, direction) {

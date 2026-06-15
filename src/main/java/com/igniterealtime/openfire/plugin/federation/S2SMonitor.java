@@ -5,11 +5,13 @@ import org.jivesoftware.openfire.SessionManager;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.RoutingTable;
 import org.jivesoftware.openfire.session.DomainPair;
+import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -23,16 +25,18 @@ import java.util.concurrent.TimeUnit;
 public class S2SMonitor {
 
     private static final Logger Log = LoggerFactory.getLogger(S2SMonitor.class);
-    private static final int POLL_SECONDS      = 30;
-    // Openfire's default S2S idle timeout is 6 min; ping every 4 min to stay well inside it.
-    private static final int KEEPALIVE_SECONDS = 240;
+    private static final int    POLL_SECONDS         = 30;
+    static final         String KEEPALIVE_JIVE_KEY   = "plugin.federation.keepaliveSeconds";
+    static final         int    KEEPALIVE_DEFAULT     = 240;
+    static final         int    KEEPALIVE_MINIMUM     = 30;
 
-    private final PeerRegistry        peerRegistry;
+    private final PeerRegistry           peerRegistry;
     private final FederationRoutingTable routingTable;
     private final FederatedRoomManager   roomManager;
     private final FederationManager      federationManager;
 
     private ScheduledExecutorService scheduler;
+    private ScheduledFuture<?>       keepaliveFuture;
 
     public S2SMonitor(PeerRegistry peerRegistry,
                       FederationRoutingTable routingTable,
@@ -50,12 +54,13 @@ public class S2SMonitor {
             t.setDaemon(true);
             return t;
         });
-        // First poll after 5 s, then every POLL_SECONDS
+        // First poll after 5 s, then every POLL_SECONDS.
         scheduler.scheduleAtFixedRate(this::poll, 5, POLL_SECONDS, TimeUnit.SECONDS);
         // Keepalive pings prevent idle S2S sessions from timing out between real messages.
-        scheduler.scheduleAtFixedRate(this::sendKeepalives, KEEPALIVE_SECONDS, KEEPALIVE_SECONDS, TimeUnit.SECONDS);
-        Log.info("S2SMonitor started (polling every {}s, keepalive every {}s)",
-                 POLL_SECONDS, KEEPALIVE_SECONDS);
+        int keepaliveSec = getKeepaliveSeconds();
+        keepaliveFuture = scheduler.scheduleAtFixedRate(
+                this::sendKeepalives, keepaliveSec, keepaliveSec, TimeUnit.SECONDS);
+        Log.info("S2SMonitor started (poll={}s, keepalive={}s)", POLL_SECONDS, keepaliveSec);
     }
 
     public void stop() {
@@ -64,9 +69,25 @@ public class S2SMonitor {
         }
     }
 
+    public int getKeepaliveSeconds() {
+        return JiveGlobals.getIntProperty(KEEPALIVE_JIVE_KEY, KEEPALIVE_DEFAULT);
+    }
+
+    /** Persists the new interval and reschedules the keepalive task immediately. */
+    public void setKeepaliveSeconds(int seconds) {
+        if (seconds < KEEPALIVE_MINIMUM) seconds = KEEPALIVE_MINIMUM;
+        JiveGlobals.setProperty(KEEPALIVE_JIVE_KEY, String.valueOf(seconds));
+        if (keepaliveFuture != null) {
+            keepaliveFuture.cancel(false);
+        }
+        keepaliveFuture = scheduler.scheduleAtFixedRate(
+                this::sendKeepalives, seconds, seconds, TimeUnit.SECONDS);
+        Log.info("S2S keepalive interval updated to {}s", seconds);
+    }
+
     private void poll() {
-        RoutingTable  openfireRoutes = XMPPServer.getInstance().getRoutingTable();
-        SessionManager sm            = XMPPServer.getInstance().getSessionManager();
+        RoutingTable   openfireRoutes = XMPPServer.getInstance().getRoutingTable();
+        SessionManager sm             = XMPPServer.getInstance().getSessionManager();
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         for (PeerServer peer : peerRegistry.getPeers()) {
@@ -113,7 +134,7 @@ public class S2SMonitor {
     private void onPeerUp(String domain) {
         Log.info("Federation peer UP: {}", domain);
         routingTable.addDirectPeer(domain);
-        // Send our full state (peer-announce + routing table + room list) to the new peer
+        // Send our full state (peer-announce + routing table + room list) to the new peer.
         federationManager.sendFullGossip(domain);
     }
 

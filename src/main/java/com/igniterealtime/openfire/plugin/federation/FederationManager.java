@@ -385,6 +385,9 @@ public class FederationManager {
 
     // ── Accessors for subsystems ───────────────────────────────────────────────
 
+    public int  getKeepaliveSeconds()        { return s2sMonitor.getKeepaliveSeconds(); }
+    public void setKeepaliveSeconds(int sec) { s2sMonitor.setKeepaliveSeconds(sec); }
+
     public PeerRegistry           getPeerRegistry()  { return peerRegistry;  }
     public FederationRoutingTable getRoutingTable()  { return routingTable;  }
     public FederatedRoomManager   getRoomManager()   { return roomManager;   }

@@ -154,7 +154,10 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"fedPeer\":").append(sess.get("fedPeer"))
               .append("}");
         }
-        sb.append("]");
+        sb.append("],");
+
+        // ── settings ──────────────────────────────────────────────────────────
+        sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds());
 
         sb.append("}");
         out.print(sb.toString());
@@ -259,6 +262,21 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 mgr.killSession(domain.strip().toLowerCase(), direction.strip().toLowerCase());
                 out.print("{\"ok\":true}");
+                return;
+            }
+            case "set-keepalive": {
+                String secParam = req.getParameter("seconds");
+                if (secParam == null || secParam.isBlank()) {
+                    out.print("{\"error\":\"seconds required\"}");
+                    return;
+                }
+                try {
+                    int seconds = Integer.parseInt(secParam.strip());
+                    mgr.setKeepaliveSeconds(seconds);
+                    out.print("{\"ok\":true,\"keepaliveSeconds\":" + mgr.getKeepaliveSeconds() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"seconds must be an integer\"}");
+                }
                 return;
             }
             default:
