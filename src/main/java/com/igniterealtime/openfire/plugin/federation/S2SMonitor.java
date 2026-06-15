@@ -23,7 +23,9 @@ import java.util.concurrent.TimeUnit;
 public class S2SMonitor {
 
     private static final Logger Log = LoggerFactory.getLogger(S2SMonitor.class);
-    private static final int POLL_SECONDS = 30;
+    private static final int POLL_SECONDS      = 30;
+    // Openfire's default S2S idle timeout is 6 min; ping every 4 min to stay well inside it.
+    private static final int KEEPALIVE_SECONDS = 240;
 
     private final PeerRegistry        peerRegistry;
     private final FederationRoutingTable routingTable;
@@ -50,7 +52,10 @@ public class S2SMonitor {
         });
         // First poll after 5 s, then every POLL_SECONDS
         scheduler.scheduleAtFixedRate(this::poll, 5, POLL_SECONDS, TimeUnit.SECONDS);
-        Log.info("S2SMonitor started (polling every {}s)", POLL_SECONDS);
+        // Keepalive pings prevent idle S2S sessions from timing out between real messages.
+        scheduler.scheduleAtFixedRate(this::sendKeepalives, KEEPALIVE_SECONDS, KEEPALIVE_SECONDS, TimeUnit.SECONDS);
+        Log.info("S2SMonitor started (polling every {}s, keepalive every {}s)",
+                 POLL_SECONDS, KEEPALIVE_SECONDS);
     }
 
     public void stop() {
@@ -94,6 +99,15 @@ public class S2SMonitor {
                 onPeerDown(domain);
             }
         }
+    }
+
+    private void sendKeepalives() {
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                federationManager.sendPeerAnnounce(peer.getDomain());
+            }
+        }
+        Log.debug("S2S keepalive pings sent");
     }
 
     private void onPeerUp(String domain) {
