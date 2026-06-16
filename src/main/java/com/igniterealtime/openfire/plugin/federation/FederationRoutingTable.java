@@ -44,8 +44,9 @@ public class FederationRoutingTable {
      */
     public Set<String> updateFromPeer(String fromPeer, List<RouteEntry> peerTable) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        Set<String> improved = new HashSet<>();
+        Set<String> changed = new HashSet<>();
         Set<String> learnedSet = routesLearnedFrom.computeIfAbsent(fromPeer, k -> ConcurrentHashMap.newKeySet());
+        Set<String> inUpdate = new HashSet<>();
 
         for (RouteEntry remote : peerTable) {
             if (remote.hops() >= INFINITY) continue;
@@ -54,18 +55,32 @@ public class FederationRoutingTable {
             if (candidate >= INFINITY) continue;
 
             String dest = remote.destination();
-            // Never add a route to ourselves — we don't need to route to our own domain.
             if (dest.equals(localDomain)) continue;
+            inUpdate.add(dest);
             RouteEntry current = table.get(dest);
 
             if (current == null || candidate < current.hops()) {
                 table.put(dest, new RouteEntry(dest, fromPeer, candidate));
                 learnedSet.add(dest);
-                improved.add(dest);
+                changed.add(dest);
                 Log.debug("Routing: {} via {} in {} hop(s)", dest, fromPeer, candidate);
             }
         }
-        return improved;
+
+        // Withdraw routes previously learned from this peer that are no longer in their table.
+        Set<String> stale = new HashSet<>(learnedSet);
+        stale.removeAll(inUpdate);
+        for (String dest : stale) {
+            RouteEntry entry = table.get(dest);
+            if (entry != null && entry.nextHop().equals(fromPeer)) {
+                table.remove(dest);
+                changed.add(dest);
+                Log.info("Routing: withdrew {} (no longer advertised by {})", dest, fromPeer);
+            }
+            learnedSet.remove(dest);
+        }
+
+        return changed;
     }
 
     /**

@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -223,7 +224,10 @@ public class S2SMonitor {
 
     private void onPeerDown(String domain) {
         Log.info("Federation peer DOWN: {}", domain);
-        routingTable.removePeer(domain);
+        Set<String> removed = routingTable.removePeer(domain);
         roomManager.clearRemoteRooms(domain);
+        if (!removed.isEmpty()) {
+            federationManager.propagateRoutingToAll(domain);
+        }
     }
 }
