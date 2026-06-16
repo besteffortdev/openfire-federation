@@ -136,12 +136,13 @@ public class S2SMonitor {
         try {
             int count = 0;
             for (PeerServer peer : peerRegistry.getPeers()) {
-                if (peer.getStatus() == PeerServer.Status.REACHABLE) {
-                    federationManager.sendPeerAnnounce(peer.getDomain());
-                    count++;
-                }
+                if (peer.getStatus() == PeerServer.Status.WITHDRAWN) continue;
+                // Ping REACHABLE peers to keep the session alive, and UNREACHABLE peers
+                // to trigger Openfire to attempt S2S reconnection automatically.
+                federationManager.sendPeerAnnounce(peer.getDomain());
+                count++;
             }
-            Log.info("S2S keepalive pings sent to {} peer(s)", count);
+            Log.info("S2S keepalive/reconnect pings sent to {} peer(s)", count);
         } catch (Exception e) {
             // Same ScheduledExecutorService contract — never let exceptions escape.
             Log.error("S2S keepalive task threw unexpectedly — task continues", e);
