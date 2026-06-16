@@ -127,6 +127,11 @@
         }
         .section-box-body { padding: 16px; }
 
+        /* ── Reconnect countdown ──────────────────────────────────── */
+        .retry-countdown {
+            color: #6c757d; font-size: 11px; font-style: italic; margin-left: 6px;
+        }
+
         /* ── Direction badges ─────────────────────────────────────── */
         .badge {
             display: inline-block; padding: 2px 8px; border-radius: 10px;
@@ -244,12 +249,12 @@
                     <tr>
                         <td style="padding-top:16px">
                             <label for="reconnect-input" style="font-weight:600;font-size:13px">
-                                Reconnect retry interval
+                                Max reconnect interval (back-off cap)
                             </label>
                             <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
-                                How often to attempt reconnection to UNREACHABLE peers. Each attempt
-                                triggers Openfire to create a new S2S session; once successful the peer
-                                returns to REACHABLE and the keepalive interval takes over.
+                                Maximum interval between reconnection attempts for UNREACHABLE peers.
+                                Retries use exponential back-off starting at 5 s: 5 s → 10 s → 20 s → …
+                                capped at this value. On reconnect the back-off resets automatically.
                                 Minimum: 5 s. Default: 30 s.
                             </div>
                         </td>

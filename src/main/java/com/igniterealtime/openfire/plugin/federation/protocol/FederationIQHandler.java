@@ -433,7 +433,7 @@ public class FederationIQHandler extends IQHandler {
             copy.addAttribute("to",   occupant.getUserAddress().toString());
             Message delivery = new Message(copy);
             FederationStanzaFactory.markAsForwarded(delivery);
-            XMPPServer.getInstance().getPacketRouter().route(delivery);
+            FederationStanzaFactory.directDeliver(delivery);
         }
         Log.debug("injectMessage: delivered to {} occupant(s) in {}", occupants.size(), targetRoom);
     }
@@ -481,7 +481,7 @@ public class FederationIQHandler extends IQHandler {
             if (originalFrom != null) item.addAttribute("jid", originalFrom);
 
             FederationStanzaFactory.markAsForwarded(delivery);
-            XMPPServer.getInstance().getPacketRouter().route(delivery);
+            FederationStanzaFactory.directDeliver(delivery);
         }
         Log.debug("injectPresence: {} virtual presence to {} occupant(s) in {}",
                   leaving ? "leave" : "join", occupants.size(), targetRoom);

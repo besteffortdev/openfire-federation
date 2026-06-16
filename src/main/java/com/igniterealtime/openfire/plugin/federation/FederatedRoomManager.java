@@ -36,6 +36,12 @@ public class FederatedRoomManager {
     private static final String PROP_MAP_REMOTE  = "federation.rooms.mapping.%s.%d.remote";
     private static final String PROP_MAP_DOMAIN  = "federation.rooms.mapping.%s.%d.domain";
 
+    // Virtual occupant persistence — survives plugin reloads so eviction on peer-down
+    // can still send leave presences even if no join events occurred after the reload.
+    private static final String PROP_VOCC_ROOMS   = "federation.vocc.rooms.index";
+    private static final String PROP_VOCC_DOMAINS = "federation.vocc.%s.domains";
+    private static final String PROP_VOCC_NICKS   = "federation.vocc.%s.%s";
+
     /** Room JIDs (room@conference.domain) tagged locally as federatable. */
     private final Set<String> localFederatedRooms = ConcurrentHashMap.newKeySet();
 
@@ -105,6 +111,33 @@ public class FederatedRoomManager {
                         JiveGlobals.deleteProperty("federation.rooms.mapping." + localJid + ".remote");
                         JiveGlobals.deleteProperty("federation.rooms.mapping." + localJid + ".domain");
                     }
+                }
+            }
+        }
+
+        // Load persisted virtual occupant tracker so eviction works after plugin reload.
+        String voccRooms = JiveGlobals.getProperty(PROP_VOCC_ROOMS, "").strip();
+        if (!voccRooms.isEmpty()) {
+            for (String localJid : voccRooms.split(",")) {
+                localJid = localJid.strip();
+                if (localJid.isEmpty()) continue;
+                String domains = JiveGlobals.getProperty(
+                    String.format(PROP_VOCC_DOMAINS, localJid), "").strip();
+                if (domains.isEmpty()) continue;
+                for (String domain : domains.split(",")) {
+                    domain = domain.strip();
+                    if (domain.isEmpty()) continue;
+                    String nicks = JiveGlobals.getProperty(
+                        String.format(PROP_VOCC_NICKS, localJid, domain), "").strip();
+                    if (nicks.isEmpty()) continue;
+                    ConcurrentHashMap<String, Set<String>> byDomain =
+                        virtualOccupants.computeIfAbsent(localJid, k -> new ConcurrentHashMap<>());
+                    Set<String> nickSet = byDomain.computeIfAbsent(domain, k -> ConcurrentHashMap.newKeySet());
+                    for (String nick : nicks.split(",")) {
+                        nick = nick.strip();
+                        if (!nick.isEmpty()) nickSet.add(nick);
+                    }
+                    Log.info("Loaded {} virtual occupant(s) in {} from {}", nickSet.size(), localJid, domain);
                 }
             }
         }
@@ -281,6 +314,7 @@ public class FederatedRoomManager {
         virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>())
                         .computeIfAbsent(remoteDomain, k -> ConcurrentHashMap.newKeySet())
                         .add(virtualNick);
+        persistVirtualOccupants(localRoomJid, remoteDomain);
     }
 
     public void untrackVirtualOccupant(String localRoomJid, String remoteDomain, String virtualNick) {
@@ -292,6 +326,9 @@ public class FederatedRoomManager {
         if (nicks.isEmpty()) {
             byDomain.remove(remoteDomain, nicks);
             if (byDomain.isEmpty()) virtualOccupants.remove(localRoomJid, byDomain);
+            clearPersistedVirtualOccupants(localRoomJid, remoteDomain);
+        } else {
+            persistVirtualOccupants(localRoomJid, remoteDomain);
         }
     }
 
@@ -302,6 +339,7 @@ public class FederatedRoomManager {
         Set<String> removed = byDomain.remove(remoteDomain);
         if (removed == null) return Collections.emptySet();
         if (byDomain.isEmpty()) virtualOccupants.remove(localRoomJid, byDomain);
+        clearPersistedVirtualOccupants(localRoomJid, remoteDomain);
         return removed;
     }
 
@@ -366,5 +404,45 @@ public class FederatedRoomManager {
         // Also sweep legacy keys so they don't re-appear after a downgrade.
         JiveGlobals.deleteProperty("federation.rooms.mapping." + localJid + ".remote");
         JiveGlobals.deleteProperty("federation.rooms.mapping." + localJid + ".domain");
+    }
+
+    // ── Virtual occupant persistence ──────────────────────────────────────────
+
+    private void persistVirtualOccupants(String localRoomJid, String remoteDomain) {
+        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
+        if (byDomain == null) return;
+        Set<String> nicks = byDomain.get(remoteDomain);
+        if (nicks == null || nicks.isEmpty()) {
+            clearPersistedVirtualOccupants(localRoomJid, remoteDomain);
+            return;
+        }
+        // Persist nicks for this (room, domain) pair.
+        JiveGlobals.setProperty(String.format(PROP_VOCC_NICKS, localRoomJid, remoteDomain),
+                                String.join(",", nicks));
+        // Keep the domains list up-to-date.
+        String domainsKey = String.format(PROP_VOCC_DOMAINS, localRoomJid);
+        Set<String> allDomains = new LinkedHashSet<>(byDomain.keySet());
+        JiveGlobals.setProperty(domainsKey, String.join(",", allDomains));
+        // Keep the rooms index up-to-date.
+        JiveGlobals.setProperty(PROP_VOCC_ROOMS, String.join(",", virtualOccupants.keySet()));
+    }
+
+    private void clearPersistedVirtualOccupants(String localRoomJid, String remoteDomain) {
+        JiveGlobals.deleteProperty(String.format(PROP_VOCC_NICKS, localRoomJid, remoteDomain));
+        // Rebuild domains list from current in-memory state.
+        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
+        if (byDomain == null || byDomain.isEmpty()) {
+            JiveGlobals.deleteProperty(String.format(PROP_VOCC_DOMAINS, localRoomJid));
+            // Rebuild rooms index without this room.
+            Set<String> rooms = new LinkedHashSet<>(virtualOccupants.keySet());
+            if (rooms.isEmpty()) {
+                JiveGlobals.deleteProperty(PROP_VOCC_ROOMS);
+            } else {
+                JiveGlobals.setProperty(PROP_VOCC_ROOMS, String.join(",", rooms));
+            }
+        } else {
+            JiveGlobals.setProperty(String.format(PROP_VOCC_DOMAINS, localRoomJid),
+                                    String.join(",", byDomain.keySet()));
+        }
     }
 }

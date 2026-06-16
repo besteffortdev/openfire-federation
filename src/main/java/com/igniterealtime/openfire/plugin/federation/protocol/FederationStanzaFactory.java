@@ -3,10 +3,14 @@ package com.igniterealtime.openfire.plugin.federation.protocol;
 import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
 import org.dom4j.Element;
+import org.jivesoftware.openfire.RoutingTable;
 import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.session.ClientSession;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Packet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.List;
@@ -26,6 +30,8 @@ import java.util.List;
 public final class FederationStanzaFactory {
 
     public static final String NS = "urn:xmpp:federation:1";
+
+    private static final Logger Log = LoggerFactory.getLogger(FederationStanzaFactory.class);
 
     private FederationStanzaFactory() {}
 
@@ -180,6 +186,30 @@ public final class FederationStanzaFactory {
         fwd.addAttribute("via",         viaTrail);
         fwd.add(payload.getElement().createCopy());
         return iq;
+    }
+
+    /**
+     * Delivers a packet directly to the recipient's ClientSession, bypassing the
+     * packet router and all PacketInterceptors (including MUC's non-occupant check).
+     * Falls back to the packet router if the session is not found locally (e.g. the
+     * user just disconnected between the occupant-list snapshot and delivery).
+     */
+    public static void directDeliver(Packet packet) {
+        JID to = packet.getTo();
+        if (to != null && to.getResource() != null) {
+            RoutingTable rt = XMPPServer.getInstance().getRoutingTable();
+            ClientSession session = rt.getClientRoute(to);
+            if (session != null) {
+                try {
+                    session.process(packet);
+                    return;
+                } catch (Exception e) {
+                    Log.warn("directDeliver: session.process failed for {}: {}", to, e.getMessage());
+                }
+            }
+        }
+        // Fallback: user just disconnected or bare JID — route normally.
+        XMPPServer.getInstance().getPacketRouter().route(packet);
     }
 
     /**

@@ -9,6 +9,8 @@ import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -25,14 +27,19 @@ import java.util.concurrent.TimeUnit;
 public class S2SMonitor {
 
     private static final Logger Log = LoggerFactory.getLogger(S2SMonitor.class);
-    private static final int    POLL_SECONDS         = 30;
-    static final         String KEEPALIVE_JIVE_KEY   = "plugin.federation.keepaliveSeconds";
-    static final         int    KEEPALIVE_DEFAULT     = 240;
-    static final         int    KEEPALIVE_MINIMUM     = 30;
+    private static final int    POLL_SECONDS           = 30;
+    static final         String KEEPALIVE_JIVE_KEY     = "plugin.federation.keepaliveSeconds";
+    static final         int    KEEPALIVE_DEFAULT       = 240;
+    static final         int    KEEPALIVE_MINIMUM       = 30;
 
-    static final         String RECONNECT_JIVE_KEY   = "plugin.federation.reconnectSeconds";
-    static final         int    RECONNECT_DEFAULT     = 30;
-    static final         int    RECONNECT_MINIMUM     = 5;
+    // reconnectSeconds = back-off cap (max interval between retry attempts).
+    // The scheduler always polls every RECONNECT_POLL_SECONDS; per-peer nextRetryAt
+    // controls when each peer is actually retried.
+    static final         String RECONNECT_JIVE_KEY     = "plugin.federation.reconnectSeconds";
+    static final         int    RECONNECT_DEFAULT       = 30;
+    static final         int    RECONNECT_MINIMUM       = 5;
+    private static final int    RECONNECT_POLL_SECONDS  = 5;   // hard-coded poll interval
+    private static final int    RECONNECT_BACKOFF_BASE  = 5;   // first retry delay in seconds
 
     private final PeerRegistry           peerRegistry;
     private final FederationRoutingTable routingTable;
@@ -42,6 +49,11 @@ public class S2SMonitor {
     private ScheduledExecutorService scheduler;
     private ScheduledFuture<?>       keepaliveFuture;
     private ScheduledFuture<?>       reconnectFuture;
+
+    /** How many reconnect attempts have been made per peer since it last went UNREACHABLE. */
+    private final ConcurrentHashMap<String, Integer> peerRetryCount  = new ConcurrentHashMap<>();
+    /** Epoch-ms after which the next reconnect attempt is allowed for each UNREACHABLE peer. */
+    private final ConcurrentHashMap<String, Long>    peerNextRetryAt = new ConcurrentHashMap<>();
 
     public S2SMonitor(PeerRegistry peerRegistry,
                       FederationRoutingTable routingTable,
@@ -65,12 +77,12 @@ public class S2SMonitor {
         int keepaliveSec = getKeepaliveSeconds();
         keepaliveFuture = scheduler.scheduleAtFixedRate(
                 this::sendKeepalives, keepaliveSec, keepaliveSec, TimeUnit.SECONDS);
-        // Reconnect retries attempt to re-establish dropped S2S sessions quickly.
-        int reconnectSec = getReconnectSeconds();
+        // Reconnect retries poll every RECONNECT_POLL_SECONDS; per-peer back-off controls
+        // when each UNREACHABLE peer is actually retried (up to reconnectSeconds cap).
         reconnectFuture = scheduler.scheduleAtFixedRate(
-                this::sendReconnects, reconnectSec, reconnectSec, TimeUnit.SECONDS);
-        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect={}s)",
-                 POLL_SECONDS, keepaliveSec, reconnectSec);
+                this::sendReconnects, RECONNECT_POLL_SECONDS, RECONNECT_POLL_SECONDS, TimeUnit.SECONDS);
+        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect-poll={}s, reconnect-cap={}s)",
+                 POLL_SECONDS, keepaliveSec, RECONNECT_POLL_SECONDS, getReconnectSeconds());
     }
 
     public void stop() {
@@ -97,14 +109,19 @@ public class S2SMonitor {
         return JiveGlobals.getIntProperty(RECONNECT_JIVE_KEY, RECONNECT_DEFAULT);
     }
 
-    /** Persists the new interval and reschedules the reconnect task immediately. */
+    /** Persists the new back-off cap and resets all per-peer back-off state. */
     public void setReconnectSeconds(int seconds) {
         if (seconds < RECONNECT_MINIMUM) seconds = RECONNECT_MINIMUM;
         JiveGlobals.setProperty(RECONNECT_JIVE_KEY, String.valueOf(seconds));
-        if (reconnectFuture != null) reconnectFuture.cancel(false);
-        reconnectFuture = scheduler.scheduleAtFixedRate(
-                this::sendReconnects, seconds, seconds, TimeUnit.SECONDS);
-        Log.info("S2S reconnect interval updated to {}s", seconds);
+        // Clear back-off state so UNREACHABLE peers retry promptly with the new cap.
+        peerRetryCount.clear();
+        peerNextRetryAt.clear();
+        Log.info("S2S reconnect back-off cap updated to {}s", seconds);
+    }
+
+    /** Epoch-ms when the next reconnect attempt is scheduled for this domain, or 0 if imminent. */
+    public long getNextRetryAt(String domain) {
+        return peerNextRetryAt.getOrDefault(domain, 0L);
     }
 
     private void poll() {
@@ -171,12 +188,23 @@ public class S2SMonitor {
 
     private void sendReconnects() {
         try {
-            int count = 0;
+            long now   = System.currentTimeMillis();
+            int  count = 0;
             for (PeerServer peer : peerRegistry.getPeers()) {
-                if (peer.getStatus() == PeerServer.Status.UNREACHABLE) {
-                    federationManager.sendPeerAnnounce(peer.getDomain());
-                    count++;
-                }
+                if (peer.getStatus() != PeerServer.Status.UNREACHABLE) continue;
+                String domain  = peer.getDomain();
+                long   retryAt = peerNextRetryAt.getOrDefault(domain, 0L);
+                if (now < retryAt) continue;   // back-off not yet elapsed
+
+                federationManager.sendPeerAnnounce(domain);
+                count++;
+
+                // Compute next back-off: 5s * 2^(retries-1), capped at reconnectSeconds.
+                int retries    = peerRetryCount.merge(domain, 1, Integer::sum);
+                int shift      = Math.min(retries - 1, 10);
+                int backoffSec = Math.min(RECONNECT_BACKOFF_BASE << shift, getReconnectSeconds());
+                peerNextRetryAt.put(domain, now + backoffSec * 1000L);
+                Log.debug("Reconnect attempt #{} to {} — next retry in {}s", retries, domain, backoffSec);
             }
             if (count > 0) Log.info("S2S reconnect attempts sent to {} UNREACHABLE peer(s)", count);
         } catch (Exception e) {
@@ -186,6 +214,8 @@ public class S2SMonitor {
 
     private void onPeerUp(String domain) {
         Log.info("Federation peer UP: {}", domain);
+        peerRetryCount.remove(domain);
+        peerNextRetryAt.remove(domain);
         routingTable.addDirectPeer(domain);
         // Send our full state (peer-announce + routing table + room list) to the new peer.
         federationManager.sendFullGossip(domain);

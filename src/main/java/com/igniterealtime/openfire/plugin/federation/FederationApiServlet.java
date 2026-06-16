@@ -46,7 +46,8 @@ public class FederationApiServlet extends HttpServlet {
             sb.append("{")
               .append("\"domain\":\"").append(esc(p.getDomain())).append("\",")
               .append("\"status\":\"").append(p.getStatus().name()).append("\",")
-              .append("\"lastSeen\":").append(p.getLastSeenMillis())
+              .append("\"lastSeen\":").append(p.getLastSeenMillis()).append(",")
+              .append("\"nextRetryAt\":").append(mgr.getNextRetryAt(p.getDomain()))
               .append("}");
         }
         sb.append("],");

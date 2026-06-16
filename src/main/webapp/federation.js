@@ -86,14 +86,27 @@ function renderPeers(peers) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty">No peers configured yet.</td></tr>';
         return;
     }
+    const now = Date.now();
     tbody.innerHTML = peers.map(p => {
         const isWithdrawn = p.status === 'WITHDRAWN';
-        const needsAction = isWithdrawn || p.status === 'UNREACHABLE' || p.status === 'UNKNOWN';
+        const isUnreachable = p.status === 'UNREACHABLE';
+        const needsAction = isWithdrawn || isUnreachable || p.status === 'UNKNOWN';
         const actionBtn = needsAction
             ? `<button class="btn-small btn-warn" style="margin-right:4px"
                        onclick="retryPeer('${escHtml(p.domain)}')">${isWithdrawn ? 'Reconnect' : 'Retry'}</button>`
             : '';
-        const statusLabel = isWithdrawn ? 'Disconnected by remote' : p.status;
+
+        let statusLabel = isWithdrawn ? 'Disconnected by remote' : p.status;
+        if (isUnreachable) {
+            const retryAt = p.nextRetryAt || 0;
+            if (retryAt > now) {
+                const secsLeft = Math.ceil((retryAt - now) / 1000);
+                statusLabel += ` <span class="retry-countdown">next retry in ${secsLeft}s</span>`;
+            } else {
+                statusLabel += ` <span class="retry-countdown">retrying…</span>`;
+            }
+        }
+
         return `
         <tr>
             <td>${escHtml(p.domain)}</td>

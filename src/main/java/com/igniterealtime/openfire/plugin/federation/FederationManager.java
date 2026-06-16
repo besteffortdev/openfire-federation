@@ -205,7 +205,9 @@ public class FederationManager {
      */
     public void mapRooms(String localJid, String remoteJid, String remoteDomain) {
         roomManager.addMapping(localJid, remoteJid, remoteDomain);
-        pushVirtualPresences(localJid, remoteDomain, remoteJid, false);
+        // Send the room-mapping IQ first so the remote side stores the mapping before
+        // it receives our occupant-sync presences — this ensures syncLocalOccupantsToRemote
+        // can fire correctly on the remote when it processes our muc-forward stanzas.
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
         try {
@@ -215,6 +217,7 @@ public class FederationManager {
         } catch (Exception e) {
             Log.warn("Failed to send room-mapping to {}: {}", remoteDomain, e.getMessage());
         }
+        pushVirtualPresences(localJid, remoteDomain, remoteJid, false);
     }
 
     /** Removes ALL spoke mappings for localJid and notifies every remote. */
@@ -290,7 +293,7 @@ public class FederationManager {
                     item.addAttribute("affiliation", "none");
                     item.addAttribute("role", "none");
                     FederationStanzaFactory.markAsForwarded(leave);
-                    XMPPServer.getInstance().getPacketRouter().route(leave);
+                    FederationStanzaFactory.directDeliver(leave);
                 }
             }
             Log.debug("evictVirtualOccupants: sent {} leave(s) from {} in {}",
@@ -454,10 +457,11 @@ public class FederationManager {
 
     // ── Accessors for subsystems ───────────────────────────────────────────────
 
-    public int  getKeepaliveSeconds()        { return s2sMonitor.getKeepaliveSeconds(); }
-    public void setKeepaliveSeconds(int sec) { s2sMonitor.setKeepaliveSeconds(sec); }
-    public int  getReconnectSeconds()        { return s2sMonitor.getReconnectSeconds(); }
-    public void setReconnectSeconds(int sec) { s2sMonitor.setReconnectSeconds(sec); }
+    public int  getKeepaliveSeconds()            { return s2sMonitor.getKeepaliveSeconds(); }
+    public void setKeepaliveSeconds(int sec)     { s2sMonitor.setKeepaliveSeconds(sec); }
+    public int  getReconnectSeconds()            { return s2sMonitor.getReconnectSeconds(); }
+    public void setReconnectSeconds(int sec)     { s2sMonitor.setReconnectSeconds(sec); }
+    public long getNextRetryAt(String domain)    { return s2sMonitor.getNextRetryAt(domain); }
 
     public PeerRegistry           getPeerRegistry()  { return peerRegistry;  }
     public FederationRoutingTable getRoutingTable()  { return routingTable;  }
