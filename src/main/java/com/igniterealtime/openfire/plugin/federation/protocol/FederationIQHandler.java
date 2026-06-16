@@ -22,7 +22,10 @@ import org.xmpp.packet.Packet;
 import org.xmpp.packet.Presence;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -129,7 +132,9 @@ public class FederationIQHandler extends IQHandler {
         // The withdrawing peer should have sent room-unmap stanzas before this,
         // but defensively remove any remaining local mappings to that domain so
         // we stop fanning out traffic toward it (which would re-open S2S).
+        // Evict tracked virtual occupants first so clients see leave presences.
         for (String localJid : new ArrayList<>(manager.getRoomManager().getLocalMappings().keySet())) {
+            manager.evictVirtualOccupants(localJid, fromDomain);
             manager.getRoomManager().removeMapping(localJid, fromDomain);
         }
         manager.getRoomManager().clearRemoteRooms(fromDomain);
@@ -285,6 +290,9 @@ public class FederationIQHandler extends IQHandler {
             String theirLocal  = map.attributeValue("local");   // originator's local  = our remote
             String theirRemote = map.attributeValue("remote");  // originator's remote = our local
             if (theirRemote != null) {
+                // Evict virtual occupants from the remote domain before removing the mapping
+                // so local clients receive leave presences and don't see ghost users.
+                manager.evictVirtualOccupants(theirRemote, actualOrigin);
                 if (theirLocal != null) {
                     manager.pushVirtualPresences(theirRemote, actualOrigin, theirLocal, true);
                 }
@@ -322,6 +330,16 @@ public class FederationIQHandler extends IQHandler {
         } else {
             // We are an intermediate hop — forward to the next hop.
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+
+            // If we also have a spoke mapping whose remote room is targetRoom, inject locally now.
+            // We won't receive a hub fanOut because our domain will be in the via trail.
+            if (targetRoom != null) {
+                RoomMapping ownMapping = manager.getRoomManager().getMappingForRemote(targetRoom);
+                if (ownMapping != null) {
+                    injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain);
+                }
+            }
+
             manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
                 nextHop -> {
                     try {
@@ -362,11 +380,18 @@ public class FederationIQHandler extends IQHandler {
         if (mappings.size() <= 1) return;
 
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String newVia = viaTrail.isEmpty() ? localDomain : viaTrail + "," + localDomain;
+
+        // Use a fresh via containing only the hub domain.  This lets relay servers forward
+        // the packet without being blocked by the incoming via trail.
+        // Servers already in the incoming via are excluded at the hub level: they either
+        // already processed the packet (relay-injection) or are the source.
+        String newVia = localDomain;
+        Set<String> viaServers = viaTrail.isEmpty() ? Collections.emptySet()
+            : new HashSet<>(Arrays.asList(viaTrail.split(",")));
 
         for (RoomMapping m : mappings) {
-            if (m.remoteDomain().equals(fromDomain)) continue;
-            if (newVia.contains(m.remoteDomain())) continue;
+            if (m.remoteDomain().equals(fromDomain)) continue;   // skip direct sender
+            if (viaServers.contains(m.remoteDomain())) continue; // skip source + relay-injected servers
 
             String nextHop = manager.getRoutingTable()
                                     .findNextHop(m.remoteDomain())
@@ -440,6 +465,15 @@ public class FederationIQHandler extends IQHandler {
             delivery.setTo(occupant.getUserAddress());
             if (leaving) delivery.setType(Presence.Type.unavailable);
 
+            // Propagate show/status so local clients see the remote user's actual availability.
+            if (!leaving) {
+                Element showEl = presEl.element("show");
+                if (showEl != null) delivery.getElement().addElement("show").setText(showEl.getText());
+                for (Element statusEl : presEl.elements("status")) {
+                    delivery.getElement().addElement("status").setText(statusEl.getText());
+                }
+            }
+
             Element x    = delivery.getElement().addElement("x", "http://jabber.org/protocol/muc#user");
             Element item = x.addElement("item");
             item.addAttribute("affiliation", "none");
@@ -451,6 +485,14 @@ public class FederationIQHandler extends IQHandler {
         }
         Log.debug("injectPresence: {} virtual presence to {} occupant(s) in {}",
                   leaving ? "leave" : "join", occupants.size(), targetRoom);
+
+        // Keep the virtual occupant roster up-to-date so eviction on peer removal
+        // can send the right leave presences to local clients.
+        if (leaving) {
+            manager.getRoomManager().untrackVirtualOccupant(targetRoom, fromDomain, senderNick);
+        } else {
+            manager.getRoomManager().trackVirtualOccupant(targetRoom, fromDomain, senderNick);
+        }
 
         // On join: push our local occupants back to the sender so they immediately
         // see everyone already in the room (fixes join-ordering race).
@@ -495,6 +537,13 @@ public class FederationIQHandler extends IQHandler {
             for (MUCOccupant occupant : occupants) {
                 Presence sync = new Presence();
                 sync.setFrom(occupant.getUserAddress());
+                // Copy show/status from occupant's last known presence
+                Element curEl = occupant.getPresence().getElement();
+                Element showEl = curEl.element("show");
+                if (showEl != null) sync.getElement().addElement("show").setText(showEl.getText());
+                for (Element statusEl : curEl.elements("status")) {
+                    sync.getElement().addElement("status").setText(statusEl.getText());
+                }
                 FederationStanzaFactory.markAsForwarded(sync);
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(

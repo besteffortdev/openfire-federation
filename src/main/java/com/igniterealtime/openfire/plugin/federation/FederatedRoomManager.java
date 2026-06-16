@@ -51,6 +51,10 @@ public class FederatedRoomManager {
     /** remoteRoomJid → mapping (reverse index for fast lookups). */
     private final ConcurrentHashMap<String, RoomMapping> remoteMappings = new ConcurrentHashMap<>();
 
+    /** localRoomJid → remoteDomain → set of virtual nicks currently injected into local sessions. */
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Set<String>>> virtualOccupants
+        = new ConcurrentHashMap<>();
+
     public void load() {
         // Load federated room tags
         String index = JiveGlobals.getProperty(PROP_ROOMS_INDEX, "").strip();
@@ -269,6 +273,36 @@ public class FederatedRoomManager {
         Map<String, List<RoomMapping>> result = new LinkedHashMap<>();
         localMappings.forEach((k, v) -> result.put(k, Collections.unmodifiableList(v)));
         return Collections.unmodifiableMap(result);
+    }
+
+    // ── Virtual occupant tracking ─────────────────────────────────────────────
+
+    public void trackVirtualOccupant(String localRoomJid, String remoteDomain, String virtualNick) {
+        virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>())
+                        .computeIfAbsent(remoteDomain, k -> ConcurrentHashMap.newKeySet())
+                        .add(virtualNick);
+    }
+
+    public void untrackVirtualOccupant(String localRoomJid, String remoteDomain, String virtualNick) {
+        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
+        if (byDomain == null) return;
+        Set<String> nicks = byDomain.get(remoteDomain);
+        if (nicks == null) return;
+        nicks.remove(virtualNick);
+        if (nicks.isEmpty()) {
+            byDomain.remove(remoteDomain, nicks);
+            if (byDomain.isEmpty()) virtualOccupants.remove(localRoomJid, byDomain);
+        }
+    }
+
+    /** Removes and returns all virtual nicks tracked for (localRoomJid, remoteDomain). */
+    public Set<String> clearVirtualOccupants(String localRoomJid, String remoteDomain) {
+        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
+        if (byDomain == null) return Collections.emptySet();
+        Set<String> removed = byDomain.remove(remoteDomain);
+        if (removed == null) return Collections.emptySet();
+        if (byDomain.isEmpty()) virtualOccupants.remove(localRoomJid, byDomain);
+        return removed;
     }
 
     // ── Remote room list ──────────────────────────────────────────────────────

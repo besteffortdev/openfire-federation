@@ -1,6 +1,7 @@
 package com.igniterealtime.openfire.plugin.federation;
 
 import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
+import org.dom4j.Element;
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationIQHandler;
@@ -25,6 +26,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Central coordinator for the federation plugin.
@@ -219,6 +221,7 @@ public class FederationManager {
     public void unmapRooms(String localJid) {
         List<RoomMapping> mappings = new ArrayList<>(roomManager.getMappingsForLocal(localJid));
         for (RoomMapping m : mappings) {
+            evictVirtualOccupants(localJid, m.remoteDomain());
             pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         }
         roomManager.removeMapping(localJid);
@@ -239,6 +242,7 @@ public class FederationManager {
     public void unmapRoom(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (m == null) return;
+        evictVirtualOccupants(localJid, remoteDomain);
         pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         roomManager.removeMapping(localJid, remoteDomain);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
@@ -249,6 +253,50 @@ public class FederationManager {
                           nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid()));
         } catch (Exception e) {
             Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
+        }
+    }
+
+    /**
+     * Delivers leave presences to every current local occupant of localRoomJid for
+     * each virtual nick that was injected from remoteDomain.  Clears the tracking
+     * so eviction is idempotent.  Called before removing a mapping so clients
+     * immediately see the departing virtual users.
+     */
+    public void evictVirtualOccupants(String localRoomJid, String remoteDomain) {
+        Set<String> nicks = roomManager.clearVirtualOccupants(localRoomJid, remoteDomain);
+        if (nicks.isEmpty()) return;
+        try {
+            JID localRoomJID = new JID(localRoomJid);
+            MUCRoom room = null;
+            for (MultiUserChatService svc :
+                    XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatServices()) {
+                if (svc.getServiceDomain().equals(localRoomJID.getDomain())) {
+                    room = svc.getChatRoom(localRoomJID.getNode());
+                    break;
+                }
+            }
+            if (room == null) return;
+            Collection<MUCOccupant> occupants = room.getOccupants();
+            if (occupants.isEmpty()) return;
+            for (String nick : nicks) {
+                JID virtualFrom = new JID(localRoomJID.getNode(), localRoomJID.getDomain(), nick);
+                for (MUCOccupant occupant : occupants) {
+                    Presence leave = new Presence();
+                    leave.setFrom(virtualFrom);
+                    leave.setTo(occupant.getUserAddress());
+                    leave.setType(Presence.Type.unavailable);
+                    Element x    = leave.getElement().addElement("x", "http://jabber.org/protocol/muc#user");
+                    Element item = x.addElement("item");
+                    item.addAttribute("affiliation", "none");
+                    item.addAttribute("role", "none");
+                    FederationStanzaFactory.markAsForwarded(leave);
+                    XMPPServer.getInstance().getPacketRouter().route(leave);
+                }
+            }
+            Log.debug("evictVirtualOccupants: sent {} leave(s) from {} in {}",
+                      nicks.size(), remoteDomain, localRoomJid);
+        } catch (Exception e) {
+            Log.warn("evictVirtualOccupants: error for {}/{}: {}", localRoomJid, remoteDomain, e.getMessage());
         }
     }
 
@@ -284,7 +332,18 @@ public class FederationManager {
             for (MUCOccupant occupant : occupants) {
                 Presence p = new Presence();
                 p.setFrom(occupant.getUserAddress());
-                if (leaving) p.setType(Presence.Type.unavailable);
+                if (leaving) {
+                    p.setType(Presence.Type.unavailable);
+                } else {
+                    // Carry the occupant's current show/status so the remote side
+                    // sees accurate availability from the moment the mapping is set up.
+                    Element curEl = occupant.getPresence().getElement();
+                    Element showEl = curEl.element("show");
+                    if (showEl != null) p.getElement().addElement("show").setText(showEl.getText());
+                    for (Element statusEl : curEl.elements("status")) {
+                        p.getElement().addElement("status").setText(statusEl.getText());
+                    }
+                }
                 FederationStanzaFactory.markAsForwarded(p);
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(

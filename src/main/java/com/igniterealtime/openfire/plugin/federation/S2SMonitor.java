@@ -86,6 +86,16 @@ public class S2SMonitor {
     }
 
     private void poll() {
+        try {
+            doPoll();
+        } catch (Exception e) {
+            // ScheduledExecutorService cancels the task permanently on uncaught exception.
+            // Catch everything here so a transient error can't kill the poll loop.
+            Log.error("S2S poll task threw unexpectedly — task continues", e);
+        }
+    }
+
+    private void doPoll() {
         RoutingTable   openfireRoutes = XMPPServer.getInstance().getRoutingTable();
         SessionManager sm             = XMPPServer.getInstance().getSessionManager();
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
@@ -123,12 +133,19 @@ public class S2SMonitor {
     }
 
     private void sendKeepalives() {
-        for (PeerServer peer : peerRegistry.getPeers()) {
-            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
-                federationManager.sendPeerAnnounce(peer.getDomain());
+        try {
+            int count = 0;
+            for (PeerServer peer : peerRegistry.getPeers()) {
+                if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                    federationManager.sendPeerAnnounce(peer.getDomain());
+                    count++;
+                }
             }
+            Log.info("S2S keepalive pings sent to {} peer(s)", count);
+        } catch (Exception e) {
+            // Same ScheduledExecutorService contract — never let exceptions escape.
+            Log.error("S2S keepalive task threw unexpectedly — task continues", e);
         }
-        Log.debug("S2S keepalive pings sent");
     }
 
     private void onPeerUp(String domain) {

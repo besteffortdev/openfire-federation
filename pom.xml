@@ -7,7 +7,7 @@
 
     <groupId>com.igniterealtime.openfire.plugin</groupId>
     <artifactId>federation</artifactId>
-    <version>1.2.0</version>
+    <version>1.2.1</version>
     <packaging>jar</packaging>
 
     <name>Openfire Federation Plugin</name>
