@@ -30,6 +30,10 @@ public class S2SMonitor {
     static final         int    KEEPALIVE_DEFAULT     = 240;
     static final         int    KEEPALIVE_MINIMUM     = 30;
 
+    static final         String RECONNECT_JIVE_KEY   = "plugin.federation.reconnectSeconds";
+    static final         int    RECONNECT_DEFAULT     = 30;
+    static final         int    RECONNECT_MINIMUM     = 5;
+
     private final PeerRegistry           peerRegistry;
     private final FederationRoutingTable routingTable;
     private final FederatedRoomManager   roomManager;
@@ -37,6 +41,7 @@ public class S2SMonitor {
 
     private ScheduledExecutorService scheduler;
     private ScheduledFuture<?>       keepaliveFuture;
+    private ScheduledFuture<?>       reconnectFuture;
 
     public S2SMonitor(PeerRegistry peerRegistry,
                       FederationRoutingTable routingTable,
@@ -60,7 +65,12 @@ public class S2SMonitor {
         int keepaliveSec = getKeepaliveSeconds();
         keepaliveFuture = scheduler.scheduleAtFixedRate(
                 this::sendKeepalives, keepaliveSec, keepaliveSec, TimeUnit.SECONDS);
-        Log.info("S2SMonitor started (poll={}s, keepalive={}s)", POLL_SECONDS, keepaliveSec);
+        // Reconnect retries attempt to re-establish dropped S2S sessions quickly.
+        int reconnectSec = getReconnectSeconds();
+        reconnectFuture = scheduler.scheduleAtFixedRate(
+                this::sendReconnects, reconnectSec, reconnectSec, TimeUnit.SECONDS);
+        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect={}s)",
+                 POLL_SECONDS, keepaliveSec, reconnectSec);
     }
 
     public void stop() {
@@ -77,12 +87,24 @@ public class S2SMonitor {
     public void setKeepaliveSeconds(int seconds) {
         if (seconds < KEEPALIVE_MINIMUM) seconds = KEEPALIVE_MINIMUM;
         JiveGlobals.setProperty(KEEPALIVE_JIVE_KEY, String.valueOf(seconds));
-        if (keepaliveFuture != null) {
-            keepaliveFuture.cancel(false);
-        }
+        if (keepaliveFuture != null) keepaliveFuture.cancel(false);
         keepaliveFuture = scheduler.scheduleAtFixedRate(
                 this::sendKeepalives, seconds, seconds, TimeUnit.SECONDS);
         Log.info("S2S keepalive interval updated to {}s", seconds);
+    }
+
+    public int getReconnectSeconds() {
+        return JiveGlobals.getIntProperty(RECONNECT_JIVE_KEY, RECONNECT_DEFAULT);
+    }
+
+    /** Persists the new interval and reschedules the reconnect task immediately. */
+    public void setReconnectSeconds(int seconds) {
+        if (seconds < RECONNECT_MINIMUM) seconds = RECONNECT_MINIMUM;
+        JiveGlobals.setProperty(RECONNECT_JIVE_KEY, String.valueOf(seconds));
+        if (reconnectFuture != null) reconnectFuture.cancel(false);
+        reconnectFuture = scheduler.scheduleAtFixedRate(
+                this::sendReconnects, seconds, seconds, TimeUnit.SECONDS);
+        Log.info("S2S reconnect interval updated to {}s", seconds);
     }
 
     private void poll() {
@@ -136,16 +158,29 @@ public class S2SMonitor {
         try {
             int count = 0;
             for (PeerServer peer : peerRegistry.getPeers()) {
-                if (peer.getStatus() == PeerServer.Status.WITHDRAWN) continue;
-                // Ping REACHABLE peers to keep the session alive, and UNREACHABLE peers
-                // to trigger Openfire to attempt S2S reconnection automatically.
-                federationManager.sendPeerAnnounce(peer.getDomain());
-                count++;
+                if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                    federationManager.sendPeerAnnounce(peer.getDomain());
+                    count++;
+                }
             }
-            Log.info("S2S keepalive/reconnect pings sent to {} peer(s)", count);
+            Log.info("S2S keepalive pings sent to {} peer(s)", count);
         } catch (Exception e) {
-            // Same ScheduledExecutorService contract — never let exceptions escape.
             Log.error("S2S keepalive task threw unexpectedly — task continues", e);
+        }
+    }
+
+    private void sendReconnects() {
+        try {
+            int count = 0;
+            for (PeerServer peer : peerRegistry.getPeers()) {
+                if (peer.getStatus() == PeerServer.Status.UNREACHABLE) {
+                    federationManager.sendPeerAnnounce(peer.getDomain());
+                    count++;
+                }
+            }
+            if (count > 0) Log.info("S2S reconnect attempts sent to {} UNREACHABLE peer(s)", count);
+        } catch (Exception e) {
+            Log.error("S2S reconnect task threw unexpectedly — task continues", e);
         }
     }
 

@@ -157,7 +157,8 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("],");
 
         // ── settings ──────────────────────────────────────────────────────────
-        sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds());
+        sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds()).append(",");
+        sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds());
 
         sb.append("}");
         out.print(sb.toString());
@@ -274,6 +275,21 @@ public class FederationApiServlet extends HttpServlet {
                     int seconds = Integer.parseInt(secParam.strip());
                     mgr.setKeepaliveSeconds(seconds);
                     out.print("{\"ok\":true,\"keepaliveSeconds\":" + mgr.getKeepaliveSeconds() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"seconds must be an integer\"}");
+                }
+                return;
+            }
+            case "set-reconnect": {
+                String secParam = req.getParameter("seconds");
+                if (secParam == null || secParam.isBlank()) {
+                    out.print("{\"error\":\"seconds required\"}");
+                    return;
+                }
+                try {
+                    int seconds = Integer.parseInt(secParam.strip());
+                    mgr.setReconnectSeconds(seconds);
+                    out.print("{\"ok\":true,\"reconnectSeconds\":" + mgr.getReconnectSeconds() + "}");
                 } catch (NumberFormatException e) {
                     out.print("{\"error\":\"seconds must be an integer\"}");
                 }

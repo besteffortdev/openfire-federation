@@ -51,6 +51,7 @@ function refresh() {
             renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
             updateStatusBadge(data.peers || []);
             updateKeepaliveInput(data.keepaliveSeconds);
+            updateReconnectInput(data.reconnectSeconds);
         })
         .catch(err => console.error('Federation API error:', err));
 }
@@ -183,6 +184,33 @@ function saveKeepalive() {
         .then(result => {
             if (result && result.ok) {
                 const badge = document.getElementById('keepalive-saved');
+                if (badge) {
+                    badge.style.display = 'inline';
+                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
+                }
+                refresh();
+            }
+        });
+}
+
+function updateReconnectInput(seconds) {
+    const inp = document.getElementById('reconnect-input');
+    if (inp && document.activeElement !== inp) {
+        inp.value = seconds != null ? seconds : 30;
+    }
+}
+
+function saveReconnect() {
+    const inp = document.getElementById('reconnect-input');
+    const seconds = parseInt(inp ? inp.value : '', 10);
+    if (isNaN(seconds) || seconds < 5) {
+        alert('Reconnect interval must be at least 5 seconds.');
+        return;
+    }
+    post({ action: 'set-reconnect', seconds })
+        .then(result => {
+            if (result && result.ok) {
+                const badge = document.getElementById('reconnect-saved');
                 if (badge) {
                     badge.style.display = 'inline';
                     setTimeout(() => { badge.style.display = 'none'; }, 2500);

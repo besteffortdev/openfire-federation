@@ -456,6 +456,8 @@ public class FederationManager {
 
     public int  getKeepaliveSeconds()        { return s2sMonitor.getKeepaliveSeconds(); }
     public void setKeepaliveSeconds(int sec) { s2sMonitor.setKeepaliveSeconds(sec); }
+    public int  getReconnectSeconds()        { return s2sMonitor.getReconnectSeconds(); }
+    public void setReconnectSeconds(int sec) { s2sMonitor.setReconnectSeconds(sec); }
 
     public PeerRegistry           getPeerRegistry()  { return peerRegistry;  }
     public FederationRoutingTable getRoutingTable()  { return routingTable;  }

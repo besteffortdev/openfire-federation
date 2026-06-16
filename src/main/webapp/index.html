@@ -241,6 +241,32 @@
                             </span>
                         </td>
                     </tr>
+                    <tr>
+                        <td style="padding-top:16px">
+                            <label for="reconnect-input" style="font-weight:600;font-size:13px">
+                                Reconnect retry interval
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                How often to attempt reconnection to UNREACHABLE peers. Each attempt
+                                triggers Openfire to create a new S2S session; once successful the peer
+                                returns to REACHABLE and the keepalive interval takes over.
+                                Minimum: 5 s. Default: 30 s.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle;padding-top:16px">
+                            <input type="number" id="reconnect-input"
+                                   min="5" max="300" step="5"
+                                   style="width:90px;padding:5px 8px;border:1px solid #ced4da;
+                                          border-radius:4px;font-size:13px;text-align:right">
+                            <span style="color:#6c757d;font-size:13px;margin-left:4px">s</span>
+                            <button class="btn btn-primary" style="margin-left:10px"
+                                    onclick="saveReconnect()">Save</button>
+                            <span id="reconnect-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
                 </table>
             </div>
         </div>
