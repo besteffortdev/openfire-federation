@@ -27,6 +27,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -467,8 +468,10 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("injectPresence: room {} not found locally", targetRoom);
             return;
         }
+        // NOTE: do NOT bail out when there are no real local occupants. A pure relay
+        // hub has none, but it must still track the virtual occupant and run
+        // syncLocalOccupantsToRemote so it can serve the room roster to other spokes.
         Collection<MUCOccupant> occupants = room.getOccupants();
-        if (occupants.isEmpty()) return;
 
         String originalFrom = presEl.attributeValue("from");
         boolean leaving     = "unavailable".equals(presEl.attributeValue("type"));
@@ -572,7 +575,31 @@ public class FederationIQHandler extends IQHandler {
                              occupant.getUserAddress(), e.getMessage());
                 }
             }
-            Log.debug("syncLocalOccupantsToRemote: pushed {} occupant(s) from {} to {}",
+
+            // Also forward the virtual occupants we know about from OTHER federated
+            // domains, so this peer immediately sees users that reached us through the
+            // hub — not only our directly-connected clients. This is what makes a room
+            // mapped (or re-enabled) while clients are already connected sync fully.
+            // Marked fed-origin so the receiver injects them without bouncing a sync.
+            Map<String, Set<String>> virtuals =
+                manager.getRoomManager().getVirtualOccupantsByDomain(localRoom);
+            for (Map.Entry<String, Set<String>> ve : virtuals.entrySet()) {
+                if (ve.getKey().equals(remoteDomain)) continue;   // don't echo their own users back
+                for (String nick : ve.getValue()) {
+                    try {
+                        Presence vsync = new Presence();
+                        vsync.setFrom(new JID(nick));
+                        FederationStanzaFactory.markAsForwarded(vsync);
+                        XMPPServer.getInstance().getPacketRouter().route(
+                            FederationStanzaFactory.mucForward(
+                                nextHop, remoteDomain, remoteRoomJid, localDomain, vsync));
+                    } catch (Exception e) {
+                        Log.warn("syncLocalOccupantsToRemote: failed to push virtual {}: {}",
+                                 nick, e.getMessage());
+                    }
+                }
+            }
+            Log.debug("syncLocalOccupantsToRemote: pushed {} occupant(s) + virtuals from {} to {}",
                       occupants.size(), localRoom, remoteRoomJid);
         }
     }

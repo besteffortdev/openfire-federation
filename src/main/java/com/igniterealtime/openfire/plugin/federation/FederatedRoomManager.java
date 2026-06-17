@@ -342,6 +342,19 @@ public class FederatedRoomManager {
         return result;
     }
 
+    /**
+     * Snapshot of virtual occupants in a room, grouped by source domain.  Used to
+     * forward the users reached through a hub to a newly-mapped spoke so it sees
+     * everyone immediately, not just the hub's directly-connected clients.  Never null.
+     */
+    public Map<String, Set<String>> getVirtualOccupantsByDomain(String localRoomJid) {
+        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
+        if (byDomain == null) return Collections.emptyMap();
+        Map<String, Set<String>> copy = new LinkedHashMap<>();
+        byDomain.forEach((d, nicks) -> copy.put(d, new HashSet<>(nicks)));
+        return copy;
+    }
+
     /** Removes and returns all virtual nicks tracked for (localRoomJid, remoteDomain). */
     public Set<String> clearVirtualOccupants(String localRoomJid, String remoteDomain) {
         ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
