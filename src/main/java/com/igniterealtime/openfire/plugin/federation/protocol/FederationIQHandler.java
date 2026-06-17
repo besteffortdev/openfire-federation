@@ -133,14 +133,13 @@ public class FederationIQHandler extends IQHandler {
         // The withdrawing peer should have sent room-unmap stanzas before this,
         // but defensively remove any remaining local mappings to that domain so
         // we stop fanning out traffic toward it (which would re-open S2S).
-        // Evict tracked virtual occupants first so clients see leave presences.
         for (String localJid : new ArrayList<>(manager.getRoomManager().getLocalMappings().keySet())) {
-            manager.evictVirtualOccupants(localJid, fromDomain);
             manager.getRoomManager().removeMapping(localJid, fromDomain);
         }
-        manager.getRoomManager().clearRemoteRooms(fromDomain);
-        manager.propagateRoomWithdrawal(fromDomain);
         Set<String> removed = manager.getRoutingTable().removePeer(fromDomain);
+        // Evict ghosts and drop cached rooms for the peer and everything reached
+        // through it; clients see leave presences and stale rooms disappear.
+        manager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(fromDomain) : removed);
         manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.WITHDRAWN);
         // doPoll skips WITHDRAWN peers so onPeerDown never fires as a fallback —
         // propagate the withdrawal here while we still know what was removed.
@@ -167,10 +166,16 @@ public class FederationIQHandler extends IQHandler {
             }
         }
 
-        Set<String> improved = manager.getRoutingTable().updateFromPeer(fromDomain, received);
-        Log.debug("routing-update from {} — {} entries, {} improved", fromDomain, received.size(), improved.size());
+        Set<String> changed = manager.getRoutingTable().updateFromPeer(fromDomain, received);
+        Log.debug("routing-update from {} — {} entries, {} changed", fromDomain, received.size(), changed.size());
 
-        if (!improved.isEmpty()) {
+        if (!changed.isEmpty()) {
+            // Destinations that dropped out of our table are now unreachable: evict
+            // their ghost occupants and drop their cached rooms. Destinations that
+            // (re)appeared are reachable again: re-sync occupants for any room mapped
+            // to them. This is what makes a peer-down/up ripple through every hop.
+            manager.handleUnreachableDestinations(changed);
+            manager.resyncMappedDestinations(changed);
             manager.propagateRoutingToAll(fromDomain);
         }
     }

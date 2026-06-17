@@ -174,8 +174,9 @@ public class FederationManager {
         boolean removed = peerRegistry.removePeer(domain);
         if (removed) {
             Set<String> removedRoutes = routingTable.removePeer(domain);
-            roomManager.clearRemoteRooms(domain);
-            propagateRoomWithdrawal(domain);
+            // Drop cached rooms and evict ghost occupants for this peer AND every
+            // destination that was only reachable through it.
+            handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
             if (!removedRoutes.isEmpty()) {
                 propagateRoutingToAll(domain);
             }
@@ -433,9 +434,39 @@ public class FederationManager {
 
     // ── Routing propagation ────────────────────────────────────────────────────
 
-    public void propagateRoomWithdrawal(String originDomain) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        relayRoomAdvertisement(originDomain, originDomain, List.of(), localDomain);
+    /**
+     * Cleans up all cached state for destinations that just became unreachable:
+     * evicts their virtual occupants (so local clients see leave presences) and
+     * drops their advertised rooms.  Driven by routing-table withdrawals so the
+     * cleanup converges across every hop as the withdrawal gossips outward — not
+     * just on the directly-disconnected peer.  A destination still reachable by an
+     * alternate path is skipped, so diamond topologies don't lose live rooms.
+     */
+    public void handleUnreachableDestinations(Collection<String> destinations) {
+        for (String dest : destinations) {
+            if (routingTable.isReachable(dest)) continue;   // still reachable another way
+            evictAllVirtualOccupantsFromDomain(dest);
+            roomManager.clearRemoteRooms(dest);
+        }
+    }
+
+    /**
+     * Re-pushes our local occupants toward each mapped remote that just became
+     * reachable, so occupant rosters self-heal after a link comes up or a route
+     * changes — without waiting for a user to leave and rejoin.  Sent WITHOUT
+     * fed-origin so the remote replies with its own occupants (bilateral sync).
+     */
+    public void resyncMappedDestinations(Collection<String> destinations) {
+        for (String dest : destinations) {
+            if (!routingTable.isReachable(dest)) continue;
+            for (List<RoomMapping> mappings : roomManager.getLocalMappings().values()) {
+                for (RoomMapping m : mappings) {
+                    if (m.remoteDomain().equals(dest)) {
+                        pushInitialSyncPresences(m.localRoomJid(), dest, m.remoteRoomJid());
+                    }
+                }
+            }
+        }
     }
 
     public void propagateRoutingToAll(String excludeDomain) {

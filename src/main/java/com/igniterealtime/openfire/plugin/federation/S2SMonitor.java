@@ -220,16 +220,18 @@ public class S2SMonitor {
         routingTable.addDirectPeer(domain);
         // Send our full state (peer-announce + routing table + room list) to the new peer.
         federationManager.sendFullGossip(domain);
+        // Re-sync occupant rosters for any room mapped to this peer so users that
+        // were already in those rooms become visible again without rejoining.
+        federationManager.resyncMappedDestinations(Set.of(domain));
     }
 
     private void onPeerDown(String domain) {
         Log.info("Federation peer DOWN: {}", domain);
         Set<String> removed = routingTable.removePeer(domain);
-        // Send leave presences for ghost virtual occupants so local clients don't
-        // see stale remote users after the connection drops.
-        federationManager.evictAllVirtualOccupantsFromDomain(domain);
-        roomManager.clearRemoteRooms(domain);
-        federationManager.propagateRoomWithdrawal(domain);
+        // Evict ghost occupants and drop cached rooms for the peer AND every
+        // destination that was only reachable through it, then gossip the routing
+        // withdrawal so downstream servers converge and clean up the same way.
+        federationManager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(domain) : removed);
         if (!removed.isEmpty()) {
             federationManager.propagateRoutingToAll(domain);
         }
