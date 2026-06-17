@@ -226,6 +226,7 @@ public class S2SMonitor {
         Log.info("Federation peer DOWN: {}", domain);
         Set<String> removed = routingTable.removePeer(domain);
         roomManager.clearRemoteRooms(domain);
+        federationManager.propagateRoomWithdrawal(domain);
         if (!removed.isEmpty()) {
             federationManager.propagateRoutingToAll(domain);
         }

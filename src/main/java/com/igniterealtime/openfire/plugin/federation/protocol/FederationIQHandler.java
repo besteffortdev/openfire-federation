@@ -139,8 +139,14 @@ public class FederationIQHandler extends IQHandler {
             manager.getRoomManager().removeMapping(localJid, fromDomain);
         }
         manager.getRoomManager().clearRemoteRooms(fromDomain);
-        manager.getRoutingTable().removePeer(fromDomain);
+        manager.propagateRoomWithdrawal(fromDomain);
+        Set<String> removed = manager.getRoutingTable().removePeer(fromDomain);
         manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.WITHDRAWN);
+        // doPoll skips WITHDRAWN peers so onPeerDown never fires as a fallback —
+        // propagate the withdrawal here while we still know what was removed.
+        if (!removed.isEmpty()) {
+            manager.propagateRoutingToAll(fromDomain);
+        }
     }
 
     // ── routing-update ─────────────────────────────────────────────────────────
@@ -199,14 +205,18 @@ public class FederationIQHandler extends IQHandler {
                 rooms.add(new FederatedRoom(jid, name, desc, sourceDomain));
             }
         }
-        manager.getRoomManager().updateRemoteRooms(sourceDomain, fromDomain, rooms);
-        Log.debug("room-advertisement from {} (source={}) — {} room(s)", fromDomain, sourceDomain, rooms.size());
-
-        if (!rooms.isEmpty()) {
-            // Append our domain to the via trail and relay to all other peers.
-            String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
-            manager.relayRoomAdvertisement(fromDomain, sourceDomain, rooms, newVia);
+        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+        if (rooms.isEmpty()) {
+            // Withdrawal: the origin no longer has federatable rooms (or is gone).
+            // Clear all rooms learned from this origin and propagate the withdrawal so
+            // downstream multi-hop servers also drop their cached rooms for this origin.
+            manager.getRoomManager().clearRemoteRooms(sourceDomain);
+            Log.debug("room-advertisement WITHDRAWAL from {} (source={}) — clearing and relaying", fromDomain, sourceDomain);
+        } else {
+            manager.getRoomManager().updateRemoteRooms(sourceDomain, fromDomain, rooms);
+            Log.debug("room-advertisement from {} (source={}) — {} room(s)", fromDomain, sourceDomain, rooms.size());
         }
+        manager.relayRoomAdvertisement(fromDomain, sourceDomain, rooms, newVia);
     }
 
     // ── room-mapping ──────────────────────────────────────────────────────────

@@ -173,8 +173,12 @@ public class FederationManager {
         killSession(domain, "incoming");
         boolean removed = peerRegistry.removePeer(domain);
         if (removed) {
-            routingTable.removePeer(domain);
+            Set<String> removedRoutes = routingTable.removePeer(domain);
             roomManager.clearRemoteRooms(domain);
+            propagateRoomWithdrawal(domain);
+            if (!removedRoutes.isEmpty()) {
+                propagateRoutingToAll(domain);
+            }
         }
         return removed;
     }
@@ -365,6 +369,11 @@ public class FederationManager {
     }
 
     // ── Routing propagation ────────────────────────────────────────────────────
+
+    public void propagateRoomWithdrawal(String originDomain) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        relayRoomAdvertisement(originDomain, originDomain, List.of(), localDomain);
+    }
 
     public void propagateRoutingToAll(String excludeDomain) {
         for (PeerServer peer : peerRegistry.getPeers()) {
