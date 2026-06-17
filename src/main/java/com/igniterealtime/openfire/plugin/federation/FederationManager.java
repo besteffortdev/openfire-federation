@@ -221,7 +221,7 @@ public class FederationManager {
         } catch (Exception e) {
             Log.warn("Failed to send room-mapping to {}: {}", remoteDomain, e.getMessage());
         }
-        pushVirtualPresences(localJid, remoteDomain, remoteJid, false);
+        pushInitialSyncPresences(localJid, remoteDomain, remoteJid);
     }
 
     /** Removes ALL spoke mappings for localJid and notifies every remote. */
@@ -260,6 +260,17 @@ public class FederationManager {
                           nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid()));
         } catch (Exception e) {
             Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
+        }
+    }
+
+    /**
+     * Evicts all virtual occupants from remoteDomain across every local room.
+     * Used on unexpected peer disconnect so clients see leave presences rather
+     * than ghost users that never departed.
+     */
+    public void evictAllVirtualOccupantsFromDomain(String remoteDomain) {
+        for (String localJid : roomManager.getLocalRoomsWithVirtualOccupantsFrom(remoteDomain)) {
+            evictVirtualOccupants(localJid, remoteDomain);
         }
     }
 
@@ -365,6 +376,58 @@ public class FederationManager {
                       leaving ? "leave" : "join", localRoom, occupants.size(), remoteRoomJid);
         } catch (Exception e) {
             Log.warn("pushVirtualPresences: error for {}: {}", localRoom, e.getMessage());
+        }
+    }
+
+    /**
+     * Sends current local occupants' join presences to the remote side WITHOUT the
+     * fed-origin marker so the remote's injectPresence triggers syncLocalOccupantsToRemote,
+     * which sends the remote occupants back.  Used only at mapping-creation time.
+     * Normal in-session forwarding uses pushVirtualPresences (WITH fed-origin).
+     */
+    public void pushInitialSyncPresences(String localRoom, String remoteDomain,
+                                         String remoteRoomJid) {
+        try {
+            JID localRoomJid = new JID(localRoom);
+            MUCRoom room = null;
+            for (MultiUserChatService svc :
+                    XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatServices()) {
+                if (svc.getServiceDomain().equals(localRoomJid.getDomain())) {
+                    room = svc.getChatRoom(localRoomJid.getNode());
+                    break;
+                }
+            }
+            if (room == null) return;
+
+            Collection<MUCOccupant> occupants = room.getOccupants();
+            if (occupants.isEmpty()) return;
+
+            String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+            String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
+
+            for (MUCOccupant occupant : occupants) {
+                Presence p = new Presence();
+                p.setFrom(occupant.getUserAddress());
+                Element curEl = occupant.getPresence().getElement();
+                Element showEl = curEl.element("show");
+                if (showEl != null) p.getElement().addElement("show").setText(showEl.getText());
+                for (Element statusEl : curEl.elements("status")) {
+                    p.getElement().addElement("status").setText(statusEl.getText());
+                }
+                // Intentionally NOT marking as forwarded so the remote's injectPresence
+                // calls syncLocalOccupantsToRemote to push its occupants back to us.
+                try {
+                    XMPPServer.getInstance().getPacketRouter().route(
+                        FederationStanzaFactory.mucForward(
+                            nextHop, remoteDomain, remoteRoomJid, localDomain, p));
+                } catch (Exception ex) {
+                    Log.warn("pushInitialSyncPresences: failed for {}: {}", occupant.getUserAddress(), ex.getMessage());
+                }
+            }
+            Log.debug("pushInitialSyncPresences: sent {} occupant(s) from {} toward {}",
+                      occupants.size(), localRoom, remoteRoomJid);
+        } catch (Exception e) {
+            Log.warn("pushInitialSyncPresences: error for {}: {}", localRoom, e.getMessage());
         }
     }
 

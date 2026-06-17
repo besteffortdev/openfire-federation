@@ -225,6 +225,9 @@ public class S2SMonitor {
     private void onPeerDown(String domain) {
         Log.info("Federation peer DOWN: {}", domain);
         Set<String> removed = routingTable.removePeer(domain);
+        // Send leave presences for ghost virtual occupants so local clients don't
+        // see stale remote users after the connection drops.
+        federationManager.evictAllVirtualOccupantsFromDomain(domain);
         roomManager.clearRemoteRooms(domain);
         federationManager.propagateRoomWithdrawal(domain);
         if (!removed.isEmpty()) {

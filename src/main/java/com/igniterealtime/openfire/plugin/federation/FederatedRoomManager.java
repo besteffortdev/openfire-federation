@@ -332,6 +332,16 @@ public class FederatedRoomManager {
         }
     }
 
+    /** All local room JIDs that currently have at least one virtual occupant from remoteDomain. */
+    public Set<String> getLocalRoomsWithVirtualOccupantsFrom(String remoteDomain) {
+        Set<String> result = new java.util.HashSet<>();
+        virtualOccupants.forEach((localJid, byDomain) -> {
+            Set<String> nicks = byDomain.get(remoteDomain);
+            if (nicks != null && !nicks.isEmpty()) result.add(localJid);
+        });
+        return result;
+    }
+
     /** Removes and returns all virtual nicks tracked for (localRoomJid, remoteDomain). */
     public Set<String> clearVirtualOccupants(String localRoomJid, String remoteDomain) {
         ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);

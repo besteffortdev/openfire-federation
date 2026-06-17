@@ -261,7 +261,9 @@ public class FederationIQHandler extends IQHandler {
                 manager.getRoomManager().addMapping(theirRemote, theirLocal, actualOrigin);
                 Log.info("Room mapping received from {}: local={} ↔ remote={}",
                          actualOrigin, theirRemote, theirLocal);
-                manager.pushVirtualPresences(theirRemote, actualOrigin, theirLocal, false);
+                // Occupant sync happens via syncLocalOccupantsToRemote when the
+                // originator's pushInitialSyncPresences (no fed-origin) arrives and
+                // our injectPresence triggers the reverse sync.
             }
         }
     }
