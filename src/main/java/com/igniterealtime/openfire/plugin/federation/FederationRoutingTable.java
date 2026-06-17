@@ -34,7 +34,9 @@ public class FederationRoutingTable {
      */
     public void addDirectPeer(String domain) {
         table.put(domain, new RouteEntry(domain, domain, 1));
-        routesLearnedFrom.computeIfAbsent(domain, k -> ConcurrentHashMap.newKeySet()).add(domain);
+        // Do NOT add to routesLearnedFrom — direct routes are owned by addDirectPeer/removePeer,
+        // not by gossip. A peer never advertises itself in routing-updates, so adding it here
+        // would cause the stale-withdrawal check to delete the direct route on every update.
         Log.debug("Routing: direct peer added — {}", domain);
     }
 
