@@ -118,9 +118,10 @@ public class FederationIQHandler extends IQHandler {
 
         if (!wasReachable) {
             manager.sendFullGossip(fromDomain);
-        }
-
-        if (isNew) {
+            // Tell all other existing peers about this newly reachable server so they can
+            // update their routing tables. Without this, configured peers that reconnect
+            // are only known to us — no one else learns about them until the next triggered
+            // update fires (which requires the new peer to have something new to offer us).
             manager.propagateRoutingToAll(fromDomain);
         }
     }
