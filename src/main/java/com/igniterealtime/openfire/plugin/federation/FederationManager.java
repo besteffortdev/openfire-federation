@@ -542,7 +542,8 @@ public class FederationManager {
     public void sendRoutingUpdate(String toDomain) {
         try {
             XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.routingUpdate(toDomain, routingTable.getAll()));
+                      .route(FederationStanzaFactory.routingUpdate(
+                          toDomain, routingTable.getRoutesExcludingNextHop(toDomain)));
         } catch (Exception e) {
             Log.warn("Failed to send routing-update to {}: {}", toDomain, e.getMessage());
         }

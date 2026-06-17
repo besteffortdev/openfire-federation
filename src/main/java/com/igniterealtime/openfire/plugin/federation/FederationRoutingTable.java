@@ -124,8 +124,25 @@ public class FederationRoutingTable {
         return table.containsKey(destination);
     }
 
-    /** Snapshot of the full table for gossip serialisation and UI display. */
+    /** Snapshot of the full table for UI display. */
     public Collection<RouteEntry> getAll() {
         return Collections.unmodifiableCollection(table.values());
+    }
+
+    /**
+     * Split-horizon view of the table for gossip TO {@code toPeer}: routes whose
+     * next hop is {@code toPeer} are omitted.  Advertising a route back toward the
+     * neighbour we learned it from is exactly what forms distance-vector routing
+     * loops (count-to-infinity); that neighbour already has a better route to
+     * those destinations.  Omission also lets the receiver's stale-route detection
+     * correctly withdraw a route if our path to it now runs through the receiver.
+     */
+    public Collection<RouteEntry> getRoutesExcludingNextHop(String toPeer) {
+        List<RouteEntry> result = new ArrayList<>();
+        for (RouteEntry e : table.values()) {
+            if (e.nextHop().equals(toPeer)) continue;   // split-horizon
+            result.add(e);
+        }
+        return result;
     }
 }
