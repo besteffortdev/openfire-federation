@@ -617,18 +617,7 @@ public class FederationIQHandler extends IQHandler {
 
     /** Finds a local MUCRoom by full JID string (room@conference.domain). */
     private MUCRoom findLocalRoom(String roomJid) {
-        try {
-            JID jid = new JID(roomJid);
-            for (MultiUserChatService svc :
-                    XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatServices()) {
-                if (svc.getServiceDomain().equals(jid.getDomain())) {
-                    return svc.getChatRoom(jid.getNode());
-                }
-            }
-        } catch (Exception e) {
-            Log.warn("findLocalRoom: could not find room {}: {}", roomJid, e.getMessage());
-        }
-        return null;
+        return manager.findLocalMucRoom(roomJid);
     }
 
     private Packet parsePacket(Element el) throws Exception {

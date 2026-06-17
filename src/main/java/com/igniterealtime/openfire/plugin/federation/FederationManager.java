@@ -286,14 +286,7 @@ public class FederationManager {
         if (nicks.isEmpty()) return;
         try {
             JID localRoomJID = new JID(localRoomJid);
-            MUCRoom room = null;
-            for (MultiUserChatService svc :
-                    XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatServices()) {
-                if (svc.getServiceDomain().equals(localRoomJID.getDomain())) {
-                    room = svc.getChatRoom(localRoomJID.getNode());
-                    break;
-                }
-            }
+            MUCRoom room = findLocalMucRoom(localRoomJid);
             if (room == null) return;
             Collection<MUCOccupant> occupants = room.getOccupants();
             if (occupants.isEmpty()) return;
@@ -319,27 +312,37 @@ public class FederationManager {
         }
     }
 
-    /**
-     * Sends a synthetic join or leave presence for every current occupant of
-     * localRoom toward remoteRoomJid on remoteDomain.  Used when establishing
-     * or tearing down a specific spoke so both sides immediately see the correct
-     * occupant state.
-     *
-     * Presences are marked with fed-origin so the receiving server's
-     * injectPresence does not trigger a recursive sync.
-     */
-    public void pushVirtualPresences(String localRoom, String remoteDomain,
-                                     String remoteRoomJid, boolean leaving) {
+    /** Finds a local MUCRoom by full JID string (room@conference.domain), or null. */
+    public MUCRoom findLocalMucRoom(String roomJid) {
         try {
-            JID localRoomJid = new JID(localRoom);
-            MUCRoom room = null;
+            JID jid = new JID(roomJid);
             for (MultiUserChatService svc :
                     XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatServices()) {
-                if (svc.getServiceDomain().equals(localRoomJid.getDomain())) {
-                    room = svc.getChatRoom(localRoomJid.getNode());
-                    break;
+                if (svc.getServiceDomain().equals(jid.getDomain())) {
+                    return svc.getChatRoom(jid.getNode());
                 }
             }
+        } catch (Exception e) {
+            Log.warn("findLocalMucRoom: could not find room {}: {}", roomJid, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Sends a synthetic join or leave presence for every current occupant of
+     * localRoom toward remoteRoomJid on remoteDomain.  Single code path behind
+     * pushVirtualPresences and pushInitialSyncPresences.
+     *
+     * @param markForwarded when true, presences carry fed-origin so the receiver
+     *        injects them without bouncing a reverse sync (in-session updates and
+     *        leaves).  When false (initial mapping sync), the receiver's
+     *        injectPresence runs syncLocalOccupantsToRemote and replies with its
+     *        own occupants — a bilateral exchange.
+     */
+    private void pushOccupants(String localRoom, String remoteDomain, String remoteRoomJid,
+                               boolean leaving, boolean markForwarded) {
+        try {
+            MUCRoom room = findLocalMucRoom(localRoom);
             if (room == null) return;
 
             Collection<MUCOccupant> occupants = room.getOccupants();
@@ -354,8 +357,7 @@ public class FederationManager {
                 if (leaving) {
                     p.setType(Presence.Type.unavailable);
                 } else {
-                    // Carry the occupant's current show/status so the remote side
-                    // sees accurate availability from the moment the mapping is set up.
+                    // Carry current show/status so the remote sees accurate availability.
                     Element curEl = occupant.getPresence().getElement();
                     Element showEl = curEl.element("show");
                     if (showEl != null) p.getElement().addElement("show").setText(showEl.getText());
@@ -363,73 +365,40 @@ public class FederationManager {
                         p.getElement().addElement("status").setText(statusEl.getText());
                     }
                 }
-                FederationStanzaFactory.markAsForwarded(p);
+                if (markForwarded) FederationStanzaFactory.markAsForwarded(p);
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(
                         FederationStanzaFactory.mucForward(
                             nextHop, remoteDomain, remoteRoomJid, localDomain, p));
                 } catch (Exception ex) {
-                    Log.warn("pushVirtualPresences: failed to push {} for {}: {}",
+                    Log.warn("pushOccupants: failed to push {} for {}: {}",
                              leaving ? "leave" : "join", occupant.getUserAddress(), ex.getMessage());
                 }
             }
-            Log.debug("pushVirtualPresences: sent {} {} for {} occupant(s) toward {}",
-                      leaving ? "leave" : "join", localRoom, occupants.size(), remoteRoomJid);
+            Log.debug("pushOccupants: sent {} {} for {} occupant(s) toward {} (fedOrigin={})",
+                      leaving ? "leave" : "join", localRoom, occupants.size(), remoteRoomJid, markForwarded);
         } catch (Exception e) {
-            Log.warn("pushVirtualPresences: error for {}: {}", localRoom, e.getMessage());
+            Log.warn("pushOccupants: error for {}: {}", localRoom, e.getMessage());
         }
     }
 
     /**
-     * Sends current local occupants' join presences to the remote side WITHOUT the
-     * fed-origin marker so the remote's injectPresence triggers syncLocalOccupantsToRemote,
-     * which sends the remote occupants back.  Used only at mapping-creation time.
-     * Normal in-session forwarding uses pushVirtualPresences (WITH fed-origin).
+     * Sends synthetic join/leave presences for current occupants of localRoom toward
+     * a spoke, marked fed-origin so the receiver does not bounce a reverse sync.
+     */
+    public void pushVirtualPresences(String localRoom, String remoteDomain,
+                                     String remoteRoomJid, boolean leaving) {
+        pushOccupants(localRoom, remoteDomain, remoteRoomJid, leaving, true);
+    }
+
+    /**
+     * Sends current local occupants' join presences to the remote WITHOUT fed-origin
+     * so the remote's injectPresence triggers syncLocalOccupantsToRemote and replies
+     * with its own occupants.  Used only at mapping-creation time.
      */
     public void pushInitialSyncPresences(String localRoom, String remoteDomain,
                                          String remoteRoomJid) {
-        try {
-            JID localRoomJid = new JID(localRoom);
-            MUCRoom room = null;
-            for (MultiUserChatService svc :
-                    XMPPServer.getInstance().getMultiUserChatManager().getMultiUserChatServices()) {
-                if (svc.getServiceDomain().equals(localRoomJid.getDomain())) {
-                    room = svc.getChatRoom(localRoomJid.getNode());
-                    break;
-                }
-            }
-            if (room == null) return;
-
-            Collection<MUCOccupant> occupants = room.getOccupants();
-            if (occupants.isEmpty()) return;
-
-            String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-            String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
-
-            for (MUCOccupant occupant : occupants) {
-                Presence p = new Presence();
-                p.setFrom(occupant.getUserAddress());
-                Element curEl = occupant.getPresence().getElement();
-                Element showEl = curEl.element("show");
-                if (showEl != null) p.getElement().addElement("show").setText(showEl.getText());
-                for (Element statusEl : curEl.elements("status")) {
-                    p.getElement().addElement("status").setText(statusEl.getText());
-                }
-                // Intentionally NOT marking as forwarded so the remote's injectPresence
-                // calls syncLocalOccupantsToRemote to push its occupants back to us.
-                try {
-                    XMPPServer.getInstance().getPacketRouter().route(
-                        FederationStanzaFactory.mucForward(
-                            nextHop, remoteDomain, remoteRoomJid, localDomain, p));
-                } catch (Exception ex) {
-                    Log.warn("pushInitialSyncPresences: failed for {}: {}", occupant.getUserAddress(), ex.getMessage());
-                }
-            }
-            Log.debug("pushInitialSyncPresences: sent {} occupant(s) from {} toward {}",
-                      occupants.size(), localRoom, remoteRoomJid);
-        } catch (Exception e) {
-            Log.warn("pushInitialSyncPresences: error for {}: {}", localRoom, e.getMessage());
-        }
+        pushOccupants(localRoom, remoteDomain, remoteRoomJid, false, false);
     }
 
     // ── Routing propagation ────────────────────────────────────────────────────
