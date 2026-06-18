@@ -27,7 +27,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -267,9 +266,10 @@ public class FederationIQHandler extends IQHandler {
                 manager.getRoomManager().addMapping(theirRemote, theirLocal, actualOrigin);
                 Log.info("Room mapping received from {}: local={} ↔ remote={}",
                          actualOrigin, theirRemote, theirLocal);
-                // Occupant sync happens via syncLocalOccupantsToRemote when the
-                // originator's pushInitialSyncPresences (no fed-origin) arrives and
-                // our injectPresence triggers the reverse sync.
+                // Proactively push our full roster (real + virtual occupants) to the
+                // mapping peer so its clients see everyone immediately — even if it has
+                // no occupants of its own to trigger the reverse sync.
+                manager.pushRosterToPeer(theirRemote, actualOrigin, theirLocal);
             }
         }
     }
@@ -576,29 +576,9 @@ public class FederationIQHandler extends IQHandler {
                 }
             }
 
-            // Also forward the virtual occupants we know about from OTHER federated
-            // domains, so this peer immediately sees users that reached us through the
-            // hub — not only our directly-connected clients. This is what makes a room
-            // mapped (or re-enabled) while clients are already connected sync fully.
-            // Marked fed-origin so the receiver injects them without bouncing a sync.
-            Map<String, Set<String>> virtuals =
-                manager.getRoomManager().getVirtualOccupantsByDomain(localRoom);
-            for (Map.Entry<String, Set<String>> ve : virtuals.entrySet()) {
-                if (ve.getKey().equals(remoteDomain)) continue;   // don't echo their own users back
-                for (String nick : ve.getValue()) {
-                    try {
-                        Presence vsync = new Presence();
-                        vsync.setFrom(new JID(nick));
-                        FederationStanzaFactory.markAsForwarded(vsync);
-                        XMPPServer.getInstance().getPacketRouter().route(
-                            FederationStanzaFactory.mucForward(
-                                nextHop, remoteDomain, remoteRoomJid, localDomain, vsync));
-                    } catch (Exception e) {
-                        Log.warn("syncLocalOccupantsToRemote: failed to push virtual {}: {}",
-                                 nick, e.getMessage());
-                    }
-                }
-            }
+            // Also forward virtual occupants reached through us so this peer sees the
+            // full room, not only our directly-connected clients (excludes its own users).
+            manager.forwardVirtualOccupants(localRoom, remoteDomain, remoteRoomJid);
             Log.debug("syncLocalOccupantsToRemote: pushed {} occupant(s) + virtuals from {} to {}",
                       occupants.size(), localRoom, remoteRoomJid);
         }

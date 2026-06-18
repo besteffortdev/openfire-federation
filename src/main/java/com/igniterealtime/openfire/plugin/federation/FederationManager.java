@@ -401,6 +401,51 @@ public class FederationManager {
         pushOccupants(localRoom, remoteDomain, remoteRoomJid, false, false);
     }
 
+    /**
+     * Forwards the virtual occupants we know about in localRoom — users that reached
+     * us from OTHER federated domains — toward toDomain, marked fed-origin.  Excludes:
+     * (a) virtuals that arrived FROM toDomain (don't echo them back the way they came),
+     * and (b) users whose HOME server is toDomain.  Exclusion (b) is keyed on the nick's
+     * domain rather than the domain it was tracked under, because on a multi-hop path a
+     * virtual is tracked under an intermediate neighbour — without this a user sees a
+     * ghost copy of themself when their own presence loops back home.
+     */
+    public void forwardVirtualOccupants(String localRoom, String toDomain, String remoteRoomJid) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop = routingTable.findNextHop(toDomain).orElse(toDomain);
+        Map<String, Set<String>> virtuals = roomManager.getVirtualOccupantsByDomain(localRoom);
+        for (Map.Entry<String, Set<String>> ve : virtuals.entrySet()) {
+            if (ve.getKey().equals(toDomain)) continue;          // arrived from toDomain
+            for (String nick : ve.getValue()) {
+                String nickHome;
+                try { nickHome = new JID(nick).getDomain(); }
+                catch (Exception e) { nickHome = ve.getKey(); }
+                if (toDomain.equals(nickHome)) continue;          // toDomain's own user — don't echo
+                try {
+                    Presence vsync = new Presence();
+                    vsync.setFrom(new JID(nick));
+                    FederationStanzaFactory.markAsForwarded(vsync);
+                    XMPPServer.getInstance().getPacketRouter().route(
+                        FederationStanzaFactory.mucForward(nextHop, toDomain, remoteRoomJid, localDomain, vsync));
+                } catch (Exception e) {
+                    Log.warn("forwardVirtualOccupants: failed for {}: {}", nick, e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * Pushes our full roster of localRoom — real local occupants AND virtual occupants
+     * reached through us — toward a peer that just mapped this room, all marked
+     * fed-origin.  Called from the room-mapping handler so the mapping peer's clients
+     * see everyone immediately, even when it has no occupants of its own to trigger the
+     * reverse sync.
+     */
+    public void pushRosterToPeer(String localRoom, String toDomain, String remoteRoomJid) {
+        pushOccupants(localRoom, toDomain, remoteRoomJid, false, true);
+        forwardVirtualOccupants(localRoom, toDomain, remoteRoomJid);
+    }
+
     // ── Routing propagation ────────────────────────────────────────────────────
 
     /**
