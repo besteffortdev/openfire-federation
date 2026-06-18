@@ -159,6 +159,7 @@ public class FederationApiServlet extends HttpServlet {
 
         // ── settings ──────────────────────────────────────────────────────────
         sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds()).append(",");
+        sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
         sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds());
 
         sb.append("}");

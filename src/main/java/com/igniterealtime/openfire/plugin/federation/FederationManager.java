@@ -590,6 +590,7 @@ public class FederationManager {
     // ── Accessors for subsystems ───────────────────────────────────────────────
 
     public int  getKeepaliveSeconds()            { return s2sMonitor.getKeepaliveSeconds(); }
+    public int  getEffectiveKeepaliveSeconds()   { return s2sMonitor.getEffectiveKeepaliveSeconds(); }
     public void setKeepaliveSeconds(int sec)     { s2sMonitor.setKeepaliveSeconds(sec); }
     public int  getReconnectSeconds()            { return s2sMonitor.getReconnectSeconds(); }
     public void setReconnectSeconds(int sec)     { s2sMonitor.setReconnectSeconds(sec); }

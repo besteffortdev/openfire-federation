@@ -4,11 +4,13 @@ import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import org.jivesoftware.openfire.SessionManager;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.RoutingTable;
+import org.jivesoftware.openfire.session.ConnectionSettings;
 import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,6 +52,8 @@ public class S2SMonitor {
     private ScheduledExecutorService scheduler;
     private ScheduledFuture<?>       keepaliveFuture;
     private ScheduledFuture<?>       reconnectFuture;
+    /** The interval the keepalive task is currently scheduled at (effective, post-clamp). */
+    private volatile int            scheduledKeepaliveSeconds = -1;
 
     /** How many reconnect attempts have been made per peer since it last went UNREACHABLE. */
     private final ConcurrentHashMap<String, Integer> peerRetryCount  = new ConcurrentHashMap<>();
@@ -75,15 +79,15 @@ public class S2SMonitor {
         // First poll after 5 s, then every POLL_SECONDS.
         scheduler.scheduleAtFixedRate(this::poll, 5, POLL_SECONDS, TimeUnit.SECONDS);
         // Keepalive pings prevent idle S2S sessions from timing out between real messages.
-        int keepaliveSec = getKeepaliveSeconds();
-        keepaliveFuture = scheduler.scheduleAtFixedRate(
-                this::sendKeepalives, keepaliveSec, keepaliveSec, TimeUnit.SECONDS);
+        // Interval is clamped below Openfire's S2S idle timeout (see rescheduleKeepalive).
+        rescheduleKeepalive();
         // Reconnect retries poll every RECONNECT_POLL_SECONDS; per-peer back-off controls
         // when each UNREACHABLE peer is actually retried (up to reconnectSeconds cap).
         reconnectFuture = scheduler.scheduleAtFixedRate(
                 this::sendReconnects, RECONNECT_POLL_SECONDS, RECONNECT_POLL_SECONDS, TimeUnit.SECONDS);
-        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect-poll={}s, reconnect-cap={}s)",
-                 POLL_SECONDS, keepaliveSec, RECONNECT_POLL_SECONDS, getReconnectSeconds());
+        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect-poll={}s, reconnect-cap={}s, s2s-idle={}s)",
+                 POLL_SECONDS, getEffectiveKeepaliveSeconds(), RECONNECT_POLL_SECONDS, getReconnectSeconds(),
+                 idleTimeoutSeconds());
     }
 
     public void stop() {
@@ -100,10 +104,63 @@ public class S2SMonitor {
     public void setKeepaliveSeconds(int seconds) {
         if (seconds < KEEPALIVE_MINIMUM) seconds = KEEPALIVE_MINIMUM;
         JiveGlobals.setProperty(KEEPALIVE_JIVE_KEY, String.valueOf(seconds));
+        rescheduleKeepalive();
+        Log.info("S2S keepalive interval updated to {}s (effective {}s)", seconds, scheduledKeepaliveSeconds);
+    }
+
+    /**
+     * Openfire's S2S idle-disconnect timeout in seconds, or -1 if disabled/unknown.
+     * This is the timeout that produces the peer's "Connection has been idle" stream
+     * error; the keepalive must fire comfortably inside it.
+     */
+    private int idleTimeoutSeconds() {
+        try {
+            Duration idle = ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.getValue();
+            if (idle != null && !idle.isZero() && !idle.isNegative()) {
+                return (int) idle.getSeconds();
+            }
+        } catch (Exception e) {
+            Log.debug("Could not read S2S idle timeout: {}", e.getMessage());
+        }
+        return -1;
+    }
+
+    /**
+     * The keepalive interval actually used for scheduling: the configured value,
+     * clamped to 80% of Openfire's S2S idle timeout so a ping always lands before the
+     * peer closes the link.  Returns the configured value when the idle timeout is
+     * disabled, unreadable, or already comfortably larger.
+     */
+    public int getEffectiveKeepaliveSeconds() {
+        int configured = getKeepaliveSeconds();
+        int idleSec = idleTimeoutSeconds();
+        if (idleSec > 0) {
+            int safe = Math.max(KEEPALIVE_MINIMUM, (int) (idleSec * 0.8));
+            if (configured > safe) return safe;
+        }
+        return configured;
+    }
+
+    /**
+     * (Re)schedules the keepalive task at the current effective interval.  Idempotent —
+     * does nothing if the effective interval is unchanged, so it is safe to call from
+     * the poll loop to adapt when the admin changes the S2S idle timeout at runtime.
+     */
+    private synchronized void rescheduleKeepalive() {
+        if (scheduler == null) return;
+        int effective = getEffectiveKeepaliveSeconds();
+        if (effective == scheduledKeepaliveSeconds) return;
         if (keepaliveFuture != null) keepaliveFuture.cancel(false);
         keepaliveFuture = scheduler.scheduleAtFixedRate(
-                this::sendKeepalives, seconds, seconds, TimeUnit.SECONDS);
-        Log.info("S2S keepalive interval updated to {}s", seconds);
+                this::sendKeepalives, effective, effective, TimeUnit.SECONDS);
+        scheduledKeepaliveSeconds = effective;
+        int configured = getKeepaliveSeconds();
+        if (effective != configured) {
+            Log.info("S2S keepalive every {}s (configured {}s, clamped below the S2S idle timeout of {}s)",
+                     effective, configured, idleTimeoutSeconds());
+        } else {
+            Log.debug("S2S keepalive every {}s", effective);
+        }
     }
 
     public int getReconnectSeconds() {
@@ -170,6 +227,9 @@ public class S2SMonitor {
                 onPeerDown(domain);
             }
         }
+
+        // Adapt the keepalive cadence if the admin changed the S2S idle timeout at runtime.
+        rescheduleKeepalive();
     }
 
     private void sendKeepalives() {
