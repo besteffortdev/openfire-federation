@@ -91,6 +91,12 @@ public class FederationManager {
     }
 
     public void retryPeer(String domain) {
+        PeerServer.Status cur = peerRegistry.getPeer(domain).map(PeerServer::getStatus).orElse(null);
+        if (cur == PeerServer.Status.DISABLED || cur == PeerServer.Status.REMOTE_DISABLED) {
+            Log.info("retryPeer ignored for {} — status {} (use enable; a REMOTE_DISABLED link can only be lifted by the remote)",
+                     domain, cur);
+            return;
+        }
         Log.info("Retrying S2S for peer: {}", domain);
         // Clear WITHDRAWN so S2SMonitor will track this peer again.
         peerRegistry.getPeer(domain).ifPresent(p -> {
@@ -99,6 +105,51 @@ public class FederationManager {
             }
         });
         sendPeerAnnounce(domain);
+    }
+
+    /**
+     * Administratively disables a peer: tears down federation exactly like removePeer
+     * but keeps the peer registered with a persistent DISABLED status, tells the remote
+     * (peer-disable), and keeps refusing it — re-asserting the disable if it re-creates
+     * the connection.  Re-enable locally with {@link #enablePeer}.
+     */
+    public void disablePeer(String domain) {
+        for (String localJid : new ArrayList<>(roomManager.getLocalMappings().keySet())) {
+            if (roomManager.getMappingForLocal(localJid, domain) != null) {
+                unmapRoom(localJid, domain);
+            }
+        }
+        peerRegistry.getPeer(domain).ifPresent(peer -> {
+            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                sendPeerDisable(domain);
+            }
+        });
+        killSession(domain, "outgoing");
+        killSession(domain, "incoming");
+        Set<String> removedRoutes = routingTable.removePeer(domain);
+        handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
+        if (!removedRoutes.isEmpty()) {
+            propagateRoutingToAll(domain);
+        }
+        if (!peerRegistry.contains(domain)) peerRegistry.addPeer(domain);
+        peerRegistry.setControlStatus(domain, PeerServer.Status.DISABLED);
+        Log.info("Peer disabled: {}", domain);
+    }
+
+    /**
+     * Lifts a local DISABLE: clears the status and reaches out so the remote (which is
+     * holding REMOTE_DISABLED) sees our announce and resumes federation.  No-op unless
+     * the peer is currently DISABLED (a REMOTE_DISABLED link can only be lifted remotely).
+     */
+    public void enablePeer(String domain) {
+        PeerServer.Status cur = peerRegistry.getPeer(domain).map(PeerServer::getStatus).orElse(null);
+        if (cur != PeerServer.Status.DISABLED) {
+            Log.info("enablePeer ignored for {} — status {} (only a locally DISABLED peer can be enabled here)", domain, cur);
+            return;
+        }
+        peerRegistry.setControlStatus(domain, PeerServer.Status.UNKNOWN);
+        sendPeerAnnounce(domain);
+        Log.info("Peer enabled: {}", domain);
     }
 
     public List<Map<String, Object>> getS2SSessions() {
@@ -550,6 +601,15 @@ public class FederationManager {
                       .route(FederationStanzaFactory.peerAnnounce(toDomain));
         } catch (Exception e) {
             Log.warn("Failed to send peer-announce to {}: {}", toDomain, e.getMessage());
+        }
+    }
+
+    public void sendPeerDisable(String toDomain) {
+        try {
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.peerDisable(toDomain));
+        } catch (Exception e) {
+            Log.warn("Failed to send peer-disable to {}: {}", toDomain, e.getMessage());
         }
     }
 

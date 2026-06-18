@@ -88,15 +88,34 @@ function renderPeers(peers) {
     }
     const now = Date.now();
     tbody.innerHTML = peers.map(p => {
-        const isWithdrawn = p.status === 'WITHDRAWN';
-        const isUnreachable = p.status === 'UNREACHABLE';
-        const needsAction = isWithdrawn || isUnreachable || p.status === 'UNKNOWN';
-        const actionBtn = needsAction
-            ? `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="retryPeer('${escHtml(p.domain)}')">${isWithdrawn ? 'Reconnect' : 'Retry'}</button>`
-            : '';
+        const isWithdrawn      = p.status === 'WITHDRAWN';
+        const isUnreachable    = p.status === 'UNREACHABLE';
+        const isDisabled       = p.status === 'DISABLED';
+        const isRemoteDisabled = p.status === 'REMOTE_DISABLED';
+        const needsRetry = isWithdrawn || isUnreachable || p.status === 'UNKNOWN';
 
-        let statusLabel = isWithdrawn ? 'Disconnected by remote' : p.status;
+        let actionBtns = '';
+        if (isDisabled) {
+            // We disabled this peer — only we can re-enable it.
+            actionBtns = `<button class="btn-small btn-primary" style="margin-right:4px"
+                       onclick="enablePeer('${escHtml(p.domain)}')">Enable</button>`;
+        } else if (isRemoteDisabled) {
+            // Disabled by the remote — cannot be re-enabled from this side.
+            actionBtns = '';
+        } else {
+            if (needsRetry) {
+                actionBtns += `<button class="btn-small btn-warn" style="margin-right:4px"
+                       onclick="retryPeer('${escHtml(p.domain)}')">${isWithdrawn ? 'Reconnect' : 'Retry'}</button>`;
+            }
+            actionBtns += `<button class="btn-small btn-warn" style="margin-right:4px"
+                       onclick="disablePeer('${escHtml(p.domain)}')">Disable</button>`;
+        }
+
+        let statusLabel;
+        if (isWithdrawn)           statusLabel = 'Disconnected by remote';
+        else if (isDisabled)       statusLabel = 'Disabled';
+        else if (isRemoteDisabled) statusLabel = 'Disabled by remote';
+        else                       statusLabel = p.status;
         if (isUnreachable) {
             const retryAt = p.nextRetryAt || 0;
             if (retryAt > now) {
@@ -113,7 +132,7 @@ function renderPeers(peers) {
             <td><span class="status-dot ${statusClass(p.status)}"></span> ${statusLabel}</td>
             <td>${p.lastSeen ? new Date(p.lastSeen).toLocaleString() : '—'}</td>
             <td style="white-space:nowrap">
-                ${actionBtn}
+                ${actionBtns}
                 <button class="btn-small btn-danger"
                         onclick="removePeer('${escHtml(p.domain)}')">Remove</button>
             </td>
@@ -123,6 +142,18 @@ function renderPeers(peers) {
 
 function retryPeer(domain) {
     post({ action: 'retry-peer', domain }).then(refresh);
+}
+
+function disablePeer(domain) {
+    if (!confirm('Disable federation with ' + domain + '?\n\n'
+        + 'This tears down the connection like removing it, but the remote is told '
+        + 'and cannot re-enable it from their side — even by deleting and re-adding it. '
+        + 'Only you can re-enable it here.')) return;
+    post({ action: 'disable-peer', domain }).then(refresh);
+}
+
+function enablePeer(domain) {
+    post({ action: 'enable-peer', domain }).then(refresh);
 }
 
 // ── S2S sessions ──────────────────────────────────────────────────────────────
@@ -247,6 +278,7 @@ function statusClass(s) {
     if (s === 'REACHABLE')  return 'green';
     if (s === 'UNREACHABLE') return 'red';
     if (s === 'WITHDRAWN')   return 'orange';
+    if (s === 'DISABLED' || s === 'REMOTE_DISABLED') return 'red';
     return 'grey';
 }
 

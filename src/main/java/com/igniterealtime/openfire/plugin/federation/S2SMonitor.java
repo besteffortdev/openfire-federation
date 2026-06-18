@@ -199,7 +199,11 @@ public class S2SMonitor {
 
         for (PeerServer peer : peerRegistry.getPeers()) {
             // WITHDRAWN peers intentionally disconnected — skip until admin reconnects.
-            if (peer.getStatus() == PeerServer.Status.WITHDRAWN) continue;
+            // DISABLED / REMOTE_DISABLED are administrative blocks — never auto-poll them.
+            PeerServer.Status st = peer.getStatus();
+            if (st == PeerServer.Status.WITHDRAWN
+                    || st == PeerServer.Status.DISABLED
+                    || st == PeerServer.Status.REMOTE_DISABLED) continue;
 
             String domain = peer.getDomain();
             boolean s2sUp;

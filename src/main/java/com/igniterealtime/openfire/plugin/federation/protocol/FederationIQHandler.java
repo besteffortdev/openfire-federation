@@ -82,6 +82,7 @@ public class FederationIQHandler extends IQHandler {
         switch (child.getName()) {
             case "peer-announce"       -> handlePeerAnnounce(fromDomain, child);
             case "peer-withdraw"       -> handlePeerWithdraw(fromDomain);
+            case "peer-disable"        -> handlePeerDisable(fromDomain);
             case "routing-update"      -> handleRoutingUpdate(fromDomain, child);
             case "room-advertisement"  -> handleRoomAdvertisement(fromDomain, child);
             case "room-mapping"        -> handleRoomMapping(fromDomain, child);
@@ -97,6 +98,26 @@ public class FederationIQHandler extends IQHandler {
 
     private void handlePeerAnnounce(String fromDomain, Element el) {
         boolean isReply = "true".equals(el.attributeValue("reply"));
+
+        PeerServer.Status current = manager.getPeerRegistry().getPeer(fromDomain)
+                .map(PeerServer::getStatus).orElse(null);
+
+        // Enforcement: if we administratively DISABLED this peer, re-assert the disable
+        // instead of gossiping — even if it removed and re-created the connection.
+        if (current == PeerServer.Status.DISABLED) {
+            Log.debug("peer-announce from DISABLED peer {} — re-asserting disable", fromDomain);
+            manager.sendPeerDisable(fromDomain);
+            return;
+        }
+
+        // An announce from a peer we had marked REMOTE_DISABLED means the remote (the
+        // authority) lifted its block — it only announces after enabling. Clear and
+        // fall through to normal processing so federation resumes.
+        if (current == PeerServer.Status.REMOTE_DISABLED) {
+            Log.info("peer {} re-enabled the connection — clearing REMOTE_DISABLED", fromDomain);
+            manager.getPeerRegistry().setControlStatus(fromDomain, PeerServer.Status.UNKNOWN);
+        }
+
         Log.debug("peer-announce from {}{}", fromDomain, isReply ? " (reply)" : "");
 
         boolean isNew = !manager.getPeerRegistry().contains(fromDomain);
@@ -150,6 +171,26 @@ public class FederationIQHandler extends IQHandler {
         manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.WITHDRAWN);
         // doPoll skips WITHDRAWN peers so onPeerDown never fires as a fallback —
         // propagate the withdrawal here while we still know what was removed.
+        if (!removed.isEmpty()) {
+            manager.propagateRoutingToAll(fromDomain);
+        }
+    }
+
+    // ── peer-disable ─────────────────────────────────────────────────────────────
+
+    private void handlePeerDisable(String fromDomain) {
+        Log.info("peer-disable from {} — tearing down and marking REMOTE_DISABLED (cannot re-enable locally)", fromDomain);
+        // Record the block even if the peer wasn't known yet, so a re-add stays disabled.
+        if (!manager.getPeerRegistry().contains(fromDomain)) {
+            manager.getPeerRegistry().addPeer(fromDomain);
+        }
+        // Tear down federation toward this domain (same as a removal).
+        for (String localJid : new ArrayList<>(manager.getRoomManager().getLocalMappings().keySet())) {
+            manager.getRoomManager().removeMapping(localJid, fromDomain);
+        }
+        Set<String> removed = manager.getRoutingTable().removePeer(fromDomain);
+        manager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(fromDomain) : removed);
+        manager.getPeerRegistry().setControlStatus(fromDomain, PeerServer.Status.REMOTE_DISABLED);
         if (!removed.isEmpty()) {
             manager.propagateRoutingToAll(fromDomain);
         }

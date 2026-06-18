@@ -242,6 +242,26 @@ public class FederationApiServlet extends HttpServlet {
                 out.print("{\"ok\":true}");
                 return;
             }
+            case "disable-peer": {
+                String domain = req.getParameter("domain");
+                if (domain == null || domain.isBlank()) {
+                    out.print("{\"error\":\"domain required\"}");
+                    return;
+                }
+                mgr.disablePeer(domain.strip().toLowerCase());
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "enable-peer": {
+                String domain = req.getParameter("domain");
+                if (domain == null || domain.isBlank()) {
+                    out.print("{\"error\":\"domain required\"}");
+                    return;
+                }
+                mgr.enablePeer(domain.strip().toLowerCase());
+                out.print("{\"ok\":true}");
+                return;
+            }
             case "retry-peer": {
                 String domain = req.getParameter("domain");
                 if (domain == null || domain.isBlank()) {

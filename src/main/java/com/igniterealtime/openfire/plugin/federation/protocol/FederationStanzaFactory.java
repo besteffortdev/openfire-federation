@@ -76,6 +76,18 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    /**
+     * Tells the remote that we have administratively DISABLED this connection.
+     * Unlike peer-withdraw, the receiver records a persistent REMOTE_DISABLED state it
+     * cannot lift itself, and we re-assert this in response to its peer-announce.
+     */
+    public static IQ peerDisable(String toDomain) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        fed.addElement("peer-disable");
+        return iq;
+    }
+
     // ── routing-update ─────────────────────────────────────────────────────────
 
     public static IQ routingUpdate(String toDomain, Collection<RouteEntry> table) {
