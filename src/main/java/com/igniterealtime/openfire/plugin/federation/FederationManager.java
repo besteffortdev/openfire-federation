@@ -553,6 +553,20 @@ public class FederationManager {
         }
     }
 
+    /**
+     * Sends a one-shot keepalive reply that warms the reverse S2S socket without
+     * eliciting another reply.  Sent when a steady-state peer-announce arrives so a
+     * single peer's keepalive timer keeps both directions of the link alive.
+     */
+    public void sendPeerAnnounceReply(String toDomain) {
+        try {
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.peerAnnounce(toDomain, true));
+        } catch (Exception e) {
+            Log.warn("Failed to send peer-announce reply to {}: {}", toDomain, e.getMessage());
+        }
+    }
+
     public void sendRoutingUpdate(String toDomain) {
         try {
             XMPPServer.getInstance().getPacketRouter()

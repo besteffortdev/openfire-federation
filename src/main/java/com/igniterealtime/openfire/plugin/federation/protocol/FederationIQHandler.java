@@ -96,7 +96,8 @@ public class FederationIQHandler extends IQHandler {
     // ── peer-announce ──────────────────────────────────────────────────────────
 
     private void handlePeerAnnounce(String fromDomain, Element el) {
-        Log.info("peer-announce from {}", fromDomain);
+        boolean isReply = "true".equals(el.attributeValue("reply"));
+        Log.debug("peer-announce from {}{}", fromDomain, isReply ? " (reply)" : "");
 
         boolean isNew = !manager.getPeerRegistry().contains(fromDomain);
 
@@ -123,6 +124,12 @@ public class FederationIQHandler extends IQHandler {
             // are only known to us — no one else learns about them until the next triggered
             // update fires (which requires the new peer to have something new to offer us).
             manager.propagateRoutingToAll(fromDomain);
+        } else if (!isReply) {
+            // Steady-state keepalive: send one reply back so the reverse S2S socket —
+            // which our own keepalive timer cannot reach (separate per-direction sockets,
+            // each with its own idle timer) — stays warm too. A reply never triggers
+            // another reply, so there is no ping-pong.
+            manager.sendPeerAnnounceReply(fromDomain);
         }
     }
 

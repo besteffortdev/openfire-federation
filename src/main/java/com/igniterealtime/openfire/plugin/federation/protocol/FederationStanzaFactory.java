@@ -50,9 +50,20 @@ public final class FederationStanzaFactory {
     // ── peer-announce ──────────────────────────────────────────────────────────
 
     public static IQ peerAnnounce(String toDomain) {
+        return peerAnnounce(toDomain, false);
+    }
+
+    /**
+     * @param isReply marks a keepalive sent in response to another peer-announce.
+     *        The receiver does not reply to a reply, so one side's keepalive timer
+     *        warms BOTH S2S directions (each direction is a separate socket with its
+     *        own idle timer) without an endless ping-pong.
+     */
+    public static IQ peerAnnounce(String toDomain, boolean isReply) {
         IQ iq = base(toDomain);
         Element fed = iq.setChildElement("federation", NS);
         Element ann = fed.addElement("peer-announce");
+        if (isReply) ann.addAttribute("reply", "true");
         ann.addElement("server").setText(localJID().getDomain());
         ann.addElement("version").setText("1");
         return iq;
