@@ -581,11 +581,15 @@ public class FederationIQHandler extends IQHandler {
                   leaving ? "leave" : "join", occupants.size(), targetRoom);
 
         // Keep the virtual occupant roster up-to-date so eviction on peer removal
-        // can send the right leave presences to local clients.
+        // can send the right leave presences to local clients.  Track both the user's
+        // HOME (origin, encoded in the "user@home" nick) and the immediate sender we got
+        // them from (arrivedVia) so reachability- and mapping-driven eviction stay correct
+        // on multi-hop paths without re-deriving one from the other later.
         if (leaving) {
-            manager.getRoomManager().untrackVirtualOccupant(targetRoom, fromDomain, senderNick);
+            manager.getRoomManager().untrackVirtualOccupant(targetRoom, senderNick);
         } else {
-            manager.getRoomManager().trackVirtualOccupant(targetRoom, fromDomain, senderNick);
+            manager.getRoomManager().trackVirtualOccupant(targetRoom, originOf(senderNick, fromDomain),
+                                                           fromDomain, senderNick);
         }
 
         // On join: push our local occupants back to the sender so they immediately
@@ -665,6 +669,16 @@ public class FederationIQHandler extends IQHandler {
             return (jid.getNode() != null ? jid.getNode() + "@" : "") + jid.getDomain();
         } catch (Exception e) {
             return "remote";
+        }
+    }
+
+    /** Home (origin) domain of a virtual nick ("user@home"); falls back to the immediate sender. */
+    private String originOf(String nick, String fallback) {
+        try {
+            String d = new JID(nick).getDomain();
+            return (d == null || d.isEmpty()) ? fallback : d;
+        } catch (Exception e) {
+            return fallback;
         }
     }
 

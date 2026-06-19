@@ -342,11 +342,11 @@ public class FederationManager {
 
     /**
      * Delivers leave presences to every current local occupant of localRoomJid for each
-     * virtual nick that was injected from remoteDomain (matched by the domain the nick
-     * was tracked under).  Used when tearing down a specific mapping.
+     * virtual nick that ARRIVED VIA remoteDomain (the immediate neighbour we got them from).
+     * Used when tearing down a specific mapping while others on the room survive.
      */
     public void evictVirtualOccupants(String localRoomJid, String remoteDomain) {
-        sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupants(localRoomJid, remoteDomain));
+        sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByArrivedVia(localRoomJid, remoteDomain));
     }
 
     /**
@@ -488,32 +488,25 @@ public class FederationManager {
     /**
      * Forwards the virtual occupants we know about in localRoom — users that reached
      * us from OTHER federated domains — toward toDomain, marked fed-origin.  Excludes:
-     * (a) virtuals that arrived FROM toDomain (don't echo them back the way they came),
-     * and (b) users whose HOME server is toDomain.  Exclusion (b) is keyed on the nick's
-     * domain rather than the domain it was tracked under, because on a multi-hop path a
-     * virtual is tracked under an intermediate neighbour — without this a user sees a
-     * ghost copy of themself when their own presence loops back home.
+     * (a) virtuals that arrived VIA toDomain (don't echo them back the way they came),
+     * and (b) users whose HOME (origin) server is toDomain (don't echo a server its own
+     * users — otherwise a user sees a ghost copy of themself looping back home).  Both are
+     * first-class fields on {@link FederatedRoomManager.VirtualOccupant}, so no nick parsing.
      */
     public void forwardVirtualOccupants(String localRoom, String toDomain, String remoteRoomJid) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(toDomain).orElse(toDomain);
-        Map<String, Set<String>> virtuals = roomManager.getVirtualOccupantsByDomain(localRoom);
-        for (Map.Entry<String, Set<String>> ve : virtuals.entrySet()) {
-            if (ve.getKey().equals(toDomain)) continue;          // arrived from toDomain
-            for (String nick : ve.getValue()) {
-                String nickHome;
-                try { nickHome = new JID(nick).getDomain(); }
-                catch (Exception e) { nickHome = ve.getKey(); }
-                if (toDomain.equals(nickHome)) continue;          // toDomain's own user — don't echo
-                try {
-                    Presence vsync = new Presence();
-                    vsync.setFrom(new JID(nick));
-                    FederationStanzaFactory.markAsForwarded(vsync);
-                    XMPPServer.getInstance().getPacketRouter().route(
-                        FederationStanzaFactory.mucForward(nextHop, toDomain, remoteRoomJid, localDomain, vsync));
-                } catch (Exception e) {
-                    Log.warn("forwardVirtualOccupants: failed for {}: {}", nick, e.getMessage());
-                }
+        for (FederatedRoomManager.VirtualOccupant vo : roomManager.getVirtualOccupants(localRoom)) {
+            if (toDomain.equals(vo.arrivedVia())) continue;       // don't echo back the way it came
+            if (toDomain.equals(vo.origin()))     continue;       // toDomain's own user — don't echo
+            try {
+                Presence vsync = new Presence();
+                vsync.setFrom(new JID(vo.nick()));
+                FederationStanzaFactory.markAsForwarded(vsync);
+                XMPPServer.getInstance().getPacketRouter().route(
+                    FederationStanzaFactory.mucForward(nextHop, toDomain, remoteRoomJid, localDomain, vsync));
+            } catch (Exception e) {
+                Log.warn("forwardVirtualOccupants: failed for {}: {}", vo.nick(), e.getMessage());
             }
         }
     }
