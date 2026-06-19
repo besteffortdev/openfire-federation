@@ -433,6 +433,10 @@ public class FederatedRoomManager {
         roomRelaySource.put(sourceDomain, fromDomain);
     }
 
+    /**
+     * Full clear for peer-down / unreachability: drops rooms that ORIGINATE from peerDomain
+     * AND rooms that were merely relayed TO us THROUGH it (now unreachable).
+     */
     public void clearRemoteRooms(String peerDomain) {
         // Clear rooms that originated directly from this peer.
         remoteRooms.remove(peerDomain);
@@ -445,6 +449,17 @@ public class FederatedRoomManager {
             }
             return false;
         });
+    }
+
+    /**
+     * Withdrawal clear: drops ONLY the rooms that originate from originDomain, leaving rooms
+     * merely relayed THROUGH it intact.  Used when a peer that is still up (and still relaying
+     * others' rooms) stops federating its own room — clearing relay-learned rooms here would
+     * wrongly wipe a hub-spoke's entire cache (everything came via the hub).
+     */
+    public void clearRemoteRoomsForOrigin(String originDomain) {
+        remoteRooms.remove(originDomain);
+        roomRelaySource.remove(originDomain);
     }
 
     public Map<String, List<FederatedRoom>> getRemoteRooms() {

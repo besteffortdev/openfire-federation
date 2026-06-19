@@ -277,11 +277,12 @@ public class FederationIQHandler extends IQHandler {
         }
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
         if (rooms.isEmpty()) {
-            // Withdrawal: the origin no longer has federatable rooms (or is gone).
-            // Clear all rooms learned from this origin and propagate the withdrawal so
-            // downstream multi-hop servers also drop their cached rooms for this origin.
-            manager.getRoomManager().clearRemoteRooms(sourceDomain);
-            Log.debug("room-advertisement WITHDRAWAL from {} (source={}) — clearing and relaying", fromDomain, sourceDomain);
+            // Withdrawal: the origin stopped federating its own rooms (but is still up and
+            // still relaying others' rooms). Clear ONLY this origin's rooms — NOT rooms merely
+            // relayed through the sender, or a hub-spoke would wipe its whole cache (everything
+            // arrived via the hub). Propagate so downstream servers drop this origin's rooms too.
+            manager.getRoomManager().clearRemoteRoomsForOrigin(sourceDomain);
+            Log.debug("room-advertisement WITHDRAWAL from {} (source={}) — clearing origin's rooms and relaying", fromDomain, sourceDomain);
         } else {
             manager.getRoomManager().updateRemoteRooms(sourceDomain, fromDomain, rooms);
             Log.debug("room-advertisement from {} (source={}) — {} room(s)", fromDomain, sourceDomain, rooms.size());
