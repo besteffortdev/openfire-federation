@@ -89,9 +89,11 @@ public class FederationApiServlet extends HttpServlet {
             for (Map<String, String> m : roomMappings) {
                 if (!fm) sb.append(",");
                 fm = false;
+                boolean connected = mgr.getRoutingTable().isReachable(m.get("remoteDomain"));
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
-                  .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\"")
+                  .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\",")
+                  .append("\"connected\":").append(connected)
                   .append("}");
             }
             sb.append("]}");
@@ -132,9 +134,11 @@ public class FederationApiServlet extends HttpServlet {
             for (RoomMapping m : entry.getValue()) {
                 if (!fm) sb.append(",");
                 fm = false;
+                boolean connected = mgr.getRoutingTable().isReachable(m.remoteDomain());
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
-                  .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\"")
+                  .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\",")
+                  .append("\"connected\":").append(connected)
                   .append("}");
             }
             sb.append("]");

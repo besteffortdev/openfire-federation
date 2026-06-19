@@ -320,24 +320,36 @@ public class FederationManager {
     }
 
     /**
-     * Evicts all virtual occupants from remoteDomain across every local room.
-     * Used on unexpected peer disconnect so clients see leave presences rather
-     * than ghost users that never departed.
+     * Drops every client ORIGINATING from remoteDomain across all local rooms — used
+     * when the route to remoteDomain is lost.  Eviction is keyed on the virtual nick's
+     * HOME domain rather than the domain it was tracked under, so multi-hop occupants
+     * (tracked under a relay) are also dropped when the far server becomes unreachable.
      */
     public void evictAllVirtualOccupantsFromDomain(String remoteDomain) {
-        for (String localJid : roomManager.getLocalRoomsWithVirtualOccupantsFrom(remoteDomain)) {
-            evictVirtualOccupants(localJid, remoteDomain);
+        for (String localJid : roomManager.getRoomsWithAnyVirtualOccupants()) {
+            evictVirtualOccupantsByOrigin(localJid, remoteDomain);
         }
     }
 
     /**
-     * Delivers leave presences to every current local occupant of localRoomJid for
-     * each virtual nick that was injected from remoteDomain.  Clears the tracking
-     * so eviction is idempotent.  Called before removing a mapping so clients
-     * immediately see the departing virtual users.
+     * Delivers leave presences to every current local occupant of localRoomJid for each
+     * virtual nick that was injected from remoteDomain (matched by the domain the nick
+     * was tracked under).  Used when tearing down a specific mapping.
      */
     public void evictVirtualOccupants(String localRoomJid, String remoteDomain) {
-        Set<String> nicks = roomManager.clearVirtualOccupants(localRoomJid, remoteDomain);
+        sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupants(localRoomJid, remoteDomain));
+    }
+
+    /**
+     * Like {@link #evictVirtualOccupants} but matches virtual nicks by their HOME domain
+     * (user@home), so it drops a server's clients even when they reached us via a relay.
+     */
+    public void evictVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
+        sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByOrigin(localRoomJid, originDomain));
+    }
+
+    /** Sends an unavailable presence for each given virtual nick to every real local occupant. */
+    private void sendVirtualLeaves(String localRoomJid, Set<String> nicks) {
         if (nicks.isEmpty()) return;
         try {
             JID localRoomJID = new JID(localRoomJid);
@@ -360,10 +372,9 @@ public class FederationManager {
                     FederationStanzaFactory.directDeliver(leave);
                 }
             }
-            Log.debug("evictVirtualOccupants: sent {} leave(s) from {} in {}",
-                      nicks.size(), remoteDomain, localRoomJid);
+            Log.debug("sendVirtualLeaves: sent {} leave(s) in {}", nicks.size(), localRoomJid);
         } catch (Exception e) {
-            Log.warn("evictVirtualOccupants: error for {}/{}: {}", localRoomJid, remoteDomain, e.getMessage());
+            Log.warn("sendVirtualLeaves: error for {}: {}", localRoomJid, e.getMessage());
         }
     }
 

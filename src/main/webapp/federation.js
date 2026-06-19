@@ -323,12 +323,19 @@ function renderLocalRooms(rooms) {
     tbody.innerHTML = rooms.map(r => {
         let mappedCell;
         if (r.mappings && r.mappings.length > 0) {
-            mappedCell = r.mappings.map(m => `
+            mappedCell = r.mappings.map(m => {
+                const disconnected = m.connected === false;
+                const stateBadge = disconnected
+                    ? `<span class="mapping-state mapping-disconnected" title="Route to ${escHtml(m.remoteDomain)} is down">⚠ disconnected</span>`
+                    : `<span class="mapping-state mapping-connected">● connected</span>`;
+                return `
                 <div class="mapping-row">
                     <span class="badge badge-fed" title="${escHtml(m.remoteDomain)}">${escHtml(m.remoteRoomJid)}</span>
+                    ${stateBadge}
                     <button class="btn-small btn-danger"
                             onclick="unmapRoom('${escHtml(r.jid)}','${escHtml(m.remoteDomain)}')">Unmap</button>
-                </div>`).join('');
+                </div>`;
+            }).join('');
         } else {
             mappedCell = '<span style="color:#999;font-size:11px">not mapped</span>';
         }

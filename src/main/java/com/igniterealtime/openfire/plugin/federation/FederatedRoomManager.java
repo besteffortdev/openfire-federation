@@ -9,6 +9,7 @@ import org.jivesoftware.openfire.muc.MultiUserChatService;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -332,15 +333,6 @@ public class FederatedRoomManager {
         }
     }
 
-    /** All local room JIDs that currently have at least one virtual occupant from remoteDomain. */
-    public Set<String> getLocalRoomsWithVirtualOccupantsFrom(String remoteDomain) {
-        Set<String> result = new java.util.HashSet<>();
-        virtualOccupants.forEach((localJid, byDomain) -> {
-            Set<String> nicks = byDomain.get(remoteDomain);
-            if (nicks != null && !nicks.isEmpty()) result.add(localJid);
-        });
-        return result;
-    }
 
     /**
      * Snapshot of virtual occupants in a room, grouped by source domain.  Used to
@@ -353,6 +345,53 @@ public class FederatedRoomManager {
         Map<String, Set<String>> copy = new LinkedHashMap<>();
         byDomain.forEach((d, nicks) -> copy.put(d, new HashSet<>(nicks)));
         return copy;
+    }
+
+    /** All local room JIDs that currently have any virtual occupants tracked. */
+    public Set<String> getRoomsWithAnyVirtualOccupants() {
+        return new java.util.HashSet<>(virtualOccupants.keySet());
+    }
+
+    /**
+     * Removes and returns virtual nicks in a room whose HOME domain (from the nick,
+     * which is "user@home") is originDomain — across every tracked sender-domain group.
+     * Used to drop a server's clients when its route is lost, even when they reached us
+     * through a relay (and are therefore tracked under the relay's domain, not the origin).
+     */
+    public Set<String> clearVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
+        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
+        if (byDomain == null) return Collections.emptySet();
+        Set<String> removed = new java.util.HashSet<>();
+        Set<String> emptied = new java.util.HashSet<>();
+        for (Map.Entry<String, Set<String>> e : byDomain.entrySet()) {
+            String tracked = e.getKey();
+            Set<String> nicks = e.getValue();
+            Set<String> toRemove = new java.util.HashSet<>();
+            for (String nick : nicks) {
+                if (originDomain.equals(homeOf(nick, tracked))) toRemove.add(nick);
+            }
+            if (toRemove.isEmpty()) continue;
+            nicks.removeAll(toRemove);
+            removed.addAll(toRemove);
+            if (nicks.isEmpty()) emptied.add(tracked);
+            else persistVirtualOccupants(localRoomJid, tracked);
+        }
+        for (String d : emptied) {
+            byDomain.remove(d);
+            clearPersistedVirtualOccupants(localRoomJid, d);
+        }
+        if (byDomain.isEmpty()) virtualOccupants.remove(localRoomJid);
+        return removed;
+    }
+
+    /** Home domain encoded in a virtual nick ("user@home"); falls back to the tracked domain. */
+    private String homeOf(String nick, String fallback) {
+        try {
+            String d = new JID(nick).getDomain();
+            return (d == null || d.isEmpty()) ? fallback : d;
+        } catch (Exception e) {
+            return fallback;
+        }
     }
 
     /** Removes and returns all virtual nicks tracked for (localRoomJid, remoteDomain). */
