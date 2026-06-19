@@ -274,6 +274,10 @@ public class FederationManager {
             Log.warn("Failed to send room-mapping to {}: {}", remoteDomain, e.getMessage());
         }
         pushInitialSyncPresences(localJid, remoteDomain, remoteJid);
+        // We may be a hub with no real occupants of our own: the local room can already
+        // hold virtual occupants from OTHER spokes. Forward them to the newly-mapped spoke
+        // so it sees clients on the previously-mapped servers, not only future joiners.
+        forwardVirtualOccupants(localJid, remoteDomain, remoteJid);
     }
 
     /** Removes ALL spoke mappings for localJid and notifies every remote. */
