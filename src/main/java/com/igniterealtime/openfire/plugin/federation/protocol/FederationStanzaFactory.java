@@ -3,10 +3,14 @@ package com.igniterealtime.openfire.plugin.federation.protocol;
 import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
 import org.dom4j.Element;
+import org.jivesoftware.openfire.RoutingTable;
 import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.session.ClientSession;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Packet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.List;
@@ -27,6 +31,8 @@ public final class FederationStanzaFactory {
 
     public static final String NS = "urn:xmpp:federation:1";
 
+    private static final Logger Log = LoggerFactory.getLogger(FederationStanzaFactory.class);
+
     private FederationStanzaFactory() {}
 
     /** Creates a set IQ addressed to toDomain from our local server domain. */
@@ -44,11 +50,41 @@ public final class FederationStanzaFactory {
     // ── peer-announce ──────────────────────────────────────────────────────────
 
     public static IQ peerAnnounce(String toDomain) {
+        return peerAnnounce(toDomain, false);
+    }
+
+    /**
+     * @param isReply marks a keepalive sent in response to another peer-announce.
+     *        The receiver does not reply to a reply, so one side's keepalive timer
+     *        warms BOTH S2S directions (each direction is a separate socket with its
+     *        own idle timer) without an endless ping-pong.
+     */
+    public static IQ peerAnnounce(String toDomain, boolean isReply) {
         IQ iq = base(toDomain);
         Element fed = iq.setChildElement("federation", NS);
         Element ann = fed.addElement("peer-announce");
+        if (isReply) ann.addAttribute("reply", "true");
         ann.addElement("server").setText(localJID().getDomain());
         ann.addElement("version").setText("1");
+        return iq;
+    }
+
+    public static IQ peerWithdraw(String toDomain) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        fed.addElement("peer-withdraw");
+        return iq;
+    }
+
+    /**
+     * Tells the remote that we have administratively DISABLED this connection.
+     * Unlike peer-withdraw, the receiver records a persistent REMOTE_DISABLED state it
+     * cannot lift itself, and we re-assert this in response to its peer-announce.
+     */
+    public static IQ peerDisable(String toDomain) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        fed.addElement("peer-disable");
         return iq;
     }
 
@@ -80,16 +116,20 @@ public final class FederationStanzaFactory {
     /**
      * Builds a relayed room-advertisement carrying an origin attribute so the
      * receiver knows the rooms belong to {@code originDomain}, not to the
-     * immediate sender. Receivers must NOT re-relay advertisements that already
-     * have an origin (prevents flooding loops).
+     * immediate sender.  The {@code via} trail (comma-separated server domains)
+     * prevents flooding loops across multi-hop paths.
      */
     public static IQ roomAdvertisement(String toDomain, List<FederatedRoom> rooms, String originDomain) {
+        return roomAdvertisement(toDomain, rooms, originDomain, null);
+    }
+
+    public static IQ roomAdvertisement(String toDomain, List<FederatedRoom> rooms,
+                                       String originDomain, String via) {
         IQ iq = base(toDomain);
         Element fed = iq.setChildElement("federation", NS);
         Element adv = fed.addElement("room-advertisement");
-        if (originDomain != null) {
-            adv.addAttribute("origin", originDomain);
-        }
+        if (originDomain != null) adv.addAttribute("origin", originDomain);
+        if (via != null && !via.isEmpty()) adv.addAttribute("via", via);
         for (FederatedRoom room : rooms) {
             Element r = adv.addElement("room");
             r.addAttribute("jid",         room.jid());
@@ -103,16 +143,24 @@ public final class FederationStanzaFactory {
 
     /**
      * Notifies a remote server that we are pairing our local room with one of
-     * their rooms.  The remote side interprets:
-     *   local  → the JID of the room on THIS server (sender's local)
-     *   remote → the JID of the room on THAT server (receiver's local)
+     * their rooms.  The IQ is addressed to {@code nextHop} (our direct S2S
+     * neighbour); {@code destination} carries the final target domain and
+     * {@code originDomain} carries the initiating server so intermediate hops
+     * can relay without losing the original sender identity.
      *
-     * So the receiver stores: localRoomJid=remote, remoteRoomJid=local.
+     * The receiver interprets:
+     *   local  → the JID of the room on the originating server
+     *   remote → the JID of the room on the destination server (receiver's local)
+     *
+     * So the destination stores: localRoomJid=remote, remoteRoomJid=local, remoteDomain=origin.
      */
-    public static IQ roomMapping(String toDomain, String localJid, String remoteJid) {
-        IQ iq = base(toDomain);
+    public static IQ roomMapping(String nextHop, String destination, String originDomain,
+                                 String localJid, String remoteJid) {
+        IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
         Element mapping = fed.addElement("room-mapping");
+        mapping.addAttribute("destination", destination);
+        mapping.addAttribute("origin",      originDomain);
         Element map = mapping.addElement("map");
         map.addAttribute("local",  localJid);
         map.addAttribute("remote", remoteJid);
@@ -121,12 +169,15 @@ public final class FederationStanzaFactory {
 
     /**
      * Notifies a remote server that a previously confirmed mapping has been
-     * dissolved by the local admin.
+     * dissolved by the local admin.  Routed hop-by-hop like room-mapping.
      */
-    public static IQ roomUnmapping(String toDomain, String localJid, String remoteJid) {
-        IQ iq = base(toDomain);
+    public static IQ roomUnmapping(String nextHop, String destination, String originDomain,
+                                   String localJid, String remoteJid) {
+        IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
         Element mapping = fed.addElement("room-unmap");
+        mapping.addAttribute("destination", destination);
+        mapping.addAttribute("origin",      originDomain);
         Element map = mapping.addElement("map");
         map.addAttribute("local",  localJid);
         map.addAttribute("remote", remoteJid);
@@ -158,6 +209,30 @@ public final class FederationStanzaFactory {
         fwd.addAttribute("via",         viaTrail);
         fwd.add(payload.getElement().createCopy());
         return iq;
+    }
+
+    /**
+     * Delivers a packet directly to the recipient's ClientSession, bypassing the
+     * packet router and all PacketInterceptors (including MUC's non-occupant check).
+     * Falls back to the packet router if the session is not found locally (e.g. the
+     * user just disconnected between the occupant-list snapshot and delivery).
+     */
+    public static void directDeliver(Packet packet) {
+        JID to = packet.getTo();
+        if (to != null && to.getResource() != null) {
+            RoutingTable rt = XMPPServer.getInstance().getRoutingTable();
+            ClientSession session = rt.getClientRoute(to);
+            if (session != null) {
+                try {
+                    session.process(packet);
+                    return;
+                } catch (Exception e) {
+                    Log.warn("directDeliver: session.process failed for {}: {}", to, e.getMessage());
+                }
+            }
+        }
+        // Fallback: user just disconnected or bare JID — route normally.
+        XMPPServer.getInstance().getPacketRouter().route(packet);
     }
 
     /**

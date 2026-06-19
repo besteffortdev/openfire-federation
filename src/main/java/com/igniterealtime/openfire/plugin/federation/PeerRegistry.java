@@ -18,7 +18,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class PeerRegistry {
 
     private static final Logger Log = LoggerFactory.getLogger(PeerRegistry.class);
-    private static final String PROP_PEERS = "federation.peers";
+    private static final String PROP_PEERS      = "federation.peers";
+    private static final String PROP_PEER_STATE = "federation.peer.state.";   // + domain → DISABLED|REMOTE_DISABLED
 
     private final ConcurrentHashMap<String, PeerServer> peers = new ConcurrentHashMap<>();
 
@@ -29,8 +30,22 @@ public class PeerRegistry {
             for (String domain : stored.split(",")) {
                 domain = domain.strip();
                 if (!domain.isEmpty()) {
-                    peers.put(domain, new PeerServer(domain));
-                    Log.info("Loaded configured federation peer: {}", domain);
+                    PeerServer peer = new PeerServer(domain);
+                    // Restore a persisted control status (DISABLED / REMOTE_DISABLED) so the
+                    // block survives restarts and the peer re-adding the connection.
+                    String state = JiveGlobals.getProperty(PROP_PEER_STATE + domain, "").strip();
+                    if (!state.isEmpty()) {
+                        try {
+                            PeerServer.Status s = PeerServer.Status.valueOf(state);
+                            if (s == PeerServer.Status.DISABLED || s == PeerServer.Status.REMOTE_DISABLED) {
+                                peer.setStatus(s);
+                                Log.info("Loaded federation peer {} with persisted status {}", domain, s);
+                            }
+                        } catch (IllegalArgumentException ignored) {}
+                    } else {
+                        Log.info("Loaded configured federation peer: {}", domain);
+                    }
+                    peers.put(domain, peer);
                 }
             }
         }
@@ -52,7 +67,10 @@ public class PeerRegistry {
      */
     public boolean removePeer(String domain) {
         boolean removed = peers.remove(domain) != null;
-        if (removed) persist();
+        if (removed) {
+            JiveGlobals.deleteProperty(PROP_PEER_STATE + domain);
+            persist();
+        }
         return removed;
     }
 
@@ -68,13 +86,35 @@ public class PeerRegistry {
         return peers.containsKey(domain);
     }
 
-    /** Called by S2SMonitor to update live connection state. */
+    /**
+     * Called by S2SMonitor to update live connection state.  Sticky control statuses
+     * (DISABLED / REMOTE_DISABLED) are never overwritten by live updates — they change
+     * only through {@link #setControlStatus}.
+     */
     public void updateStatus(String domain, PeerServer.Status status) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
+        PeerServer.Status cur = peer.getStatus();
+        if (cur == PeerServer.Status.DISABLED || cur == PeerServer.Status.REMOTE_DISABLED) return;
         peer.setStatus(status);
         if (status == PeerServer.Status.REACHABLE) {
             peer.markSeen();
+        }
+    }
+
+    /**
+     * Sets a control status set by an administrative action (disable/enable) rather than
+     * by live polling.  Persists DISABLED / REMOTE_DISABLED so the state survives restarts
+     * and the peer re-creating the connection; clears the persisted state otherwise.
+     */
+    public void setControlStatus(String domain, PeerServer.Status status) {
+        PeerServer peer = peers.get(domain);
+        if (peer == null) return;
+        peer.setStatus(status);
+        if (status == PeerServer.Status.DISABLED || status == PeerServer.Status.REMOTE_DISABLED) {
+            JiveGlobals.setProperty(PROP_PEER_STATE + domain, status.name());
+        } else {
+            JiveGlobals.deleteProperty(PROP_PEER_STATE + domain);
         }
     }
 

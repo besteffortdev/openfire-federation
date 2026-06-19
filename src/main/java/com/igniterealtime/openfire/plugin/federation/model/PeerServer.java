@@ -9,7 +9,15 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class PeerServer {
 
-    public enum Status { UNKNOWN, REACHABLE, UNREACHABLE }
+    /**
+     * UNKNOWN/REACHABLE/UNREACHABLE — live S2S state maintained by S2SMonitor.
+     * WITHDRAWN — the remote sent peer-withdraw; reconnectable locally.
+     * DISABLED — WE administratively disabled this peer; persistent, re-enableable
+     *            locally, and re-asserted to the peer even if it re-creates the link.
+     * REMOTE_DISABLED — the remote administratively disabled the link; persistent and
+     *            NOT re-enableable locally (only the remote can lift it).
+     */
+    public enum Status { UNKNOWN, REACHABLE, UNREACHABLE, WITHDRAWN, DISABLED, REMOTE_DISABLED }
 
     private final String domain;
     private final AtomicReference<Status> status = new AtomicReference<>(Status.UNKNOWN);

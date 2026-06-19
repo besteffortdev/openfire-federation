@@ -12,19 +12,14 @@ import org.xmpp.packet.Message;
 import org.xmpp.packet.Packet;
 import org.xmpp.packet.Presence;
 
+import java.util.List;
+
 /**
- * Intercepts MUC packets and forwards them to federation peers using confirmed
- * room mappings.
+ * Intercepts MUC packets and forwards them to all mapped federation peers.
  *
- * A room mapping (localRoomJid ↔ remoteRoomJid) must exist before any traffic
- * is forwarded.  The admin creates mappings in the Federation admin UI; both
- * servers exchange a room-mapping stanza to confirm the pairing.
- *
- * Messages: forwarded after MUC processing (incoming=true, processed=true) so
- * we relay the server-decorated groupchat packet.
- *
- * Presence: join/leave forwarded so remote room members appear as occupants.
- * Incoming presence before processing (processed=false) captures the join intent.
+ * A local room can be mapped to multiple remote rooms on different peer domains
+ * (hub topology).  Every mapping for the room receives a copy of each
+ * message/presence that passes through the local MUC service.
  *
  * Loop prevention: packets already marked with <fed-origin/> are silently skipped.
  */
@@ -64,10 +59,10 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         String roomJid = roomJidFromTo(msg.getTo());
         if (roomJid == null) return;
 
-        RoomMapping mapping = manager.getRoomManager().getMappingForLocal(roomJid);
-        if (mapping == null) return;
-
-        forwardToMapped(msg, mapping);
+        List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
+        for (RoomMapping mapping : mappings) {
+            forwardToMapped(msg, mapping);
+        }
     }
 
     // ── Presence forwarding (join / leave) ────────────────────────────────────
@@ -76,16 +71,16 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         String toDomain = pres.getTo().getDomain();
         if (!isConferenceDomain(toDomain)) return;
 
-        // Must have a nick resource — that's the join/leave form
+        // Must have a nick resource — that's the join/leave form.
         if (pres.getTo().getResource() == null) return;
 
         String roomJid = roomJidFromTo(pres.getTo());
         if (roomJid == null) return;
 
-        RoomMapping mapping = manager.getRoomManager().getMappingForLocal(roomJid);
-        if (mapping == null) return;
-
-        forwardToMapped(pres, mapping);
+        List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
+        for (RoomMapping mapping : mappings) {
+            forwardToMapped(pres, mapping);
+        }
     }
 
     // ── Shared forwarding logic ────────────────────────────────────────────────
@@ -94,8 +89,6 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         String localDomain  = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String remoteDomain = mapping.remoteDomain();
 
-        // Prefer routing through the federation overlay (multi-hop) if we have a
-        // route.  Fall back to direct Openfire routing (triggers S2S) if not.
         String nextHop = manager.getRoutingTable().findNextHop(remoteDomain).orElse(remoteDomain);
 
         try {
@@ -104,8 +97,8 @@ public class FederationPacketInterceptor implements PacketInterceptor {
                 FederationStanzaFactory.mucForward(
                     nextHop, remoteDomain, mapping.remoteRoomJid(), localDomain, copy)
             );
-            Log.debug("Forwarded {} to {} via {}", packet.getClass().getSimpleName(),
-                      mapping.remoteRoomJid(), nextHop);
+            Log.debug("Forwarded {} to {} via {}",
+                      packet.getClass().getSimpleName(), mapping.remoteRoomJid(), nextHop);
         } catch (Exception e) {
             Log.warn("Failed to forward to {}: {}", remoteDomain, e.getMessage());
         }
@@ -119,14 +112,13 @@ public class FederationPacketInterceptor implements PacketInterceptor {
                          .anyMatch(svc -> svc.getServiceDomain().equals(domain));
     }
 
-    /** Strips the /nick resource to get the bare room JID. */
     private String roomJidFromTo(org.xmpp.packet.JID to) {
         if (to == null || to.getNode() == null) return null;
         return to.getNode() + "@" + to.getDomain();
     }
 
     private Packet copyPacket(Packet p) {
-        if (p instanceof Message m)  return new Message(m.getElement().createCopy());
+        if (p instanceof Message m)   return new Message(m.getElement().createCopy());
         if (p instanceof Presence pr) return new Presence(pr.getElement().createCopy());
         return p;
     }

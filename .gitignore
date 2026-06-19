@@ -2,3 +2,4 @@ target/
 .ssh_pass
 *.jar
 .claude/
+org/

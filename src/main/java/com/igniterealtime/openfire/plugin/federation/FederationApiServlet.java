@@ -46,12 +46,13 @@ public class FederationApiServlet extends HttpServlet {
             sb.append("{")
               .append("\"domain\":\"").append(esc(p.getDomain())).append("\",")
               .append("\"status\":\"").append(p.getStatus().name()).append("\",")
-              .append("\"lastSeen\":").append(p.getLastSeenMillis())
+              .append("\"lastSeen\":").append(p.getLastSeenMillis()).append(",")
+              .append("\"nextRetryAt\":").append(mgr.getNextRetryAt(p.getDomain()))
               .append("}");
         }
         sb.append("],");
 
-        // ── routing (local domain excluded — we can always reach ourselves) ───
+        // ── routing (local domain excluded) ───────────────────────────────────
         sb.append("\"routing\":[");
         first = true;
         for (RouteEntry r : mgr.getRoutingTable().getAll()) {
@@ -73,17 +74,27 @@ public class FederationApiServlet extends HttpServlet {
         for (Map<String, Object> room : mgr.getRoomManager().getAllLocalRoomsWithTag()) {
             if (!first) sb.append(",");
             first = false;
+            @SuppressWarnings("unchecked")
+            List<Map<String, String>> roomMappings = (List<Map<String, String>>) room.get("mappings");
+
             sb.append("{")
               .append("\"jid\":\"").append(esc(str(room.get("jid")))).append("\",")
               .append("\"name\":\"").append(esc(str(room.get("name")))).append("\",")
               .append("\"description\":\"").append(esc(str(room.get("description")))).append("\",")
               .append("\"federated\":").append(room.get("federated")).append(",")
               .append("\"occupants\":").append(room.get("occupants")).append(",")
-              .append("\"mappedTo\":").append(room.get("mappedTo") != null
-                  ? "\"" + esc(str(room.get("mappedTo"))) + "\"" : "null").append(",")
-              .append("\"mappedDomain\":").append(room.get("mappedDomain") != null
-                  ? "\"" + esc(str(room.get("mappedDomain"))) + "\"" : "null")
-              .append("}");
+              .append("\"mappings\":[");
+
+            boolean fm = true;
+            for (Map<String, String> m : roomMappings) {
+                if (!fm) sb.append(",");
+                fm = false;
+                sb.append("{")
+                  .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
+                  .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\"")
+                  .append("}");
+            }
+            sb.append("]}");
         }
         sb.append("],");
 
@@ -109,17 +120,24 @@ public class FederationApiServlet extends HttpServlet {
         }
         sb.append("},");
 
-        // ── room mappings ─────────────────────────────────────────────────────
+        // ── room mappings (localJid → array of {remoteRoomJid, remoteDomain}) ─
         sb.append("\"mappings\":{");
         first = true;
-        for (Map.Entry<String, RoomMapping> entry : mgr.getRoomManager().getLocalMappings().entrySet()) {
+        for (Map.Entry<String, List<RoomMapping>> entry :
+                mgr.getRoomManager().getLocalMappings().entrySet()) {
             if (!first) sb.append(",");
             first = false;
-            RoomMapping m = entry.getValue();
-            sb.append("\"").append(esc(entry.getKey())).append("\":{")
-              .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
-              .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\"")
-              .append("}");
+            sb.append("\"").append(esc(entry.getKey())).append("\":[");
+            boolean fm = true;
+            for (RoomMapping m : entry.getValue()) {
+                if (!fm) sb.append(",");
+                fm = false;
+                sb.append("{")
+                  .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
+                  .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\"")
+                  .append("}");
+            }
+            sb.append("]");
         }
         sb.append("},");
 
@@ -137,7 +155,12 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"fedPeer\":").append(sess.get("fedPeer"))
               .append("}");
         }
-        sb.append("]");
+        sb.append("],");
+
+        // ── settings ──────────────────────────────────────────────────────────
+        sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds()).append(",");
+        sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
+        sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds());
 
         sb.append("}");
         out.print(sb.toString());
@@ -203,12 +226,39 @@ public class FederationApiServlet extends HttpServlet {
                 return;
             }
             case "unmap-room": {
-                String localJid = req.getParameter("localJid");
+                String localJid     = req.getParameter("localJid");
+                String remoteDomain = req.getParameter("remoteDomain");
                 if (localJid == null || localJid.isBlank()) {
                     out.print("{\"error\":\"localJid required\"}");
                     return;
                 }
-                mgr.unmapRooms(localJid.strip());
+                if (remoteDomain != null && !remoteDomain.isBlank()) {
+                    // Remove only the mapping toward a specific remote domain.
+                    mgr.unmapRoom(localJid.strip(), remoteDomain.strip());
+                } else {
+                    // Remove all mappings for this local room.
+                    mgr.unmapRooms(localJid.strip());
+                }
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "disable-peer": {
+                String domain = req.getParameter("domain");
+                if (domain == null || domain.isBlank()) {
+                    out.print("{\"error\":\"domain required\"}");
+                    return;
+                }
+                mgr.disablePeer(domain.strip().toLowerCase());
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "enable-peer": {
+                String domain = req.getParameter("domain");
+                if (domain == null || domain.isBlank()) {
+                    out.print("{\"error\":\"domain required\"}");
+                    return;
+                }
+                mgr.enablePeer(domain.strip().toLowerCase());
                 out.print("{\"ok\":true}");
                 return;
             }
@@ -235,6 +285,36 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 mgr.killSession(domain.strip().toLowerCase(), direction.strip().toLowerCase());
                 out.print("{\"ok\":true}");
+                return;
+            }
+            case "set-keepalive": {
+                String secParam = req.getParameter("seconds");
+                if (secParam == null || secParam.isBlank()) {
+                    out.print("{\"error\":\"seconds required\"}");
+                    return;
+                }
+                try {
+                    int seconds = Integer.parseInt(secParam.strip());
+                    mgr.setKeepaliveSeconds(seconds);
+                    out.print("{\"ok\":true,\"keepaliveSeconds\":" + mgr.getKeepaliveSeconds() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"seconds must be an integer\"}");
+                }
+                return;
+            }
+            case "set-reconnect": {
+                String secParam = req.getParameter("seconds");
+                if (secParam == null || secParam.isBlank()) {
+                    out.print("{\"error\":\"seconds required\"}");
+                    return;
+                }
+                try {
+                    int seconds = Integer.parseInt(secParam.strip());
+                    mgr.setReconnectSeconds(seconds);
+                    out.print("{\"ok\":true,\"reconnectSeconds\":" + mgr.getReconnectSeconds() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"seconds must be an integer\"}");
+                }
                 return;
             }
             default:

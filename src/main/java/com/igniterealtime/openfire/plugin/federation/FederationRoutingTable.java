@@ -34,7 +34,9 @@ public class FederationRoutingTable {
      */
     public void addDirectPeer(String domain) {
         table.put(domain, new RouteEntry(domain, domain, 1));
-        routesLearnedFrom.computeIfAbsent(domain, k -> ConcurrentHashMap.newKeySet()).add(domain);
+        // Do NOT add to routesLearnedFrom — direct routes are owned by addDirectPeer/removePeer,
+        // not by gossip. A peer never advertises itself in routing-updates, so adding it here
+        // would cause the stale-withdrawal check to delete the direct route on every update.
         Log.debug("Routing: direct peer added — {}", domain);
     }
 
@@ -44,8 +46,9 @@ public class FederationRoutingTable {
      */
     public Set<String> updateFromPeer(String fromPeer, List<RouteEntry> peerTable) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        Set<String> improved = new HashSet<>();
+        Set<String> changed = new HashSet<>();
         Set<String> learnedSet = routesLearnedFrom.computeIfAbsent(fromPeer, k -> ConcurrentHashMap.newKeySet());
+        Set<String> inUpdate = new HashSet<>();
 
         for (RouteEntry remote : peerTable) {
             if (remote.hops() >= INFINITY) continue;
@@ -54,18 +57,32 @@ public class FederationRoutingTable {
             if (candidate >= INFINITY) continue;
 
             String dest = remote.destination();
-            // Never add a route to ourselves — we don't need to route to our own domain.
             if (dest.equals(localDomain)) continue;
+            inUpdate.add(dest);
             RouteEntry current = table.get(dest);
 
             if (current == null || candidate < current.hops()) {
                 table.put(dest, new RouteEntry(dest, fromPeer, candidate));
                 learnedSet.add(dest);
-                improved.add(dest);
+                changed.add(dest);
                 Log.debug("Routing: {} via {} in {} hop(s)", dest, fromPeer, candidate);
             }
         }
-        return improved;
+
+        // Withdraw routes previously learned from this peer that are no longer in their table.
+        Set<String> stale = new HashSet<>(learnedSet);
+        stale.removeAll(inUpdate);
+        for (String dest : stale) {
+            RouteEntry entry = table.get(dest);
+            if (entry != null && entry.nextHop().equals(fromPeer)) {
+                table.remove(dest);
+                changed.add(dest);
+                Log.info("Routing: withdrew {} (no longer advertised by {})", dest, fromPeer);
+            }
+            learnedSet.remove(dest);
+        }
+
+        return changed;
     }
 
     /**
@@ -107,8 +124,25 @@ public class FederationRoutingTable {
         return table.containsKey(destination);
     }
 
-    /** Snapshot of the full table for gossip serialisation and UI display. */
+    /** Snapshot of the full table for UI display. */
     public Collection<RouteEntry> getAll() {
         return Collections.unmodifiableCollection(table.values());
+    }
+
+    /**
+     * Split-horizon view of the table for gossip TO {@code toPeer}: routes whose
+     * next hop is {@code toPeer} are omitted.  Advertising a route back toward the
+     * neighbour we learned it from is exactly what forms distance-vector routing
+     * loops (count-to-infinity); that neighbour already has a better route to
+     * those destinations.  Omission also lets the receiver's stale-route detection
+     * correctly withdraw a route if our path to it now runs through the receiver.
+     */
+    public Collection<RouteEntry> getRoutesExcludingNextHop(String toPeer) {
+        List<RouteEntry> result = new ArrayList<>();
+        for (RouteEntry e : table.values()) {
+            if (e.nextHop().equals(toPeer)) continue;   // split-horizon
+            result.add(e);
+        }
+        return result;
     }
 }

@@ -47,9 +47,10 @@
             display: inline-block; width: 9px; height: 9px;
             border-radius: 50%; margin-right: 5px; vertical-align: middle;
         }
-        .status-dot.green { background: #28a745; }
-        .status-dot.red   { background: #dc3545; }
-        .status-dot.grey  { background: #adb5bd; }
+        .status-dot.green  { background: #28a745; }
+        .status-dot.red    { background: #dc3545; }
+        .status-dot.grey   { background: #adb5bd; }
+        .status-dot.orange { background: #fd7e14; }
 
         /* ── Forms ────────────────────────────────────────────────── */
         .add-peer-form { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -87,13 +88,32 @@
         input:checked + .slider              { background: #0d6efd; }
         input:checked + .slider:before       { transform: translateX(18px); }
 
-        /* ── Remote rooms ─────────────────────────────────────────── */
-        .peer-rooms { margin-bottom: 24px; }
-        .peer-rooms h4 {
-            font-size: 13px; font-weight: 600; color: #495057;
-            margin: 0 0 8px; padding: 6px 12px;
-            background: #f8f9fa; border-radius: 4px;
+        /* ── Mapping rows in local rooms table ────────────────────── */
+        .mapping-row {
+            display: flex; align-items: center; gap: 4px; margin-bottom: 3px;
         }
+        .mapping-row:last-child { margin-bottom: 0; }
+
+        /* ── Collapsible peer sections (remote rooms) ─────────────── */
+        .peer-section {
+            border: 1px solid #dee2e6; border-radius: 6px;
+            overflow: hidden; margin-bottom: 12px;
+        }
+        .peer-section-header {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 14px; cursor: pointer;
+            background: #f8f9fa; user-select: none;
+        }
+        .peer-section-header:hover { background: #e9ecef; }
+        .peer-collapse-icon { font-size: 10px; color: #6c757d; width: 10px; }
+        .peer-room-count    { color: #6c757d; font-size: 12px; }
+        .peer-map-count     {
+            margin-left: auto; background: #d1e7dd; color: #0a3622;
+            border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600;
+        }
+        .peer-section-body  { border-top: 1px solid #dee2e6; }
+
+        /* ── Section boxes ────────────────────────────────────────── */
         p.empty { color: #999; font-style: italic; }
 
         .section-box {
@@ -107,15 +127,20 @@
         }
         .section-box-body { padding: 16px; }
 
+        /* ── Reconnect countdown ──────────────────────────────────── */
+        .retry-countdown {
+            color: #6c757d; font-size: 11px; font-style: italic; margin-left: 6px;
+        }
+
         /* ── Direction badges ─────────────────────────────────────── */
         .badge {
             display: inline-block; padding: 2px 8px; border-radius: 10px;
             font-size: 11px; font-weight: 600; white-space: nowrap;
         }
-        .badge-out  { background: #cfe2ff; color: #084298; }
-        .badge-in   { background: #d1e7dd; color: #0a3622; }
-        .badge-fed  { background: #fff3cd; color: #664d03; margin-left: 4px; }
-        .badge-tls  { background: #f8d7da; color: #58151c; margin-left: 4px; }
+        .badge-out    { background: #cfe2ff; color: #084298; }
+        .badge-in     { background: #d1e7dd; color: #0a3622; }
+        .badge-fed    { background: #fff3cd; color: #664d03; margin-left: 4px; }
+        .badge-tls    { background: #f8d7da; color: #58151c; margin-left: 4px; }
         .badge-tls-ok { background: #d1e7dd; color: #0a3622; margin-left: 4px; }
     </style>
 </head>
@@ -188,6 +213,67 @@
                     <tr><td colspan="5" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Connection settings</div>
+            <div class="section-box-body">
+                <table class="settings-table">
+                    <tr>
+                        <td>
+                            <label for="keepalive-input" style="font-weight:600;font-size:13px">
+                                S2S keepalive interval
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                Sends a lightweight ping to each reachable peer at this interval to
+                                prevent Openfire from closing idle S2S sessions. Must be less than
+                                Openfire's <code style="font-size:11px">xmpp.server.idle</code> setting
+                                (milliseconds ÷ 1000 × 0.8). Minimum: 30 s. Default: 240 s — safe
+                                for Openfire's built-in 6-minute idle timeout.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="number" id="keepalive-input"
+                                   min="30" max="3600" step="10"
+                                   style="width:90px;padding:5px 8px;border:1px solid #ced4da;
+                                          border-radius:4px;font-size:13px;text-align:right">
+                            <span style="color:#6c757d;font-size:13px;margin-left:4px">s</span>
+                            <button class="btn btn-primary" style="margin-left:10px"
+                                    onclick="saveKeepalive()">Save</button>
+                            <span id="keepalive-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top:16px">
+                            <label for="reconnect-input" style="font-weight:600;font-size:13px">
+                                Max reconnect interval (back-off cap)
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                Maximum interval between reconnection attempts for UNREACHABLE peers.
+                                Retries use exponential back-off starting at 5 s: 5 s → 10 s → 20 s → …
+                                capped at this value. On reconnect the back-off resets automatically.
+                                Minimum: 5 s. Default: 30 s.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle;padding-top:16px">
+                            <input type="number" id="reconnect-input"
+                                   min="5" max="300" step="5"
+                                   style="width:90px;padding:5px 8px;border:1px solid #ced4da;
+                                          border-radius:4px;font-size:13px;text-align:right">
+                            <span style="color:#6c757d;font-size:13px;margin-left:4px">s</span>
+                            <button class="btn btn-primary" style="margin-left:10px"
+                                    onclick="saveReconnect()">Save</button>
+                            <span id="reconnect-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
         </div>
     </div>
 
