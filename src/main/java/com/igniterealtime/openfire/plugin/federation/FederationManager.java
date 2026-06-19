@@ -284,10 +284,12 @@ public class FederationManager {
     public void unmapRooms(String localJid) {
         List<RoomMapping> mappings = new ArrayList<>(roomManager.getMappingsForLocal(localJid));
         for (RoomMapping m : mappings) {
-            evictVirtualOccupants(localJid, m.remoteDomain());
             pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         }
         roomManager.removeMapping(localJid);
+        // Every mapping is gone — drop all virtual occupants in the room (incl. hub-relayed
+        // users tracked under a relay domain, which a per-domain evict would miss).
+        evictAllVirtualOccupantsInRoom(localJid);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         for (RoomMapping m : mappings) {
             String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
@@ -305,9 +307,16 @@ public class FederationManager {
     public void unmapRoom(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (m == null) return;
-        evictVirtualOccupants(localJid, remoteDomain);
         pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         roomManager.removeMapping(localJid, remoteDomain);
+        // If this was the room's last mapping, every virtual occupant is now unreachable —
+        // evict them all (covers hub-relayed users tracked under a relay domain). Otherwise
+        // fall back to evicting the ones from this specific remote.
+        if (roomManager.getMappingsForLocal(localJid).isEmpty()) {
+            evictAllVirtualOccupantsInRoom(localJid);
+        } else {
+            evictVirtualOccupants(localJid, remoteDomain);
+        }
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
         try {
@@ -346,6 +355,15 @@ public class FederationManager {
      */
     public void evictVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
         sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByOrigin(localRoomJid, originDomain));
+    }
+
+    /**
+     * Drops EVERY virtual occupant in a local room — used when its last federation mapping
+     * is removed (the whole federation feeding the room is gone).  Catches hub-relayed users
+     * tracked under a relay domain, which per-origin/per-domain eviction misses multi-hop.
+     */
+    public void evictAllVirtualOccupantsInRoom(String localRoomJid) {
+        sendVirtualLeaves(localRoomJid, roomManager.clearAllVirtualOccupants(localRoomJid));
     }
 
     /** Sends an unavailable presence for each given virtual nick to every real local occupant. */

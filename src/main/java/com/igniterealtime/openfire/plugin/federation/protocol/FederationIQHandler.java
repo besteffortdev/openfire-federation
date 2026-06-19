@@ -374,14 +374,21 @@ public class FederationIQHandler extends IQHandler {
             String theirLocal  = map.attributeValue("local");   // originator's local  = our remote
             String theirRemote = map.attributeValue("remote");  // originator's remote = our local
             if (theirRemote != null) {
-                // Evict virtual occupants from the remote domain before removing the mapping
-                // so local clients receive leave presences and don't see ghost users.
-                manager.evictVirtualOccupants(theirRemote, actualOrigin);
                 if (theirLocal != null) {
                     manager.pushVirtualPresences(theirRemote, actualOrigin, theirLocal, true);
                 }
                 // Only remove the mapping for this specific originator — other spokes stay connected.
                 manager.getRoomManager().removeMapping(theirRemote, actualOrigin);
+                // Drop the virtual occupants that came in through this mapping so local clients
+                // see them leave. If no mapping remains for the room, every virtual occupant is
+                // now unreachable — evict them ALL. This is essential for multi-hop spokes:
+                // hub-relayed users (from other servers) are tracked under the relay domain, not
+                // the origin, so a per-origin evict would miss them and leave ghosts.
+                if (manager.getRoomManager().getMappingsForLocal(theirRemote).isEmpty()) {
+                    manager.evictAllVirtualOccupantsInRoom(theirRemote);
+                } else {
+                    manager.evictVirtualOccupants(theirRemote, actualOrigin);
+                }
                 Log.info("Room mapping removed by remote {}: local={}", actualOrigin, theirRemote);
             }
         }

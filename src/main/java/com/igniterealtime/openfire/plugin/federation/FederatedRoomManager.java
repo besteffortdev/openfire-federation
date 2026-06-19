@@ -384,6 +384,27 @@ public class FederatedRoomManager {
         return removed;
     }
 
+    /**
+     * Removes and returns ALL virtual nicks tracked in a room, across every sender-domain
+     * group.  Used when a room's last federation mapping is removed: every virtual occupant
+     * came in through that federation and is now unreachable — including hub-relayed users
+     * tracked under a relay domain rather than their origin.
+     */
+    public Set<String> clearAllVirtualOccupants(String localRoomJid) {
+        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.remove(localRoomJid);
+        if (byDomain == null) return Collections.emptySet();
+        Set<String> all = new java.util.HashSet<>();
+        byDomain.forEach((domain, nicks) -> {
+            all.addAll(nicks);
+            JiveGlobals.deleteProperty(String.format(PROP_VOCC_NICKS, localRoomJid, domain));
+        });
+        JiveGlobals.deleteProperty(String.format(PROP_VOCC_DOMAINS, localRoomJid));
+        Set<String> rooms = new LinkedHashSet<>(virtualOccupants.keySet());
+        if (rooms.isEmpty()) JiveGlobals.deleteProperty(PROP_VOCC_ROOMS);
+        else JiveGlobals.setProperty(PROP_VOCC_ROOMS, String.join(",", rooms));
+        return all;
+    }
+
     /** Home domain encoded in a virtual nick ("user@home"); falls back to the tracked domain. */
     private String homeOf(String nick, String fallback) {
         try {
