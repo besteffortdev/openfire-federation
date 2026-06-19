@@ -297,7 +297,7 @@ public class S2SMonitor {
         // withdrawal so downstream servers converge and clean up the same way.
         federationManager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(domain) : removed);
         if (!removed.isEmpty()) {
-            federationManager.propagateRoutingToAll(domain);
+            federationManager.propagateTopologyChange(domain);
         }
     }
 }

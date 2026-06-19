@@ -84,6 +84,7 @@ public class FederationIQHandler extends IQHandler {
             case "peer-withdraw"       -> handlePeerWithdraw(fromDomain);
             case "peer-disable"        -> handlePeerDisable(fromDomain);
             case "routing-update"      -> handleRoutingUpdate(fromDomain, child);
+            case "routing-solicit"     -> handleRoutingSolicit(fromDomain);
             case "room-advertisement"  -> handleRoomAdvertisement(fromDomain, child);
             case "room-mapping"        -> handleRoomMapping(fromDomain, child);
             case "room-unmap"          -> handleRoomUnmap(fromDomain, child);
@@ -172,7 +173,7 @@ public class FederationIQHandler extends IQHandler {
         // doPoll skips WITHDRAWN peers so onPeerDown never fires as a fallback —
         // propagate the withdrawal here while we still know what was removed.
         if (!removed.isEmpty()) {
-            manager.propagateRoutingToAll(fromDomain);
+            manager.propagateTopologyChange(fromDomain);
         }
     }
 
@@ -192,7 +193,7 @@ public class FederationIQHandler extends IQHandler {
         manager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(fromDomain) : removed);
         manager.getPeerRegistry().setControlStatus(fromDomain, PeerServer.Status.REMOTE_DISABLED);
         if (!removed.isEmpty()) {
-            manager.propagateRoutingToAll(fromDomain);
+            manager.propagateTopologyChange(fromDomain);
         }
     }
 
@@ -225,7 +226,23 @@ public class FederationIQHandler extends IQHandler {
             manager.handleUnreachableDestinations(changed);
             manager.resyncMappedDestinations(changed);
             manager.propagateRoutingToAll(fromDomain);
+            // Re-flood room knowledge so remote-room caches follow the routing change.
+            manager.propagateRoomsToAll();
+            // If we lost any route, ask our other peers for an alternate path (and its
+            // rooms) — triggered-only DV would otherwise never re-learn it.
+            boolean lostRoute = changed.stream().anyMatch(d -> !manager.getRoutingTable().isReachable(d));
+            if (lostRoute) manager.solicitRoutingFromAll(fromDomain);
         }
+    }
+
+    // ── routing-solicit ────────────────────────────────────────────────────────
+
+    private void handleRoutingSolicit(String fromDomain) {
+        // A peer that lost routes is asking for our current state — reply with our
+        // routing table (split-horizon applied) and full room cache so it reconverges.
+        Log.debug("routing-solicit from {} — replying with routing table + room state", fromDomain);
+        manager.sendRoutingUpdate(fromDomain);
+        manager.sendRoomState(fromDomain);
     }
 
     // ── room-advertisement ────────────────────────────────────────────────────

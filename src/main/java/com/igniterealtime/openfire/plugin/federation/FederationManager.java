@@ -129,7 +129,7 @@ public class FederationManager {
         Set<String> removedRoutes = routingTable.removePeer(domain);
         handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
         if (!removedRoutes.isEmpty()) {
-            propagateRoutingToAll(domain);
+            propagateTopologyChange(domain);
         }
         if (!peerRegistry.contains(domain)) peerRegistry.addPeer(domain);
         peerRegistry.setControlStatus(domain, PeerServer.Status.DISABLED);
@@ -229,7 +229,7 @@ public class FederationManager {
             // destination that was only reachable through it.
             handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
             if (!removedRoutes.isEmpty()) {
-                propagateRoutingToAll(domain);
+                propagateTopologyChange(domain);
             }
         }
         return removed;
@@ -532,6 +532,56 @@ public class FederationManager {
                 }
             }
         }
+    }
+
+    /** Sends our full room knowledge — own federated rooms + cached remote rooms — to one peer. */
+    public void sendRoomState(String toDomain) {
+        sendRoomAdvertisement(toDomain);
+        sendCachedRemoteRoomAdvertisements(toDomain);
+    }
+
+    /**
+     * Re-floods room knowledge to every reachable peer.  Called on routing changes so
+     * remote-room caches reconverge along new paths after a link is removed/disabled —
+     * e.g. a server that regains a destination via an alternate route gets its rooms back.
+     */
+    public void propagateRoomsToAll() {
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                sendRoomState(peer.getDomain());
+            }
+        }
+    }
+
+    /**
+     * Asks every reachable peer (except excludeDomain) to re-send its routing table and
+     * room cache.  Sent when we lose routes so alternate paths re-form: a peer that still
+     * reaches a now-lost destination advertises it (and its rooms) back to us.  Without
+     * this, triggered-only distance-vector never re-learns a route via an alternate path.
+     */
+    public void solicitRoutingFromAll(String excludeDomain) {
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getStatus() == PeerServer.Status.REACHABLE
+                    && !peer.getDomain().equals(excludeDomain)) {
+                try {
+                    XMPPServer.getInstance().getPacketRouter()
+                              .route(FederationStanzaFactory.routingSolicit(peer.getDomain()));
+                } catch (Exception e) {
+                    Log.warn("Failed to send routing-solicit to {}: {}", peer.getDomain(), e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * A link was removed/disabled: gossip the routing change, re-flood room caches, and
+     * solicit alternate routes so reachability and room visibility reconverge across the
+     * whole network (not just on the directly-affected node).
+     */
+    public void propagateTopologyChange(String excludeDomain) {
+        propagateRoutingToAll(excludeDomain);
+        propagateRoomsToAll();
+        solicitRoutingFromAll(excludeDomain);
     }
 
     public void propagateRoutingToAll(String excludeDomain) {
