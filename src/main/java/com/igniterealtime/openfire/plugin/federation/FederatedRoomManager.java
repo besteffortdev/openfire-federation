@@ -458,8 +458,27 @@ public class FederatedRoomManager {
      * wrongly wipe a hub-spoke's entire cache (everything came via the hub).
      */
     public void clearRemoteRoomsForOrigin(String originDomain) {
+        // Drop the entry keyed directly by this origin.
         remoteRooms.remove(originDomain);
         roomRelaySource.remove(originDomain);
+        // Belt-and-suspenders: a multi-hop advertisement can end up cached under the
+        // immediate sender's (relay's) domain rather than the true origin, so a key-only
+        // remove would miss it — leaving the room still showing as "available for mapping"
+        // on distant nodes while direct spokes (keyed by origin) clear correctly. Also drop
+        // any room whose RECORDED origin matches, regardless of the key it was filed under,
+        // and remove now-empty cache entries.
+        remoteRooms.entrySet().removeIf(e -> {
+            List<FederatedRoom> kept = e.getValue().stream()
+                    .filter(r -> !originDomain.equals(r.originServer()))
+                    .collect(Collectors.toList());
+            if (kept.size() == e.getValue().size()) return false;   // nothing from this origin here
+            if (kept.isEmpty()) {
+                roomRelaySource.remove(e.getKey());
+                return true;
+            }
+            e.setValue(Collections.unmodifiableList(kept));
+            return false;
+        });
     }
 
     public Map<String, List<FederatedRoom>> getRemoteRooms() {
