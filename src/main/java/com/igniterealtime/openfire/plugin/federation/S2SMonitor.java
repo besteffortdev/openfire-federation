@@ -162,10 +162,13 @@ public class S2SMonitor {
                 Log.debug("S2S idle reaper already disabled — nothing to do");
                 return;
             }
-            ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.setValue(Duration.ZERO);
-            Log.info("Disabled Openfire's S2S idle reaper (was {}s) — federation manages liveness "
-                     + "via poll/reconnect; one-way S2S sockets would otherwise be reaped every {}s. "
-                     + "Set {}=false to restore Openfire's timeout.",
+            // -1ms is Openfire's documented "never time out" sentinel for
+            // xmpp.server.session.idle (it is also the property's minimum value).
+            // Do NOT use Duration.ZERO — 0ms can be read as an immediate-timeout.
+            ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.setValue(Duration.ofMillis(-1));
+            Log.info("Disabled Openfire's S2S idle reaper (was {}s, set to -1=never) — federation "
+                     + "manages liveness via poll/reconnect; one-way S2S sockets would otherwise be "
+                     + "reaped every {}s. Set {}=false to restore Openfire's timeout.",
                      current, current, DISABLE_IDLE_JIVE_KEY);
         } catch (Exception e) {
             Log.warn("Could not disable S2S idle timeout: {}", e.getMessage());
