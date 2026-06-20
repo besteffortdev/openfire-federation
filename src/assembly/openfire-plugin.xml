@@ -9,10 +9,16 @@
     </formats>
     <includeBaseDirectory>false</includeBaseDirectory>
 
-    <!-- plugin.xml at the archive root -->
+    <!-- plugin.xml + readme.html at the archive root.
+         Openfire shows the "readme" (documentation) link on the Plugins admin page
+         when readme.html is present at the plugin root, next to plugin.xml. -->
     <files>
         <file>
             <source>src/main/resources/plugin.xml</source>
+            <outputDirectory>/</outputDirectory>
+        </file>
+        <file>
+            <source>src/main/resources/readme.html</source>
             <outputDirectory>/</outputDirectory>
         </file>
     </files>

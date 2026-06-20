@@ -1,0 +1,157 @@
+# Openfire Federation Plugin
+
+Better MUC (group chat) federation for [Openfire](https://www.igniterealtime.org/projects/openfire/) — a
+dynamic routing overlay that lets multi‑user chat rooms span many Openfire servers, including servers that
+are **not directly connected** to each other.
+
+Standard XMPP server‑to‑server (S2S) already lets a user on one server join a room on another. This plugin
+goes further: it builds a **federation overlay** on top of S2S so that a single logical room can be
+**mapped across several servers at once**, with messages and presence relayed **multi‑hop** between servers
+that have no direct link. End users do nothing special — they just join their local room.
+
+---
+
+## Features
+
+- **Per‑room federation** — flip a toggle to federate any local MUC room; no client changes.
+- **Room mapping** — connect a local room to a room advertised by a peer; occupants and messages merge.
+- **Multi‑hop forwarding** — rooms federate across servers that aren't directly connected, relayed hop‑by‑hop.
+- **Dynamic routing** — a distance‑vector (Bellman‑Ford) routing table is learned automatically via gossip
+  when peers connect, and reconverges when the topology changes.
+- **Live activation** — peers, mappings and settings take effect immediately; no Openfire restart.
+- **Self‑healing S2S** — automatic reconnect with exponential back‑off, keepalives, and idle‑reaper handling
+  so links stay up and rosters re‑sync without users rejoining.
+- **Ghost‑occupant cleanup** — when a peer or route drops, remote users are cleanly removed from local rooms.
+- **Admin console UI** — manage peers, watch the routing table and S2S sessions, and federate rooms from a
+  dedicated **Federation** tab.
+
+---
+
+## Requirements
+
+- Openfire **5.0.5+**
+- Java **17**
+- Working **S2S** between the servers you want to federate (DNS/SRV resolvable domains, ports open,
+  TLS as configured). The plugin establishes the S2S connection for you once a peer is added.
+
+---
+
+## Build
+
+```bash
+mvn -q package -DskipTests
+```
+
+The Openfire plugin archive is produced at **`target/federation.jar`**.
+
+## Install
+
+Copy `federation.jar` into each server's Openfire plugins directory (default
+`/var/lib/openfire/plugins`). Openfire hot‑loads it — no restart needed. Then open the admin console and look
+for the new **Federation** tab.
+
+Install the plugin on **every** server you want to participate in the federation.
+
+> A `deploy.sh` is included for pushing the jar to a multi‑server lab over SSH. It is environment‑specific
+> (host list, container name, credentials) — adapt it before use.
+
+---
+
+## Quick start
+
+1. **Install** the plugin on each server and open **Admin Console → Federation**.
+2. **Add a peer** (Peer Servers tab → *Add peer server*): enter the other server's XMPP domain. The status
+   dot turns green once S2S is up. Repeat so every server knows its neighbours — they don't all need to be
+   directly connected; routes propagate.
+3. **Federate a room** (Rooms tab → *Local rooms*): toggle **Federated** on for a room. It is now advertised
+   to your peers and appears in their *Remote rooms* list.
+4. **Map a room**: on another server, find that room under *Remote rooms* (or map your local room to it) to
+   link the two. Occupants and messages now flow between them.
+5. Users join their **local** room as usual and see everyone across the federation.
+
+The in‑console **documentation/readme** link has a fuller, screenshot‑level walkthrough — see
+[`src/main/resources/readme.html`](src/main/resources/readme.html).
+
+---
+
+## Admin console reference
+
+The **Federation** tab has three sub‑views:
+
+| Tab | What it shows |
+|-----|----------------|
+| **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen, live S2S sessions, and connection settings (keepalive & reconnect). |
+| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. |
+| **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers. |
+
+The page auto‑refreshes every 5 seconds.
+
+---
+
+## Configuration properties
+
+Set under **Admin Console → Server → System Properties** (or via the Connection settings UI for the first two).
+
+| Property | Default | Meaning |
+|----------|---------|---------|
+| `plugin.federation.keepaliveSeconds` | `240` | Interval for lightweight keepalive pings to reachable peers. Min 30. Auto‑clamped below Openfire's S2S idle timeout. |
+| `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
+| `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
+
+### Note on `disableS2SIdle`
+
+XMPP S2S (RFC 6120) uses a **separate one‑way socket per direction**, and Openfire 5.x does **not** implement
+bidirectional S2S (XEP‑0288). An outgoing federation session therefore only ever *writes*; the peer's replies
+return on its own separate socket. Openfire's idle reaper closes a socket that has received no **inbound**
+bytes for `xmpp.server.idle`, so these write‑only sockets get reaped at exactly the idle timeout no matter how
+often the keepalive fires — producing repeated `Connection has been idle` reconnects.
+
+Because the plugin manages liveness itself (poll + reconnect back‑off), it disables that reaper on startup.
+This is **server‑wide** — it affects *all* S2S connections, not just federation peers. Set the property to
+`false` to leave Openfire's idle timeout untouched.
+
+---
+
+## How it works
+
+The plugin exchanges control messages with peers using IQ stanzas in the `urn:xmpp:federation:1` namespace:
+
+| Stanza | Purpose |
+|--------|---------|
+| `peer-announce` | Hello / keepalive; advertises this server to a peer. |
+| `peer-withdraw` | Graceful disconnect of a peer relationship. |
+| `peer-disable` | Administrative, authoritative block of a peer. |
+| `routing-update` | Distance‑vector routing gossip (split‑horizon). |
+| `routing-solicit` | Ask peers to re‑send routing + room info after topology loss. |
+| `room-advertisement` | Announce a federated local room (relayed multi‑hop). |
+| `room-mapping` / `room-unmap` | Link / unlink a local room to a remote room (relayed multi‑hop). |
+| `muc-forward` | Carries the actual MUC presence/message traffic between mapped rooms. |
+
+Remote users appear in local rooms as **virtual occupants**, tracked by their home origin (for reachability
+cleanup) and by the neighbour they arrived through (for per‑mapping teardown). Loop prevention uses a
+`fed-origin` marker so forwarded traffic doesn't bounce.
+
+---
+
+## Project layout
+
+```
+src/main/java/.../federation/
+  FederationPlugin.java         Openfire entry point
+  FederationManager.java        orchestrator; sending side of the protocol
+  FederatedRoomManager.java     local/remote room state + virtual occupants
+  FederationRoutingTable.java   distance-vector routing
+  S2SMonitor.java               peer poll, keepalive, reconnect, idle-reaper handling
+  protocol/                     IQ handler + stanza factory
+src/main/resources/
+  plugin.xml                    Openfire plugin descriptor
+  readme.html                   in-console usage documentation
+src/main/webapp/                admin console UI (index.html, federation.js)
+src/assembly/openfire-plugin.xml  packaging descriptor
+```
+
+---
+
+## License
+
+Apache License 2.0.
