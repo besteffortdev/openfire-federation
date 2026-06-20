@@ -41,7 +41,7 @@ public class FederatedRoomManager {
     // can still send leave presences even if no join events occurred after the reload.
     private static final String PROP_VOCC_ROOMS   = "federation.vocc.rooms.index";
     private static final String PROP_VOCC_NICKS   = "federation.vocc.%s.nicks";   // room → nick list
-    private static final String PROP_VOCC_ENTRY   = "federation.vocc.%s.occ.%s";  // (room, nick) → "origin|arrivedVia"
+    private static final String PROP_VOCC_ENTRY   = "federation.vocc.%s.occ.%s";  // (room, nick) → "origin|via1;via2;..."
     // Legacy (pre-1.3.20) virtual-occupant keys — read once on load, then swept.
     private static final String PROP_VOCC_DOMAINS_LEGACY = "federation.vocc.%s.domains";
     private static final String PROP_VOCC_NICKS_LEGACY   = "federation.vocc.%s.%s";
@@ -72,8 +72,15 @@ public class FederatedRoomManager {
      * mapping/topology events evict by {@code arrivedVia}, with no nick parsing.
      *
      * <p>{@code nick} is the MUC nick ("user@home") and is unique within a room.
+     *
+     * <p>{@code arrivedVia} is a SET, not a single domain: the same user can be reachable
+     * through more than one neighbour at once (e.g. directly AND via a relay in a diamond
+     * topology).  Per-mapping eviction drops one path at a time and only sends a leave when
+     * the last path is gone; collapsing this to a single domain (as 1.3.20 did) made an
+     * occupant that arrived via two neighbours un-evictable, resurfacing the ghost-occupant
+     * bug.  The set is a concurrent set so it can be mutated in place under the room lock-free.
      */
-    public record VirtualOccupant(String nick, String origin, String arrivedVia) {}
+    public record VirtualOccupant(String nick, String origin, Set<String> arrivedVia) {}
 
     /** localRoomJid → nick → VirtualOccupant currently injected into local sessions. */
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, VirtualOccupant>> virtualOccupants
@@ -158,9 +165,13 @@ public class FederatedRoomManager {
             if (nick.isEmpty()) continue;
             String entry = JiveGlobals.getProperty(String.format(PROP_VOCC_ENTRY, localJid, nick), "").strip();
             String[] p = entry.split("\\|", 2);
-            String origin     = (p.length > 0 && !p[0].isEmpty()) ? p[0] : homeOf(nick, nick);
-            String arrivedVia = (p.length > 1 && !p[1].isEmpty()) ? p[1] : origin;
-            byNick.put(nick, new VirtualOccupant(nick, origin, arrivedVia));
+            String origin = (p.length > 0 && !p[0].isEmpty()) ? p[0] : homeOf(nick, nick);
+            Set<String> via = ConcurrentHashMap.newKeySet();
+            if (p.length > 1 && !p[1].isEmpty()) {
+                for (String d : p[1].split(";")) { d = d.strip(); if (!d.isEmpty()) via.add(d); }
+            }
+            if (via.isEmpty()) via.add(origin);
+            byNick.put(nick, new VirtualOccupant(nick, origin, via));
         }
         if (byNick.isEmpty()) { virtualOccupants.remove(localJid); return false; }
         Log.info("Loaded {} virtual occupant(s) in {}", byNick.size(), localJid);
@@ -181,8 +192,18 @@ public class FederatedRoomManager {
                 nick = nick.strip();
                 if (nick.isEmpty()) continue;
                 // Legacy keyed by the immediate sender; origin lives in the nick, arrivedVia = old key.
+                // A nick can appear under several legacy domains — merge them into the arrivedVia set.
+                final String via = domain;
                 virtualOccupants.computeIfAbsent(localJid, k -> new ConcurrentHashMap<>())
-                                .put(nick, new VirtualOccupant(nick, homeOf(nick, domain), domain));
+                                .compute(nick, (n, existing) -> {
+                    if (existing == null) {
+                        Set<String> set = ConcurrentHashMap.newKeySet();
+                        set.add(via);
+                        return new VirtualOccupant(n, homeOf(n, via), set);
+                    }
+                    existing.arrivedVia().add(via);
+                    return existing;
+                });
             }
             JiveGlobals.deleteProperty(String.format(PROP_VOCC_NICKS_LEGACY, localJid, domain));
         }
@@ -369,7 +390,15 @@ public class FederatedRoomManager {
      */
     public void trackVirtualOccupant(String localRoomJid, String origin, String arrivedVia, String virtualNick) {
         virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>())
-                        .put(virtualNick, new VirtualOccupant(virtualNick, origin, arrivedVia));
+                        .compute(virtualNick, (n, existing) -> {
+            if (existing == null) {
+                Set<String> via = ConcurrentHashMap.newKeySet();
+                via.add(arrivedVia);
+                return new VirtualOccupant(n, origin, via);
+            }
+            existing.arrivedVia().add(arrivedVia);   // additional reachable path for an existing occupant
+            return existing;
+        });
         persistVirtualOccupantsForRoom(localRoomJid);
     }
 
@@ -416,7 +445,20 @@ public class FederatedRoomManager {
      * survive: drop only the occupants that came in through that link.
      */
     public Set<String> clearVirtualOccupantsByArrivedVia(String localRoomJid, String arrivedViaDomain) {
-        return removeMatching(localRoomJid, vo -> arrivedViaDomain.equals(vo.arrivedVia()));
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return Collections.emptySet();
+        Set<String> removed = new HashSet<>();
+        boolean changed = false;
+        for (VirtualOccupant vo : new ArrayList<>(byNick.values())) {
+            if (!vo.arrivedVia().remove(arrivedViaDomain)) continue;   // didn't arrive via this link
+            changed = true;
+            // Only emit a leave when the LAST reachable path is gone; otherwise the occupant
+            // is still reachable through another neighbour and must stay.
+            if (vo.arrivedVia().isEmpty() && byNick.remove(vo.nick(), vo)) removed.add(vo.nick());
+        }
+        if (!changed) return Collections.emptySet();
+        afterRemoval(localRoomJid, byNick);
+        return removed;
     }
 
     /**
@@ -437,13 +479,18 @@ public class FederatedRoomManager {
             if (pred.test(vo) && byNick.remove(vo.nick()) != null) removed.add(vo.nick());
         }
         if (removed.isEmpty()) return Collections.emptySet();
+        afterRemoval(localRoomJid, byNick);
+        return removed;
+    }
+
+    /** Drops the room entry + persisted state if it emptied, else rewrites persistence. */
+    private void afterRemoval(String localRoomJid, ConcurrentHashMap<String, VirtualOccupant> byNick) {
         if (byNick.isEmpty()) {
             virtualOccupants.remove(localRoomJid, byNick);
             clearPersistedVirtualOccupantsForRoom(localRoomJid);
         } else {
             persistVirtualOccupantsForRoom(localRoomJid);
         }
-        return removed;
     }
 
     /** Home domain encoded in a virtual nick ("user@home"); falls back to the given default. */
@@ -566,7 +613,7 @@ public class FederatedRoomManager {
                                 String.join(",", byNick.keySet()));
         for (VirtualOccupant vo : byNick.values()) {
             JiveGlobals.setProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, vo.nick()),
-                                    vo.origin() + "|" + vo.arrivedVia());
+                                    vo.origin() + "|" + String.join(";", vo.arrivedVia()));
         }
         persistVirtualOccupantRoomsIndex();
     }

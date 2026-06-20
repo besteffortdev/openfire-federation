@@ -497,7 +497,7 @@ public class FederationManager {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(toDomain).orElse(toDomain);
         for (FederatedRoomManager.VirtualOccupant vo : roomManager.getVirtualOccupants(localRoom)) {
-            if (toDomain.equals(vo.arrivedVia())) continue;       // don't echo back the way it came
+            if (vo.arrivedVia().contains(toDomain)) continue;     // don't echo back any way it came
             if (toDomain.equals(vo.origin()))     continue;       // toDomain's own user — don't echo
             try {
                 Presence vsync = new Presence();
