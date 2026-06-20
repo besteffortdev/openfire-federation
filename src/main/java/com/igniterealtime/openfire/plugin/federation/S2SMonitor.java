@@ -35,6 +35,12 @@ public class S2SMonitor {
     static final         int    KEEPALIVE_DEFAULT       = 240;
     static final         int    KEEPALIVE_MINIMUM       = 30;
 
+    // When true (default), the plugin disables Openfire's server-wide S2S idle reaper
+    // on startup — see disableS2SIdleReaperIfRequested() for why a keepalive can't
+    // substitute for it on Openfire's one-way S2S sockets.
+    static final         String DISABLE_IDLE_JIVE_KEY  = "plugin.federation.disableS2SIdle";
+    static final         boolean DISABLE_IDLE_DEFAULT  = true;
+
     // reconnectSeconds = back-off cap (max interval between retry attempts).
     // The scheduler always polls every RECONNECT_POLL_SECONDS; per-peer nextRetryAt
     // controls when each peer is actually retried.
@@ -71,6 +77,9 @@ public class S2SMonitor {
     }
 
     public void start() {
+        // Stop Openfire from reaping our (write-only) outgoing S2S sockets as "idle"
+        // before scheduling anything that relies on those sockets staying up.
+        disableS2SIdleReaperIfRequested();
         scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "federation-s2s-monitor");
             t.setDaemon(true);
@@ -123,6 +132,44 @@ public class S2SMonitor {
             Log.debug("Could not read S2S idle timeout: {}", e.getMessage());
         }
         return -1;
+    }
+
+    /**
+     * Disables Openfire's S2S idle reaper (xmpp.server.idle) on startup, unless the admin
+     * opted out via {@value #DISABLE_IDLE_JIVE_KEY}=false.
+     *
+     * Why: Openfire reaps an S2S socket that has received no INBOUND bytes for the idle
+     * timeout.  XMPP S2S (RFC 6120) uses a separate one-way socket per direction, and
+     * Openfire 5.x implements no XEP-0288 bidi to merge them — so our outgoing session to
+     * a peer only ever writes (the peer's replies come back on its own separate socket).
+     * It therefore reads nothing after the handshake and is force-closed at EXACTLY the
+     * idle timeout no matter how often the keepalive writes to it.  Federation already
+     * owns liveness (30s poll + reconnect back-off), so the reaper is pure churn here.
+     *
+     * NOTE: this is a SERVER-WIDE setting — it affects every S2S connection on this server,
+     * not just federation peers.
+     */
+    private void disableS2SIdleReaperIfRequested() {
+        if (!JiveGlobals.getBooleanProperty(DISABLE_IDLE_JIVE_KEY, DISABLE_IDLE_DEFAULT)) {
+            Log.info("S2S idle reaper left untouched ({}=false); note federation keepalives "
+                     + "cannot keep one-way S2S sockets alive — expect periodic idle reconnects.",
+                     DISABLE_IDLE_JIVE_KEY);
+            return;
+        }
+        try {
+            int current = idleTimeoutSeconds();
+            if (current <= 0) {
+                Log.debug("S2S idle reaper already disabled — nothing to do");
+                return;
+            }
+            ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.setValue(Duration.ZERO);
+            Log.info("Disabled Openfire's S2S idle reaper (was {}s) — federation manages liveness "
+                     + "via poll/reconnect; one-way S2S sockets would otherwise be reaped every {}s. "
+                     + "Set {}=false to restore Openfire's timeout.",
+                     current, current, DISABLE_IDLE_JIVE_KEY);
+        } catch (Exception e) {
+            Log.warn("Could not disable S2S idle timeout: {}", e.getMessage());
+        }
     }
 
     /**
