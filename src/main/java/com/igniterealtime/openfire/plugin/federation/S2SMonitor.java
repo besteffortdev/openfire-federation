@@ -334,6 +334,12 @@ public class S2SMonitor {
         routingTable.addDirectPeer(domain);
         // Send our full state (peer-announce + routing table + room list) to the new peer.
         federationManager.sendFullGossip(domain);
+        // PULL the peer's state too.  sendFullGossip only pushes ours; if the link flapped
+        // asymmetrically (the peer never saw us drop), the peer treats our peer-announce as a
+        // steady-state keepalive and replies WITHOUT a routing-update — so we would never
+        // re-learn the destinations reachable through it, and would never re-advertise them
+        // onward.  A solicit forces the peer to re-send its routing table + room cache.
+        federationManager.solicitRouting(domain);
         // Re-sync occupant rosters for any room mapped to this peer so users that
         // were already in those rooms become visible again without rejoining.
         federationManager.resyncMappedDestinations(Set.of(domain));

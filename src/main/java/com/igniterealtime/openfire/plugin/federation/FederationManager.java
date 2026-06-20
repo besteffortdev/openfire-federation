@@ -585,6 +585,24 @@ public class FederationManager {
      * reaches a now-lost destination advertises it (and its rooms) back to us.  Without
      * this, triggered-only distance-vector never re-learns a route via an alternate path.
      */
+    /**
+     * Asks a single peer to (re-)send its routing table and room cache.  Sent on
+     * peer-UP so we PULL the peer's state instead of only pushing ours: an S2S link
+     * is two independent one-way sockets, so a reap/flap is asymmetric — the far peer
+     * may never have seen us go down and so still considers us REACHABLE.  In that case
+     * its reply to our peer-announce is only a keepalive (no routing-update), and we would
+     * never re-learn the destinations reachable through it.  A solicit forces a full reply
+     * (sendRoutingUpdate + sendRoomState) regardless of the peer's view of the link.
+     */
+    public void solicitRouting(String toDomain) {
+        try {
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.routingSolicit(toDomain));
+        } catch (Exception e) {
+            Log.warn("Failed to send routing-solicit to {}: {}", toDomain, e.getMessage());
+        }
+    }
+
     public void solicitRoutingFromAll(String excludeDomain) {
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() == PeerServer.Status.REACHABLE
