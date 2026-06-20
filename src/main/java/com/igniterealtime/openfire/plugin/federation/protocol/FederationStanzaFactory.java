@@ -103,6 +103,18 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    /**
+     * Asks the recipient to re-send its routing table and room cache.  Sent when we
+     * lose routes so alternate paths re-form — triggered-only distance-vector would
+     * otherwise never re-learn a destination reachable via a different neighbour.
+     */
+    public static IQ routingSolicit(String toDomain) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        fed.addElement("routing-solicit");
+        return iq;
+    }
+
     // ── room-advertisement ────────────────────────────────────────────────────
 
     /**

@@ -1,93 +1,157 @@
-# openfire-federation
+# Openfire Federation Plugin
 
+Better MUC (group chat) federation for [Openfire](https://www.igniterealtime.org/projects/openfire/) — a
+dynamic routing overlay that lets multi‑user chat rooms span many Openfire servers, including servers that
+are **not directly connected** to each other.
 
+Standard XMPP server‑to‑server (S2S) already lets a user on one server join a room on another. This plugin
+goes further: it builds a **federation overlay** on top of S2S so that a single logical room can be
+**mapped across several servers at once**, with messages and presence relayed **multi‑hop** between servers
+that have no direct link. End users do nothing special — they just join their local room.
 
-## Getting started
+---
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## Features
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+- **Per‑room federation** — flip a toggle to federate any local MUC room; no client changes.
+- **Room mapping** — connect a local room to a room advertised by a peer; occupants and messages merge.
+- **Multi‑hop forwarding** — rooms federate across servers that aren't directly connected, relayed hop‑by‑hop.
+- **Dynamic routing** — a distance‑vector (Bellman‑Ford) routing table is learned automatically via gossip
+  when peers connect, and reconverges when the topology changes.
+- **Live activation** — peers, mappings and settings take effect immediately; no Openfire restart.
+- **Self‑healing S2S** — automatic reconnect with exponential back‑off, keepalives, and idle‑reaper handling
+  so links stay up and rosters re‑sync without users rejoining.
+- **Ghost‑occupant cleanup** — when a peer or route drops, remote users are cleanly removed from local rooms.
+- **Admin console UI** — manage peers, watch the routing table and S2S sessions, and federate rooms from a
+  dedicated **Federation** tab.
 
-## Add your files
+---
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Requirements
+
+- Openfire **5.0.5+**
+- Java **17**
+- Working **S2S** between the servers you want to federate (DNS/SRV resolvable domains, ports open,
+  TLS as configured). The plugin establishes the S2S connection for you once a peer is added.
+
+---
+
+## Build
+
+```bash
+mvn -q package -DskipTests
+```
+
+The Openfire plugin archive is produced at **`target/federation.jar`**.
+
+## Install
+
+Copy `federation.jar` into each server's Openfire plugins directory (default
+`/var/lib/openfire/plugins`). Openfire hot‑loads it — no restart needed. Then open the admin console and look
+for the new **Federation** tab.
+
+Install the plugin on **every** server you want to participate in the federation.
+
+> A `deploy.sh` is included for pushing the jar to a multi‑server lab over SSH. It is environment‑specific
+> (host list, container name, credentials) — adapt it before use.
+
+---
+
+## Quick start
+
+1. **Install** the plugin on each server and open **Admin Console → Federation**.
+2. **Add a peer** (Peer Servers tab → *Add peer server*): enter the other server's XMPP domain. The status
+   dot turns green once S2S is up. Repeat so every server knows its neighbours — they don't all need to be
+   directly connected; routes propagate.
+3. **Federate a room** (Rooms tab → *Local rooms*): toggle **Federated** on for a room. It is now advertised
+   to your peers and appears in their *Remote rooms* list.
+4. **Map a room**: on another server, find that room under *Remote rooms* (or map your local room to it) to
+   link the two. Occupants and messages now flow between them.
+5. Users join their **local** room as usual and see everyone across the federation.
+
+The in‑console **documentation/readme** link has a fuller, screenshot‑level walkthrough — see
+[`src/main/resources/readme.html`](src/main/resources/readme.html).
+
+---
+
+## Admin console reference
+
+The **Federation** tab has three sub‑views:
+
+| Tab | What it shows |
+|-----|----------------|
+| **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen, live S2S sessions, and connection settings (keepalive & reconnect). |
+| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. |
+| **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers. |
+
+The page auto‑refreshes every 5 seconds.
+
+---
+
+## Configuration properties
+
+Set under **Admin Console → Server → System Properties** (or via the Connection settings UI for the first two).
+
+| Property | Default | Meaning |
+|----------|---------|---------|
+| `plugin.federation.keepaliveSeconds` | `240` | Interval for lightweight keepalive pings to reachable peers. Min 30. Auto‑clamped below Openfire's S2S idle timeout. |
+| `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
+| `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
+
+### Note on `disableS2SIdle`
+
+XMPP S2S (RFC 6120) uses a **separate one‑way socket per direction**, and Openfire 5.x does **not** implement
+bidirectional S2S (XEP‑0288). An outgoing federation session therefore only ever *writes*; the peer's replies
+return on its own separate socket. Openfire's idle reaper closes a socket that has received no **inbound**
+bytes for `xmpp.server.idle`, so these write‑only sockets get reaped at exactly the idle timeout no matter how
+often the keepalive fires — producing repeated `Connection has been idle` reconnects.
+
+Because the plugin manages liveness itself (poll + reconnect back‑off), it disables that reaper on startup.
+This is **server‑wide** — it affects *all* S2S connections, not just federation peers. Set the property to
+`false` to leave Openfire's idle timeout untouched.
+
+---
+
+## How it works
+
+The plugin exchanges control messages with peers using IQ stanzas in the `urn:xmpp:federation:1` namespace:
+
+| Stanza | Purpose |
+|--------|---------|
+| `peer-announce` | Hello / keepalive; advertises this server to a peer. |
+| `peer-withdraw` | Graceful disconnect of a peer relationship. |
+| `peer-disable` | Administrative, authoritative block of a peer. |
+| `routing-update` | Distance‑vector routing gossip (split‑horizon). |
+| `routing-solicit` | Ask peers to re‑send routing + room info after topology loss. |
+| `room-advertisement` | Announce a federated local room (relayed multi‑hop). |
+| `room-mapping` / `room-unmap` | Link / unlink a local room to a remote room (relayed multi‑hop). |
+| `muc-forward` | Carries the actual MUC presence/message traffic between mapped rooms. |
+
+Remote users appear in local rooms as **virtual occupants**, tracked by their home origin (for reachability
+cleanup) and by the neighbour they arrived through (for per‑mapping teardown). Loop prevention uses a
+`fed-origin` marker so forwarded traffic doesn't bounce.
+
+---
+
+## Project layout
 
 ```
-cd existing_repo
-git remote add origin http://gitlab.example.com/example/openfire-federation.git
-git branch -M main
-git push -uf origin main
+src/main/java/.../federation/
+  FederationPlugin.java         Openfire entry point
+  FederationManager.java        orchestrator; sending side of the protocol
+  FederatedRoomManager.java     local/remote room state + virtual occupants
+  FederationRoutingTable.java   distance-vector routing
+  S2SMonitor.java               peer poll, keepalive, reconnect, idle-reaper handling
+  protocol/                     IQ handler + stanza factory
+src/main/resources/
+  plugin.xml                    Openfire plugin descriptor
+  readme.html                   in-console usage documentation
+src/main/webapp/                admin console UI (index.html, federation.js)
+src/assembly/openfire-plugin.xml  packaging descriptor
 ```
 
-## Integrate with your tools
-
-* [Set up project integrations](http://gitlab.example.com/example/openfire-federation/-/settings/integrations)
-
-## Collaborate with your team
-
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+---
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Apache License 2.0.

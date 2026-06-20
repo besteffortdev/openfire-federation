@@ -129,7 +129,7 @@ public class FederationManager {
         Set<String> removedRoutes = routingTable.removePeer(domain);
         handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
         if (!removedRoutes.isEmpty()) {
-            propagateRoutingToAll(domain);
+            propagateTopologyChange(domain);
         }
         if (!peerRegistry.contains(domain)) peerRegistry.addPeer(domain);
         peerRegistry.setControlStatus(domain, PeerServer.Status.DISABLED);
@@ -229,7 +229,7 @@ public class FederationManager {
             // destination that was only reachable through it.
             handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
             if (!removedRoutes.isEmpty()) {
-                propagateRoutingToAll(domain);
+                propagateTopologyChange(domain);
             }
         }
         return removed;
@@ -274,16 +274,22 @@ public class FederationManager {
             Log.warn("Failed to send room-mapping to {}: {}", remoteDomain, e.getMessage());
         }
         pushInitialSyncPresences(localJid, remoteDomain, remoteJid);
+        // We may be a hub with no real occupants of our own: the local room can already
+        // hold virtual occupants from OTHER spokes. Forward them to the newly-mapped spoke
+        // so it sees clients on the previously-mapped servers, not only future joiners.
+        forwardVirtualOccupants(localJid, remoteDomain, remoteJid);
     }
 
     /** Removes ALL spoke mappings for localJid and notifies every remote. */
     public void unmapRooms(String localJid) {
         List<RoomMapping> mappings = new ArrayList<>(roomManager.getMappingsForLocal(localJid));
         for (RoomMapping m : mappings) {
-            evictVirtualOccupants(localJid, m.remoteDomain());
             pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         }
         roomManager.removeMapping(localJid);
+        // Every mapping is gone — drop all virtual occupants in the room (incl. hub-relayed
+        // users tracked under a relay domain, which a per-domain evict would miss).
+        evictAllVirtualOccupantsInRoom(localJid);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         for (RoomMapping m : mappings) {
             String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
@@ -301,9 +307,16 @@ public class FederationManager {
     public void unmapRoom(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (m == null) return;
-        evictVirtualOccupants(localJid, remoteDomain);
         pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         roomManager.removeMapping(localJid, remoteDomain);
+        // If this was the room's last mapping, every virtual occupant is now unreachable —
+        // evict them all (covers hub-relayed users tracked under a relay domain). Otherwise
+        // fall back to evicting the ones from this specific remote.
+        if (roomManager.getMappingsForLocal(localJid).isEmpty()) {
+            evictAllVirtualOccupantsInRoom(localJid);
+        } else {
+            evictVirtualOccupants(localJid, remoteDomain);
+        }
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
         try {
@@ -316,24 +329,45 @@ public class FederationManager {
     }
 
     /**
-     * Evicts all virtual occupants from remoteDomain across every local room.
-     * Used on unexpected peer disconnect so clients see leave presences rather
-     * than ghost users that never departed.
+     * Drops every client ORIGINATING from remoteDomain across all local rooms — used
+     * when the route to remoteDomain is lost.  Eviction is keyed on the virtual nick's
+     * HOME domain rather than the domain it was tracked under, so multi-hop occupants
+     * (tracked under a relay) are also dropped when the far server becomes unreachable.
      */
     public void evictAllVirtualOccupantsFromDomain(String remoteDomain) {
-        for (String localJid : roomManager.getLocalRoomsWithVirtualOccupantsFrom(remoteDomain)) {
-            evictVirtualOccupants(localJid, remoteDomain);
+        for (String localJid : roomManager.getRoomsWithAnyVirtualOccupants()) {
+            evictVirtualOccupantsByOrigin(localJid, remoteDomain);
         }
     }
 
     /**
-     * Delivers leave presences to every current local occupant of localRoomJid for
-     * each virtual nick that was injected from remoteDomain.  Clears the tracking
-     * so eviction is idempotent.  Called before removing a mapping so clients
-     * immediately see the departing virtual users.
+     * Delivers leave presences to every current local occupant of localRoomJid for each
+     * virtual nick that ARRIVED VIA remoteDomain (the immediate neighbour we got them from).
+     * Used when tearing down a specific mapping while others on the room survive.
      */
     public void evictVirtualOccupants(String localRoomJid, String remoteDomain) {
-        Set<String> nicks = roomManager.clearVirtualOccupants(localRoomJid, remoteDomain);
+        sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByArrivedVia(localRoomJid, remoteDomain));
+    }
+
+    /**
+     * Like {@link #evictVirtualOccupants} but matches virtual nicks by their HOME domain
+     * (user@home), so it drops a server's clients even when they reached us via a relay.
+     */
+    public void evictVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
+        sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByOrigin(localRoomJid, originDomain));
+    }
+
+    /**
+     * Drops EVERY virtual occupant in a local room — used when its last federation mapping
+     * is removed (the whole federation feeding the room is gone).  Catches hub-relayed users
+     * tracked under a relay domain, which per-origin/per-domain eviction misses multi-hop.
+     */
+    public void evictAllVirtualOccupantsInRoom(String localRoomJid) {
+        sendVirtualLeaves(localRoomJid, roomManager.clearAllVirtualOccupants(localRoomJid));
+    }
+
+    /** Sends an unavailable presence for each given virtual nick to every real local occupant. */
+    private void sendVirtualLeaves(String localRoomJid, Set<String> nicks) {
         if (nicks.isEmpty()) return;
         try {
             JID localRoomJID = new JID(localRoomJid);
@@ -356,10 +390,9 @@ public class FederationManager {
                     FederationStanzaFactory.directDeliver(leave);
                 }
             }
-            Log.debug("evictVirtualOccupants: sent {} leave(s) from {} in {}",
-                      nicks.size(), remoteDomain, localRoomJid);
+            Log.debug("sendVirtualLeaves: sent {} leave(s) in {}", nicks.size(), localRoomJid);
         } catch (Exception e) {
-            Log.warn("evictVirtualOccupants: error for {}/{}: {}", localRoomJid, remoteDomain, e.getMessage());
+            Log.warn("sendVirtualLeaves: error for {}: {}", localRoomJid, e.getMessage());
         }
     }
 
@@ -455,32 +488,25 @@ public class FederationManager {
     /**
      * Forwards the virtual occupants we know about in localRoom — users that reached
      * us from OTHER federated domains — toward toDomain, marked fed-origin.  Excludes:
-     * (a) virtuals that arrived FROM toDomain (don't echo them back the way they came),
-     * and (b) users whose HOME server is toDomain.  Exclusion (b) is keyed on the nick's
-     * domain rather than the domain it was tracked under, because on a multi-hop path a
-     * virtual is tracked under an intermediate neighbour — without this a user sees a
-     * ghost copy of themself when their own presence loops back home.
+     * (a) virtuals that arrived VIA toDomain (don't echo them back the way they came),
+     * and (b) users whose HOME (origin) server is toDomain (don't echo a server its own
+     * users — otherwise a user sees a ghost copy of themself looping back home).  Both are
+     * first-class fields on {@link FederatedRoomManager.VirtualOccupant}, so no nick parsing.
      */
     public void forwardVirtualOccupants(String localRoom, String toDomain, String remoteRoomJid) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(toDomain).orElse(toDomain);
-        Map<String, Set<String>> virtuals = roomManager.getVirtualOccupantsByDomain(localRoom);
-        for (Map.Entry<String, Set<String>> ve : virtuals.entrySet()) {
-            if (ve.getKey().equals(toDomain)) continue;          // arrived from toDomain
-            for (String nick : ve.getValue()) {
-                String nickHome;
-                try { nickHome = new JID(nick).getDomain(); }
-                catch (Exception e) { nickHome = ve.getKey(); }
-                if (toDomain.equals(nickHome)) continue;          // toDomain's own user — don't echo
-                try {
-                    Presence vsync = new Presence();
-                    vsync.setFrom(new JID(nick));
-                    FederationStanzaFactory.markAsForwarded(vsync);
-                    XMPPServer.getInstance().getPacketRouter().route(
-                        FederationStanzaFactory.mucForward(nextHop, toDomain, remoteRoomJid, localDomain, vsync));
-                } catch (Exception e) {
-                    Log.warn("forwardVirtualOccupants: failed for {}: {}", nick, e.getMessage());
-                }
+        for (FederatedRoomManager.VirtualOccupant vo : roomManager.getVirtualOccupants(localRoom)) {
+            if (vo.arrivedVia().contains(toDomain)) continue;     // don't echo back any way it came
+            if (toDomain.equals(vo.origin()))     continue;       // toDomain's own user — don't echo
+            try {
+                Presence vsync = new Presence();
+                vsync.setFrom(new JID(vo.nick()));
+                FederationStanzaFactory.markAsForwarded(vsync);
+                XMPPServer.getInstance().getPacketRouter().route(
+                    FederationStanzaFactory.mucForward(nextHop, toDomain, remoteRoomJid, localDomain, vsync));
+            } catch (Exception e) {
+                Log.warn("forwardVirtualOccupants: failed for {}: {}", vo.nick(), e.getMessage());
             }
         }
     }
@@ -532,6 +558,56 @@ public class FederationManager {
                 }
             }
         }
+    }
+
+    /** Sends our full room knowledge — own federated rooms + cached remote rooms — to one peer. */
+    public void sendRoomState(String toDomain) {
+        sendRoomAdvertisement(toDomain);
+        sendCachedRemoteRoomAdvertisements(toDomain);
+    }
+
+    /**
+     * Re-floods room knowledge to every reachable peer.  Called on routing changes so
+     * remote-room caches reconverge along new paths after a link is removed/disabled —
+     * e.g. a server that regains a destination via an alternate route gets its rooms back.
+     */
+    public void propagateRoomsToAll() {
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                sendRoomState(peer.getDomain());
+            }
+        }
+    }
+
+    /**
+     * Asks every reachable peer (except excludeDomain) to re-send its routing table and
+     * room cache.  Sent when we lose routes so alternate paths re-form: a peer that still
+     * reaches a now-lost destination advertises it (and its rooms) back to us.  Without
+     * this, triggered-only distance-vector never re-learns a route via an alternate path.
+     */
+    public void solicitRoutingFromAll(String excludeDomain) {
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getStatus() == PeerServer.Status.REACHABLE
+                    && !peer.getDomain().equals(excludeDomain)) {
+                try {
+                    XMPPServer.getInstance().getPacketRouter()
+                              .route(FederationStanzaFactory.routingSolicit(peer.getDomain()));
+                } catch (Exception e) {
+                    Log.warn("Failed to send routing-solicit to {}: {}", peer.getDomain(), e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * A link was removed/disabled: gossip the routing change, re-flood room caches, and
+     * solicit alternate routes so reachability and room visibility reconverge across the
+     * whole network (not just on the directly-affected node).
+     */
+    public void propagateTopologyChange(String excludeDomain) {
+        propagateRoutingToAll(excludeDomain);
+        propagateRoomsToAll();
+        solicitRoutingFromAll(excludeDomain);
     }
 
     public void propagateRoutingToAll(String excludeDomain) {

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Federation Plugin — Documentation</title>
+<style>
+    body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+           color: #212529; line-height: 1.55; max-width: 860px; margin: 24px auto; padding: 0 20px; }
+    h1 { font-size: 24px; border-bottom: 2px solid #0d6efd; padding-bottom: 8px; }
+    h2 { font-size: 19px; margin-top: 32px; color: #0d6efd; }
+    h3 { font-size: 15px; margin-top: 22px; }
+    code { background: #f1f3f5; padding: 1px 5px; border-radius: 3px; font-size: 90%; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+    th, td { border: 1px solid #dee2e6; padding: 7px 10px; text-align: left; vertical-align: top; }
+    th { background: #f8f9fa; }
+    ol, ul { padding-left: 22px; }
+    li { margin: 4px 0; }
+    .note { background: #fff3cd; border: 1px solid #ffe69c; border-radius: 6px; padding: 10px 14px; margin: 16px 0; }
+    .tip  { background: #d1e7dd; border: 1px solid #a3cfbb; border-radius: 6px; padding: 10px 14px; margin: 16px 0; }
+    .step { background: #f8f9fa; border-left: 4px solid #0d6efd; padding: 8px 14px; margin: 10px 0; border-radius: 0 6px 6px 0; }
+    .dot { display:inline-block; width:10px; height:10px; border-radius:50%; vertical-align:middle; margin-right:4px; }
+    .green{background:#28a745}.red{background:#dc3545}.grey{background:#adb5bd}.orange{background:#fd7e14}
+</style>
+</head>
+<body>
+
+<h1>Federation Plugin</h1>
+
+<p>
+    This plugin lets multi‑user chat (MUC) rooms span several Openfire servers — even servers that are not
+    directly connected to each other. Once two rooms are linked, their occupants and messages merge into a
+    single conversation. <strong>Your users do nothing special:</strong> they join their normal local room
+    and automatically see everyone across the federation.
+</p>
+
+<h2>Before you start</h2>
+<ul>
+    <li>Install this plugin on <strong>every</strong> server that should take part.</li>
+    <li>Each pair of neighbouring servers needs working XMPP server‑to‑server (S2S): resolvable domains
+        (DNS/SRV), open ports, and matching TLS settings. Adding a peer here opens the S2S connection for you.</li>
+    <li>Servers do <em>not</em> all need to connect directly — the plugin relays traffic multi‑hop along the
+        path it learns.</li>
+</ul>
+
+<h2>The Federation tab</h2>
+<p>After the plugin loads, a <strong>Federation</strong> tab appears in the admin console with three views.
+   The page auto‑refreshes every 5&nbsp;seconds.</p>
+
+<table>
+    <tr><th>View</th><th>What it does</th></tr>
+    <tr><td><strong>Peer Servers</strong></td>
+        <td>Add, remove or disable peer servers; see their status and last‑seen time; watch live S2S sessions;
+            and tune connection settings (keepalive &amp; reconnect).</td></tr>
+    <tr><td><strong>Routing Table</strong></td>
+        <td>Shows every destination the server can reach, the next hop toward it, and the hop count.
+            A hop count of <strong>1</strong> means a direct S2S link. Routes are learned automatically.</td></tr>
+    <tr><td><strong>Rooms</strong></td>
+        <td>Turn federation on or off per local room, see and manage room mappings, and browse the rooms your
+            peers have advertised.</td></tr>
+</table>
+
+<h2>Step‑by‑step: federate a room</h2>
+
+<div class="step"><strong>1. Add your peers.</strong>
+    On the <strong>Peer Servers</strong> tab, under <em>Add peer server</em>, enter the other server's XMPP
+    domain (for example <code>chat.example.com</code>) and click <em>Add peer</em>. Do this on each server for
+    its neighbours. Watch the status dot:
+    <span class="dot green"></span>reachable,
+    <span class="dot orange"></span>connecting/retrying,
+    <span class="dot red"></span>unreachable,
+    <span class="dot grey"></span>disabled.
+</div>
+
+<div class="step"><strong>2. Turn on federation for a room.</strong>
+    On the <strong>Rooms</strong> tab, find the room under <em>Local rooms</em> and switch its
+    <em>Federated</em> toggle on. The room is now advertised to your peers.
+</div>
+
+<div class="step"><strong>3. Link the rooms.</strong>
+    On a peer server, the advertised room now appears under <em>Remote rooms</em>. Map your local room to it
+    (or, from the other side, map theirs to yours). Once mapped, the two rooms become one shared conversation.
+    A mapping shows <span style="color:#28a745;font-weight:600">connected</span> when the route is up and
+    <span style="color:#dc3545;font-weight:600">disconnected</span> when it is lost.
+</div>
+
+<div class="step"><strong>4. Done.</strong>
+    Users join their local room as normal and see occupants and messages from every mapped server. Repeat for
+    as many servers as you like; with multi‑hop, a room can chain across servers that never talk directly.
+</div>
+
+<div class="tip">
+    <strong>Tip:</strong> federate the same room name on several servers and map them in a hub‑and‑spoke or
+    chained layout. Presence, typing, and message history forwarding all follow the mappings.
+</div>
+
+<h2>Connection settings</h2>
+<p>On the <strong>Peer Servers</strong> tab, the <em>Connection settings</em> box exposes:</p>
+<table>
+    <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td>S2S keepalive interval</td><td>240&nbsp;s</td>
+        <td>How often a lightweight ping is sent to each reachable peer to detect liveness quickly.
+            Minimum 30&nbsp;s.</td></tr>
+    <tr><td>Max reconnect interval (back‑off cap)</td><td>30&nbsp;s</td>
+        <td>Upper bound for retrying an unreachable peer. Retries grow 5&nbsp;→&nbsp;10&nbsp;→&nbsp;20&nbsp;s …
+            up to this cap, then reset once the peer reconnects. Minimum 5&nbsp;s.</td></tr>
+</table>
+
+<h3>Idle connections</h3>
+<p>
+    The plugin manages S2S liveness itself, so on startup it disables Openfire's built‑in S2S idle timeout
+    (<code>xmpp.server.idle</code>). This prevents repeated <em>“Connection has been idle”</em> reconnects
+    that would otherwise occur because XMPP uses a separate one‑way socket per direction. This change is
+    <strong>server‑wide</strong> — it affects all S2S connections, not just federation peers.
+</p>
+<div class="note">
+    To keep Openfire's idle timeout in place instead, set the system property
+    <code>plugin.federation.disableS2SIdle</code> to <code>false</code>
+    (Admin Console → Server → System Properties).
+</div>
+
+<h2>Managing peers</h2>
+<ul>
+    <li><strong>Remove</strong> — soft removal; tears down the link and clears mappings to that peer. The peer
+        can be added again later.</li>
+    <li><strong>Disable</strong> — an authoritative, persistent block. The disabled peer cannot re‑establish
+        the connection (even by re‑adding) until you re‑enable it.</li>
+</ul>
+
+<h2>Troubleshooting</h2>
+<table>
+    <tr><th>Symptom</th><th>Where to look</th></tr>
+    <tr><td>Peer stays <span class="dot red"></span>unreachable</td>
+        <td>Check DNS/SRV for the peer domain, firewall/ports, and TLS. The Routing Table won't list a peer
+            you can't reach directly or via a hop.</td></tr>
+    <tr><td>Remote room doesn't appear</td>
+        <td>Confirm the room's <em>Federated</em> toggle is on at the origin, and that a route to that server
+            exists in the Routing Table.</td></tr>
+    <tr><td>Users don't see each other</td>
+        <td>Confirm the rooms are <em>mapped</em> (not just federated) and the mapping shows
+            <span style="color:#28a745;font-weight:600">connected</span>.</td></tr>
+    <tr><td>Mapping shows <span style="color:#dc3545;font-weight:600">disconnected</span></td>
+        <td>The route to the remote server is down — check the peer status and the path in the Routing Table.</td></tr>
+</table>
+
+<p style="margin-top:32px;color:#6c757d;font-size:13px">
+    For build instructions, the protocol reference, and architecture details, see the project
+    <code>README.md</code>.
+</p>
+
+</body>
+</html>

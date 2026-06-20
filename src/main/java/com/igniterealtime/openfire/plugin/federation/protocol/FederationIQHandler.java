@@ -84,6 +84,7 @@ public class FederationIQHandler extends IQHandler {
             case "peer-withdraw"       -> handlePeerWithdraw(fromDomain);
             case "peer-disable"        -> handlePeerDisable(fromDomain);
             case "routing-update"      -> handleRoutingUpdate(fromDomain, child);
+            case "routing-solicit"     -> handleRoutingSolicit(fromDomain);
             case "room-advertisement"  -> handleRoomAdvertisement(fromDomain, child);
             case "room-mapping"        -> handleRoomMapping(fromDomain, child);
             case "room-unmap"          -> handleRoomUnmap(fromDomain, child);
@@ -172,7 +173,7 @@ public class FederationIQHandler extends IQHandler {
         // doPoll skips WITHDRAWN peers so onPeerDown never fires as a fallback —
         // propagate the withdrawal here while we still know what was removed.
         if (!removed.isEmpty()) {
-            manager.propagateRoutingToAll(fromDomain);
+            manager.propagateTopologyChange(fromDomain);
         }
     }
 
@@ -192,7 +193,7 @@ public class FederationIQHandler extends IQHandler {
         manager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(fromDomain) : removed);
         manager.getPeerRegistry().setControlStatus(fromDomain, PeerServer.Status.REMOTE_DISABLED);
         if (!removed.isEmpty()) {
-            manager.propagateRoutingToAll(fromDomain);
+            manager.propagateTopologyChange(fromDomain);
         }
     }
 
@@ -225,7 +226,23 @@ public class FederationIQHandler extends IQHandler {
             manager.handleUnreachableDestinations(changed);
             manager.resyncMappedDestinations(changed);
             manager.propagateRoutingToAll(fromDomain);
+            // Re-flood room knowledge so remote-room caches follow the routing change.
+            manager.propagateRoomsToAll();
+            // If we lost any route, ask our other peers for an alternate path (and its
+            // rooms) — triggered-only DV would otherwise never re-learn it.
+            boolean lostRoute = changed.stream().anyMatch(d -> !manager.getRoutingTable().isReachable(d));
+            if (lostRoute) manager.solicitRoutingFromAll(fromDomain);
         }
+    }
+
+    // ── routing-solicit ────────────────────────────────────────────────────────
+
+    private void handleRoutingSolicit(String fromDomain) {
+        // A peer that lost routes is asking for our current state — reply with our
+        // routing table (split-horizon applied) and full room cache so it reconverges.
+        Log.debug("routing-solicit from {} — replying with routing table + room state", fromDomain);
+        manager.sendRoutingUpdate(fromDomain);
+        manager.sendRoomState(fromDomain);
     }
 
     // ── room-advertisement ────────────────────────────────────────────────────
@@ -260,11 +277,12 @@ public class FederationIQHandler extends IQHandler {
         }
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
         if (rooms.isEmpty()) {
-            // Withdrawal: the origin no longer has federatable rooms (or is gone).
-            // Clear all rooms learned from this origin and propagate the withdrawal so
-            // downstream multi-hop servers also drop their cached rooms for this origin.
-            manager.getRoomManager().clearRemoteRooms(sourceDomain);
-            Log.debug("room-advertisement WITHDRAWAL from {} (source={}) — clearing and relaying", fromDomain, sourceDomain);
+            // Withdrawal: the origin stopped federating its own rooms (but is still up and
+            // still relaying others' rooms). Clear ONLY this origin's rooms — NOT rooms merely
+            // relayed through the sender, or a hub-spoke would wipe its whole cache (everything
+            // arrived via the hub). Propagate so downstream servers drop this origin's rooms too.
+            manager.getRoomManager().clearRemoteRoomsForOrigin(sourceDomain);
+            Log.debug("room-advertisement WITHDRAWAL from {} (source={}) — clearing origin's rooms and relaying", fromDomain, sourceDomain);
         } else {
             manager.getRoomManager().updateRemoteRooms(sourceDomain, fromDomain, rooms);
             Log.debug("room-advertisement from {} (source={}) — {} room(s)", fromDomain, sourceDomain, rooms.size());
@@ -357,14 +375,21 @@ public class FederationIQHandler extends IQHandler {
             String theirLocal  = map.attributeValue("local");   // originator's local  = our remote
             String theirRemote = map.attributeValue("remote");  // originator's remote = our local
             if (theirRemote != null) {
-                // Evict virtual occupants from the remote domain before removing the mapping
-                // so local clients receive leave presences and don't see ghost users.
-                manager.evictVirtualOccupants(theirRemote, actualOrigin);
                 if (theirLocal != null) {
                     manager.pushVirtualPresences(theirRemote, actualOrigin, theirLocal, true);
                 }
                 // Only remove the mapping for this specific originator — other spokes stay connected.
                 manager.getRoomManager().removeMapping(theirRemote, actualOrigin);
+                // Drop the virtual occupants that came in through this mapping so local clients
+                // see them leave. If no mapping remains for the room, every virtual occupant is
+                // now unreachable — evict them ALL. This is essential for multi-hop spokes:
+                // hub-relayed users (from other servers) are tracked under the relay domain, not
+                // the origin, so a per-origin evict would miss them and leave ghosts.
+                if (manager.getRoomManager().getMappingsForLocal(theirRemote).isEmpty()) {
+                    manager.evictAllVirtualOccupantsInRoom(theirRemote);
+                } else {
+                    manager.evictVirtualOccupants(theirRemote, actualOrigin);
+                }
                 Log.info("Room mapping removed by remote {}: local={}", actualOrigin, theirRemote);
             }
         }
@@ -556,11 +581,15 @@ public class FederationIQHandler extends IQHandler {
                   leaving ? "leave" : "join", occupants.size(), targetRoom);
 
         // Keep the virtual occupant roster up-to-date so eviction on peer removal
-        // can send the right leave presences to local clients.
+        // can send the right leave presences to local clients.  Track both the user's
+        // HOME (origin, encoded in the "user@home" nick) and the immediate sender we got
+        // them from (arrivedVia) so reachability- and mapping-driven eviction stay correct
+        // on multi-hop paths without re-deriving one from the other later.
         if (leaving) {
-            manager.getRoomManager().untrackVirtualOccupant(targetRoom, fromDomain, senderNick);
+            manager.getRoomManager().untrackVirtualOccupant(targetRoom, senderNick);
         } else {
-            manager.getRoomManager().trackVirtualOccupant(targetRoom, fromDomain, senderNick);
+            manager.getRoomManager().trackVirtualOccupant(targetRoom, originOf(senderNick, fromDomain),
+                                                           fromDomain, senderNick);
         }
 
         // On join: push our local occupants back to the sender so they immediately
@@ -640,6 +669,16 @@ public class FederationIQHandler extends IQHandler {
             return (jid.getNode() != null ? jid.getNode() + "@" : "") + jid.getDomain();
         } catch (Exception e) {
             return "remote";
+        }
+    }
+
+    /** Home (origin) domain of a virtual nick ("user@home"); falls back to the immediate sender. */
+    private String originOf(String nick, String fallback) {
+        try {
+            String d = new JID(nick).getDomain();
+            return (d == null || d.isEmpty()) ? fallback : d;
+        } catch (Exception e) {
+            return fallback;
         }
     }
 

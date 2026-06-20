@@ -9,6 +9,7 @@ import org.jivesoftware.openfire.muc.MultiUserChatService;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,8 +40,11 @@ public class FederatedRoomManager {
     // Virtual occupant persistence — survives plugin reloads so eviction on peer-down
     // can still send leave presences even if no join events occurred after the reload.
     private static final String PROP_VOCC_ROOMS   = "federation.vocc.rooms.index";
-    private static final String PROP_VOCC_DOMAINS = "federation.vocc.%s.domains";
-    private static final String PROP_VOCC_NICKS   = "federation.vocc.%s.%s";
+    private static final String PROP_VOCC_NICKS   = "federation.vocc.%s.nicks";   // room → nick list
+    private static final String PROP_VOCC_ENTRY   = "federation.vocc.%s.occ.%s";  // (room, nick) → "origin|via1;via2;..."
+    // Legacy (pre-1.3.20) virtual-occupant keys — read once on load, then swept.
+    private static final String PROP_VOCC_DOMAINS_LEGACY = "federation.vocc.%s.domains";
+    private static final String PROP_VOCC_NICKS_LEGACY   = "federation.vocc.%s.%s";
 
     /** Room JIDs (room@conference.domain) tagged locally as federatable. */
     private final Set<String> localFederatedRooms = ConcurrentHashMap.newKeySet();
@@ -57,8 +61,29 @@ public class FederatedRoomManager {
     /** remoteRoomJid → mapping (reverse index for fast lookups). */
     private final ConcurrentHashMap<String, RoomMapping> remoteMappings = new ConcurrentHashMap<>();
 
-    /** localRoomJid → remoteDomain → set of virtual nicks currently injected into local sessions. */
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Set<String>>> virtualOccupants
+    /**
+     * One injected remote user in a local room.
+     *
+     * <p>{@code origin} is the user's HOME domain (where they really live);
+     * {@code arrivedVia} is the immediate S2S neighbour we received them from
+     * (which, on a multi-hop path, is a relay — NOT the origin).  Keeping both
+     * first-class removes the long-standing "tracked under the immediate sender,
+     * not the true origin" trap: reachability events evict by {@code origin},
+     * mapping/topology events evict by {@code arrivedVia}, with no nick parsing.
+     *
+     * <p>{@code nick} is the MUC nick ("user@home") and is unique within a room.
+     *
+     * <p>{@code arrivedVia} is a SET, not a single domain: the same user can be reachable
+     * through more than one neighbour at once (e.g. directly AND via a relay in a diamond
+     * topology).  Per-mapping eviction drops one path at a time and only sends a leave when
+     * the last path is gone; collapsing this to a single domain (as 1.3.20 did) made an
+     * occupant that arrived via two neighbours un-evictable, resurfacing the ghost-occupant
+     * bug.  The set is a concurrent set so it can be mutated in place under the room lock-free.
+     */
+    public record VirtualOccupant(String nick, String origin, Set<String> arrivedVia) {}
+
+    /** localRoomJid → nick → VirtualOccupant currently injected into local sessions. */
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, VirtualOccupant>> virtualOccupants
         = new ConcurrentHashMap<>();
 
     public void load() {
@@ -121,25 +146,72 @@ public class FederatedRoomManager {
             for (String localJid : voccRooms.split(",")) {
                 localJid = localJid.strip();
                 if (localJid.isEmpty()) continue;
-                String domains = JiveGlobals.getProperty(
-                    String.format(PROP_VOCC_DOMAINS, localJid), "").strip();
-                if (domains.isEmpty()) continue;
-                for (String domain : domains.split(",")) {
-                    domain = domain.strip();
-                    if (domain.isEmpty()) continue;
-                    String nicks = JiveGlobals.getProperty(
-                        String.format(PROP_VOCC_NICKS, localJid, domain), "").strip();
-                    if (nicks.isEmpty()) continue;
-                    ConcurrentHashMap<String, Set<String>> byDomain =
-                        virtualOccupants.computeIfAbsent(localJid, k -> new ConcurrentHashMap<>());
-                    Set<String> nickSet = byDomain.computeIfAbsent(domain, k -> ConcurrentHashMap.newKeySet());
-                    for (String nick : nicks.split(",")) {
-                        nick = nick.strip();
-                        if (!nick.isEmpty()) nickSet.add(nick);
-                    }
-                    Log.info("Loaded {} virtual occupant(s) in {} from {}", nickSet.size(), localJid, domain);
-                }
+                if (loadVirtualOccupantsForRoom(localJid)) continue;   // new format present
+                migrateLegacyVirtualOccupants(localJid);              // fall back to pre-1.3.20 format
             }
+            // Rewrite the index/props in the new format so legacy keys don't linger.
+            persistVirtualOccupantRoomsIndex();
+        }
+    }
+
+    /** Loads (room → nick → VirtualOccupant) from the 1.3.20+ persistence format. */
+    private boolean loadVirtualOccupantsForRoom(String localJid) {
+        String nicks = JiveGlobals.getProperty(String.format(PROP_VOCC_NICKS, localJid), "").strip();
+        if (nicks.isEmpty()) return false;
+        ConcurrentHashMap<String, VirtualOccupant> byNick =
+            virtualOccupants.computeIfAbsent(localJid, k -> new ConcurrentHashMap<>());
+        for (String nick : nicks.split(",")) {
+            nick = nick.strip();
+            if (nick.isEmpty()) continue;
+            String entry = JiveGlobals.getProperty(String.format(PROP_VOCC_ENTRY, localJid, nick), "").strip();
+            String[] p = entry.split("\\|", 2);
+            String origin = (p.length > 0 && !p[0].isEmpty()) ? p[0] : homeOf(nick, nick);
+            Set<String> via = ConcurrentHashMap.newKeySet();
+            if (p.length > 1 && !p[1].isEmpty()) {
+                for (String d : p[1].split(";")) { d = d.strip(); if (!d.isEmpty()) via.add(d); }
+            }
+            if (via.isEmpty()) via.add(origin);
+            byNick.put(nick, new VirtualOccupant(nick, origin, via));
+        }
+        if (byNick.isEmpty()) { virtualOccupants.remove(localJid); return false; }
+        Log.info("Loaded {} virtual occupant(s) in {}", byNick.size(), localJid);
+        return true;
+    }
+
+    /** Imports the pre-1.3.20 (room → domain → nicks) format, then deletes the legacy keys. */
+    private void migrateLegacyVirtualOccupants(String localJid) {
+        String domains = JiveGlobals.getProperty(
+            String.format(PROP_VOCC_DOMAINS_LEGACY, localJid), "").strip();
+        if (domains.isEmpty()) return;
+        for (String domain : domains.split(",")) {
+            domain = domain.strip();
+            if (domain.isEmpty()) continue;
+            String nicks = JiveGlobals.getProperty(
+                String.format(PROP_VOCC_NICKS_LEGACY, localJid, domain), "").strip();
+            for (String nick : nicks.split(",")) {
+                nick = nick.strip();
+                if (nick.isEmpty()) continue;
+                // Legacy keyed by the immediate sender; origin lives in the nick, arrivedVia = old key.
+                // A nick can appear under several legacy domains — merge them into the arrivedVia set.
+                final String via = domain;
+                virtualOccupants.computeIfAbsent(localJid, k -> new ConcurrentHashMap<>())
+                                .compute(nick, (n, existing) -> {
+                    if (existing == null) {
+                        Set<String> set = ConcurrentHashMap.newKeySet();
+                        set.add(via);
+                        return new VirtualOccupant(n, homeOf(n, via), set);
+                    }
+                    existing.arrivedVia().add(via);
+                    return existing;
+                });
+            }
+            JiveGlobals.deleteProperty(String.format(PROP_VOCC_NICKS_LEGACY, localJid, domain));
+        }
+        JiveGlobals.deleteProperty(String.format(PROP_VOCC_DOMAINS_LEGACY, localJid));
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localJid);
+        if (byNick != null && !byNick.isEmpty()) {
+            persistVirtualOccupantsForRoom(localJid);
+            Log.info("Migrated {} legacy virtual occupant(s) in {} to new format", byNick.size(), localJid);
         }
     }
 
@@ -310,60 +382,125 @@ public class FederatedRoomManager {
 
     // ── Virtual occupant tracking ─────────────────────────────────────────────
 
-    public void trackVirtualOccupant(String localRoomJid, String remoteDomain, String virtualNick) {
+    /**
+     * Records a remote user injected into a local room.  {@code origin} is the user's
+     * home domain; {@code arrivedVia} is the immediate S2S neighbour we got them from
+     * (a relay on multi-hop paths).  Both are stored first-class so later eviction never
+     * has to guess one from the other.
+     */
+    public void trackVirtualOccupant(String localRoomJid, String origin, String arrivedVia, String virtualNick) {
         virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>())
-                        .computeIfAbsent(remoteDomain, k -> ConcurrentHashMap.newKeySet())
-                        .add(virtualNick);
-        persistVirtualOccupants(localRoomJid, remoteDomain);
+                        .compute(virtualNick, (n, existing) -> {
+            if (existing == null) {
+                Set<String> via = ConcurrentHashMap.newKeySet();
+                via.add(arrivedVia);
+                return new VirtualOccupant(n, origin, via);
+            }
+            existing.arrivedVia().add(arrivedVia);   // additional reachable path for an existing occupant
+            return existing;
+        });
+        persistVirtualOccupantsForRoom(localRoomJid);
     }
 
-    public void untrackVirtualOccupant(String localRoomJid, String remoteDomain, String virtualNick) {
-        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
-        if (byDomain == null) return;
-        Set<String> nicks = byDomain.get(remoteDomain);
-        if (nicks == null) return;
-        nicks.remove(virtualNick);
-        if (nicks.isEmpty()) {
-            byDomain.remove(remoteDomain, nicks);
-            if (byDomain.isEmpty()) virtualOccupants.remove(localRoomJid, byDomain);
-            clearPersistedVirtualOccupants(localRoomJid, remoteDomain);
+    public void untrackVirtualOccupant(String localRoomJid, String virtualNick) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return;
+        if (byNick.remove(virtualNick) == null) return;
+        if (byNick.isEmpty()) {
+            virtualOccupants.remove(localRoomJid, byNick);
+            clearPersistedVirtualOccupantsForRoom(localRoomJid);
         } else {
-            persistVirtualOccupants(localRoomJid, remoteDomain);
+            persistVirtualOccupantsForRoom(localRoomJid);
         }
     }
 
-    /** All local room JIDs that currently have at least one virtual occupant from remoteDomain. */
-    public Set<String> getLocalRoomsWithVirtualOccupantsFrom(String remoteDomain) {
-        Set<String> result = new java.util.HashSet<>();
-        virtualOccupants.forEach((localJid, byDomain) -> {
-            Set<String> nicks = byDomain.get(remoteDomain);
-            if (nicks != null && !nicks.isEmpty()) result.add(localJid);
-        });
-        return result;
+    /**
+     * Snapshot of virtual occupants in a room.  Used to forward users reached through a hub
+     * to a newly-mapped spoke so it sees everyone immediately, not just the hub's directly-
+     * connected clients.  Each entry carries origin + arrivedVia for split-horizon.  Never null.
+     */
+    public Collection<VirtualOccupant> getVirtualOccupants(String localRoomJid) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return Collections.emptyList();
+        return new ArrayList<>(byNick.values());
+    }
+
+    /** All local room JIDs that currently have any virtual occupants tracked. */
+    public Set<String> getRoomsWithAnyVirtualOccupants() {
+        return new HashSet<>(virtualOccupants.keySet());
     }
 
     /**
-     * Snapshot of virtual occupants in a room, grouped by source domain.  Used to
-     * forward the users reached through a hub to a newly-mapped spoke so it sees
-     * everyone immediately, not just the hub's directly-connected clients.  Never null.
+     * Removes and returns virtual nicks in a room whose ORIGIN (home) domain is originDomain.
+     * Used to drop a server's clients when its route is lost, even when they reached us through
+     * a relay — origin is stored explicitly, so no nick parsing or sender-domain guessing.
      */
-    public Map<String, Set<String>> getVirtualOccupantsByDomain(String localRoomJid) {
-        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
-        if (byDomain == null) return Collections.emptyMap();
-        Map<String, Set<String>> copy = new LinkedHashMap<>();
-        byDomain.forEach((d, nicks) -> copy.put(d, new HashSet<>(nicks)));
-        return copy;
+    public Set<String> clearVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
+        return removeMatching(localRoomJid, vo -> originDomain.equals(vo.origin()));
     }
 
-    /** Removes and returns all virtual nicks tracked for (localRoomJid, remoteDomain). */
-    public Set<String> clearVirtualOccupants(String localRoomJid, String remoteDomain) {
-        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
-        if (byDomain == null) return Collections.emptySet();
-        Set<String> removed = byDomain.remove(remoteDomain);
-        if (removed == null) return Collections.emptySet();
-        if (byDomain.isEmpty()) virtualOccupants.remove(localRoomJid, byDomain);
-        clearPersistedVirtualOccupants(localRoomJid, remoteDomain);
+    /**
+     * Removes and returns virtual nicks in a room that ARRIVED VIA arrivedViaDomain (the
+     * immediate neighbour).  Used when one mapping is torn down while others on the room
+     * survive: drop only the occupants that came in through that link.
+     */
+    public Set<String> clearVirtualOccupantsByArrivedVia(String localRoomJid, String arrivedViaDomain) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return Collections.emptySet();
+        Set<String> removed = new HashSet<>();
+        boolean changed = false;
+        for (VirtualOccupant vo : new ArrayList<>(byNick.values())) {
+            if (!vo.arrivedVia().remove(arrivedViaDomain)) continue;   // didn't arrive via this link
+            changed = true;
+            // Only emit a leave when the LAST reachable path is gone; otherwise the occupant
+            // is still reachable through another neighbour and must stay.
+            if (vo.arrivedVia().isEmpty() && byNick.remove(vo.nick(), vo)) removed.add(vo.nick());
+        }
+        if (!changed) return Collections.emptySet();
+        afterRemoval(localRoomJid, byNick);
         return removed;
+    }
+
+    /**
+     * Removes and returns ALL virtual nicks tracked in a room.  Used when a room's last
+     * federation mapping is removed: every virtual occupant came in through that federation
+     * and is now unreachable — including hub-relayed users.
+     */
+    public Set<String> clearAllVirtualOccupants(String localRoomJid) {
+        return removeMatching(localRoomJid, vo -> true);
+    }
+
+    /** Removes occupants matching {@code pred}; returns their nicks and rewrites persistence. */
+    private Set<String> removeMatching(String localRoomJid, java.util.function.Predicate<VirtualOccupant> pred) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return Collections.emptySet();
+        Set<String> removed = new HashSet<>();
+        for (VirtualOccupant vo : new ArrayList<>(byNick.values())) {
+            if (pred.test(vo) && byNick.remove(vo.nick()) != null) removed.add(vo.nick());
+        }
+        if (removed.isEmpty()) return Collections.emptySet();
+        afterRemoval(localRoomJid, byNick);
+        return removed;
+    }
+
+    /** Drops the room entry + persisted state if it emptied, else rewrites persistence. */
+    private void afterRemoval(String localRoomJid, ConcurrentHashMap<String, VirtualOccupant> byNick) {
+        if (byNick.isEmpty()) {
+            virtualOccupants.remove(localRoomJid, byNick);
+            clearPersistedVirtualOccupantsForRoom(localRoomJid);
+        } else {
+            persistVirtualOccupantsForRoom(localRoomJid);
+        }
+    }
+
+    /** Home domain encoded in a virtual nick ("user@home"); falls back to the given default. */
+    private String homeOf(String nick, String fallback) {
+        try {
+            String d = new JID(nick).getDomain();
+            return (d == null || d.isEmpty()) ? fallback : d;
+        } catch (Exception e) {
+            return fallback;
+        }
     }
 
     // ── Remote room list ──────────────────────────────────────────────────────
@@ -373,6 +510,10 @@ public class FederatedRoomManager {
         roomRelaySource.put(sourceDomain, fromDomain);
     }
 
+    /**
+     * Full clear for peer-down / unreachability: drops rooms that ORIGINATE from peerDomain
+     * AND rooms that were merely relayed TO us THROUGH it (now unreachable).
+     */
     public void clearRemoteRooms(String peerDomain) {
         // Clear rooms that originated directly from this peer.
         remoteRooms.remove(peerDomain);
@@ -383,6 +524,36 @@ public class FederatedRoomManager {
                 remoteRooms.remove(e.getKey());
                 return true;
             }
+            return false;
+        });
+    }
+
+    /**
+     * Withdrawal clear: drops ONLY the rooms that originate from originDomain, leaving rooms
+     * merely relayed THROUGH it intact.  Used when a peer that is still up (and still relaying
+     * others' rooms) stops federating its own room — clearing relay-learned rooms here would
+     * wrongly wipe a hub-spoke's entire cache (everything came via the hub).
+     */
+    public void clearRemoteRoomsForOrigin(String originDomain) {
+        // Drop the entry keyed directly by this origin.
+        remoteRooms.remove(originDomain);
+        roomRelaySource.remove(originDomain);
+        // Belt-and-suspenders: a multi-hop advertisement can end up cached under the
+        // immediate sender's (relay's) domain rather than the true origin, so a key-only
+        // remove would miss it — leaving the room still showing as "available for mapping"
+        // on distant nodes while direct spokes (keyed by origin) clear correctly. Also drop
+        // any room whose RECORDED origin matches, regardless of the key it was filed under,
+        // and remove now-empty cache entries.
+        remoteRooms.entrySet().removeIf(e -> {
+            List<FederatedRoom> kept = e.getValue().stream()
+                    .filter(r -> !originDomain.equals(r.originServer()))
+                    .collect(Collectors.toList());
+            if (kept.size() == e.getValue().size()) return false;   // nothing from this origin here
+            if (kept.isEmpty()) {
+                roomRelaySource.remove(e.getKey());
+                return true;
+            }
+            e.setValue(Collections.unmodifiableList(kept));
             return false;
         });
     }
@@ -431,41 +602,38 @@ public class FederatedRoomManager {
 
     // ── Virtual occupant persistence ──────────────────────────────────────────
 
-    private void persistVirtualOccupants(String localRoomJid, String remoteDomain) {
-        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
-        if (byDomain == null) return;
-        Set<String> nicks = byDomain.get(remoteDomain);
-        if (nicks == null || nicks.isEmpty()) {
-            clearPersistedVirtualOccupants(localRoomJid, remoteDomain);
+    /** Writes every occupant of one room (nick list + per-nick origin|arrivedVia) and the rooms index. */
+    private void persistVirtualOccupantsForRoom(String localRoomJid) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null || byNick.isEmpty()) {
+            clearPersistedVirtualOccupantsForRoom(localRoomJid);
             return;
         }
-        // Persist nicks for this (room, domain) pair.
-        JiveGlobals.setProperty(String.format(PROP_VOCC_NICKS, localRoomJid, remoteDomain),
-                                String.join(",", nicks));
-        // Keep the domains list up-to-date.
-        String domainsKey = String.format(PROP_VOCC_DOMAINS, localRoomJid);
-        Set<String> allDomains = new LinkedHashSet<>(byDomain.keySet());
-        JiveGlobals.setProperty(domainsKey, String.join(",", allDomains));
-        // Keep the rooms index up-to-date.
-        JiveGlobals.setProperty(PROP_VOCC_ROOMS, String.join(",", virtualOccupants.keySet()));
+        JiveGlobals.setProperty(String.format(PROP_VOCC_NICKS, localRoomJid),
+                                String.join(",", byNick.keySet()));
+        for (VirtualOccupant vo : byNick.values()) {
+            JiveGlobals.setProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, vo.nick()),
+                                    vo.origin() + "|" + String.join(";", vo.arrivedVia()));
+        }
+        persistVirtualOccupantRoomsIndex();
     }
 
-    private void clearPersistedVirtualOccupants(String localRoomJid, String remoteDomain) {
-        JiveGlobals.deleteProperty(String.format(PROP_VOCC_NICKS, localRoomJid, remoteDomain));
-        // Rebuild domains list from current in-memory state.
-        ConcurrentHashMap<String, Set<String>> byDomain = virtualOccupants.get(localRoomJid);
-        if (byDomain == null || byDomain.isEmpty()) {
-            JiveGlobals.deleteProperty(String.format(PROP_VOCC_DOMAINS, localRoomJid));
-            // Rebuild rooms index without this room.
-            Set<String> rooms = new LinkedHashSet<>(virtualOccupants.keySet());
-            if (rooms.isEmpty()) {
-                JiveGlobals.deleteProperty(PROP_VOCC_ROOMS);
-            } else {
-                JiveGlobals.setProperty(PROP_VOCC_ROOMS, String.join(",", rooms));
+    /** Deletes all persisted state for one room and refreshes the rooms index. */
+    private void clearPersistedVirtualOccupantsForRoom(String localRoomJid) {
+        String nicks = JiveGlobals.getProperty(String.format(PROP_VOCC_NICKS, localRoomJid), "").strip();
+        if (!nicks.isEmpty()) {
+            for (String nick : nicks.split(",")) {
+                nick = nick.strip();
+                if (!nick.isEmpty()) JiveGlobals.deleteProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, nick));
             }
-        } else {
-            JiveGlobals.setProperty(String.format(PROP_VOCC_DOMAINS, localRoomJid),
-                                    String.join(",", byDomain.keySet()));
         }
+        JiveGlobals.deleteProperty(String.format(PROP_VOCC_NICKS, localRoomJid));
+        persistVirtualOccupantRoomsIndex();
+    }
+
+    private void persistVirtualOccupantRoomsIndex() {
+        Set<String> rooms = new LinkedHashSet<>(virtualOccupants.keySet());
+        if (rooms.isEmpty()) JiveGlobals.deleteProperty(PROP_VOCC_ROOMS);
+        else JiveGlobals.setProperty(PROP_VOCC_ROOMS, String.join(",", rooms));
     }
 }
