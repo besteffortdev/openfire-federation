@@ -329,6 +329,14 @@ public class FederationIQHandler extends IQHandler {
             String theirLocal  = map.attributeValue("local");
             String theirRemote = map.attributeValue("remote");
             if (theirLocal != null && theirRemote != null) {
+                // Authorization: only accept a mapping onto a local room the admin has
+                // explicitly enabled for federation. Without this, any peer could map an
+                // arbitrary (even private) local room and siphon its roster + messages.
+                if (!isFederatedLocalRoom(theirRemote)) {
+                    Log.warn("SECURITY: rejecting room-mapping from {} onto local room {} — "
+                           + "that room is not federation-enabled here", actualOrigin, theirRemote);
+                    continue;
+                }
                 manager.getRoomManager().addMapping(theirRemote, theirLocal, actualOrigin);
                 Log.info("Room mapping received from {}: local={} ↔ remote={}",
                          actualOrigin, theirRemote, theirLocal);
@@ -421,6 +429,15 @@ public class FederationIQHandler extends IQHandler {
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             // We are the destination — inject into the local MUC room.
+            // Authorization: never inject forwarded traffic into a room the admin hasn't
+            // federation-enabled. directDeliver bypasses MUC's non-occupant check, so without
+            // this a peer could inject (or spoof) messages/presence into ANY local room.
+            if (!isFederatedLocalRoom(targetRoom)) {
+                Log.warn("SECURITY: dropping muc-forward from {} into non-federated local room {} "
+                       + "(type={}, from={})", fromDomain, targetRoom,
+                       payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
+                return;
+            }
             injectLocally(payloadEl, via, targetRoom, fromDomain);
             // Hub behavior: fan out to all other mapped spokes.
             fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via);
@@ -430,9 +447,10 @@ public class FederationIQHandler extends IQHandler {
 
             // If we also have a spoke mapping whose remote room is targetRoom, inject locally now.
             // We won't receive a hub fanOut because our domain will be in the via trail.
+            // Same authorization gate: only inject into a federation-enabled local room.
             if (targetRoom != null) {
                 RoomMapping ownMapping = manager.getRoomManager().getMappingForRemote(targetRoom);
-                if (ownMapping != null) {
+                if (ownMapping != null && isFederatedLocalRoom(ownMapping.localRoomJid())) {
                     injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain);
                 }
             }
@@ -763,6 +781,15 @@ public class FederationIQHandler extends IQHandler {
     /** Finds a local MUCRoom by full JID string (room@conference.domain). */
     private MUCRoom findLocalRoom(String roomJid) {
         return manager.findLocalMucRoom(roomJid);
+    }
+
+    /**
+     * A local MUC room the admin has explicitly enabled for federation. These are the only
+     * rooms a remote peer may map or inject forwarded traffic into — the authorization
+     * boundary that stops a peer from reading or writing rooms it was never granted.
+     */
+    private boolean isFederatedLocalRoom(String roomJid) {
+        return roomJid != null && manager.getRoomManager().isFederated(roomJid);
     }
 
     private Packet parsePacket(Element el) throws Exception {
