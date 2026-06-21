@@ -4,10 +4,13 @@ import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.util.CookieUtils;
+import org.jivesoftware.util.StringUtils;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -20,6 +23,7 @@ public class FederationApiServlet extends HttpServlet {
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
         resp.setContentType("application/json; charset=UTF-8");
         resp.setHeader("Cache-Control", "no-cache, no-store");
+        ensureCsrfCookie(req, resp);   // hand the page a token it can echo on POSTs
 
         FederationPlugin plugin = FederationPlugin.getInstance();
         PrintWriter out = resp.getWriter();
@@ -178,6 +182,15 @@ public class FederationApiServlet extends HttpServlet {
         FederationPlugin plugin = FederationPlugin.getInstance();
         PrintWriter out = resp.getWriter();
 
+        // CSRF (double-submit): the page echoes the fed-csrf cookie as a parameter. A cross-site
+        // attacker can't read the cookie (same-origin) nor forge a matching parameter, so a
+        // forged POST from an admin's browser is rejected even though the admin session is valid.
+        if (!validateCsrf(req)) {
+            resp.setStatus(HttpServletResponse.SC_FORBIDDEN);
+            out.print("{\"error\":\"CSRF validation failed\"}");
+            return;
+        }
+
         if (plugin == null) {
             out.print("{\"error\":\"Plugin not loaded\"}");
             return;
@@ -324,6 +337,27 @@ public class FederationApiServlet extends HttpServlet {
             default:
                 out.print("{\"error\":\"unknown action\"}");
         }
+    }
+
+    private static final String CSRF_COOKIE = "fed-csrf";
+
+    /** Issues a readable (non-HttpOnly) CSRF token cookie if the client doesn't have one yet. */
+    private void ensureCsrfCookie(HttpServletRequest req, HttpServletResponse resp) {
+        Cookie existing = CookieUtils.getCookie(req, CSRF_COOKIE);
+        if (existing != null && existing.getValue() != null && !existing.getValue().isEmpty()) return;
+        Cookie c = new Cookie(CSRF_COOKIE, StringUtils.randomString(24));
+        c.setPath("/");        // available to the whole admin origin (page + /api)
+        c.setMaxAge(-1);       // session cookie
+        // Deliberately NOT HttpOnly: the double-submit pattern needs the page JS to read it.
+        resp.addCookie(c);
+    }
+
+    /** Double-submit check: the 'csrf' POST parameter must equal the fed-csrf cookie. */
+    private boolean validateCsrf(HttpServletRequest req) {
+        Cookie c = CookieUtils.getCookie(req, CSRF_COOKIE);
+        String param = req.getParameter("csrf");
+        return c != null && c.getValue() != null && !c.getValue().isEmpty()
+            && c.getValue().equals(param);
     }
 
     private String esc(String s) {

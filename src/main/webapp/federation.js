@@ -489,10 +489,18 @@ function jidToElemId(jid) {
 }
 
 function post(params) {
-    const body = new URLSearchParams(params);
-    return fetch(API_URL, { method: 'POST', body })
+    // CSRF double-submit: echo the fed-csrf cookie the server handed us on GET.
+    const csrf = getCookie('fed-csrf');
+    const body = new URLSearchParams(csrf ? Object.assign({}, params, { csrf }) : params);
+    return fetch(API_URL, { method: 'POST', body, credentials: 'same-origin' })
         .then(r => r.json())
         .catch(err => console.error('POST error:', err));
+}
+
+function getCookie(name) {
+    const m = document.cookie.match('(?:^|; )' +
+        name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)');
+    return m ? decodeURIComponent(m[1]) : '';
 }
 
 function escHtml(s) {
