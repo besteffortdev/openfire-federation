@@ -402,16 +402,23 @@ public class FederatedRoomManager {
         persistVirtualOccupantsForRoom(localRoomJid);
     }
 
-    public void untrackVirtualOccupant(String localRoomJid, String virtualNick) {
+    /**
+     * Removes a virtual occupant.  Returns {@code true} only when an entry was actually
+     * removed, so callers can propagate the leave exactly once: a duplicate leave (e.g.
+     * arriving via both the fan-out and the state-based leave forward) finds nothing to
+     * remove and must NOT re-forward, otherwise leaves would multiply at every hop.
+     */
+    public boolean untrackVirtualOccupant(String localRoomJid, String virtualNick) {
         ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
-        if (byNick == null) return;
-        if (byNick.remove(virtualNick) == null) return;
+        if (byNick == null) return false;
+        if (byNick.remove(virtualNick) == null) return false;
         if (byNick.isEmpty()) {
             virtualOccupants.remove(localRoomJid, byNick);
             clearPersistedVirtualOccupantsForRoom(localRoomJid);
         } else {
             persistVirtualOccupantsForRoom(localRoomJid);
         }
+        return true;
     }
 
     /**

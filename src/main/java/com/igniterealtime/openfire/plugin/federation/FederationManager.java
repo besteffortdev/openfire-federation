@@ -512,6 +512,41 @@ public class FederationManager {
     }
 
     /**
+     * Leave-equivalent of {@link #forwardVirtualOccupants}: when a virtual occupant leaves,
+     * propagate an unavailable presence for it toward every mapping of localRoom, using the
+     * SAME split-horizon exclusions — (a) don't echo it back down a path it arrived via, and
+     * (b) don't echo a server its own user.  Marked fed-origin like the join sync.
+     *
+     * <p>Why this is needed: a JOIN reaches distant (multi-hop) spokes via the state-based
+     * {@code forwardVirtualOccupants} path, but a LEAVE previously had no state-based
+     * equivalent — it relied solely on the transient hub fan-out, which does not reliably
+     * reach those spokes.  The result was a ghost occupant: the join propagated but the
+     * matching leave did not.  This makes leave propagation symmetric with join propagation.
+     */
+    public void forwardVirtualLeave(String localRoom, String leavingNick,
+                                    String origin, Set<String> arrivedVia) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        for (RoomMapping m : roomManager.getMappingsForLocal(localRoom)) {
+            String toDomain = m.remoteDomain();
+            if (arrivedVia.contains(toDomain)) continue;   // don't echo back the way it came
+            if (toDomain.equals(origin))       continue;   // toDomain's own user — don't echo
+            String nextHop = routingTable.findNextHop(toDomain).orElse(toDomain);
+            try {
+                Presence vleave = new Presence();
+                vleave.setFrom(new JID(leavingNick));
+                vleave.setType(Presence.Type.unavailable);
+                FederationStanzaFactory.markAsForwarded(vleave);
+                XMPPServer.getInstance().getPacketRouter().route(
+                    FederationStanzaFactory.mucForward(nextHop, toDomain, m.remoteRoomJid(), localDomain, vleave));
+            } catch (Exception e) {
+                Log.warn("forwardVirtualLeave: failed for {}: {}", leavingNick, e.getMessage());
+            }
+        }
+        Log.debug("forwardVirtualLeave: propagated leave of {} from {} (origin={}, arrivedVia={})",
+                  leavingNick, localRoom, origin, arrivedVia);
+    }
+
+    /**
      * Pushes our full roster of localRoom — real local occupants AND virtual occupants
      * reached through us — toward a peer that just mapped this room, all marked
      * fed-origin.  Called from the room-mapping handler so the mapping peer's clients

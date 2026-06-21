@@ -58,7 +58,10 @@ mkdir -p "$OUT_DIR"
 # so the saved files read cleanly (Openfire colourises levels in the log).
 STRIP_ANSI="sed 's/\x1b\[[0-9;]*m//g'"
 if [[ -n "$GREP" ]]; then
-    REMOTE_CMD="grep -i -- $(printf '%q' "$GREP") $(printf '%q' "$LOG_FILE") 2>/dev/null | tail -n $(printf '%q' "$LOG_LINES") | $STRIP_ANSI"
+    # -a (treat binary as text): Openfire's log occasionally contains a stray NUL byte;
+    # without -a, grep stops at the first one and silently truncates the output to lines
+    # BEFORE it, which looks like the server stopped logging days ago.
+    REMOTE_CMD="grep -a -i -- $(printf '%q' "$GREP") $(printf '%q' "$LOG_FILE") 2>/dev/null | tail -n $(printf '%q' "$LOG_LINES") | $STRIP_ANSI"
 else
     REMOTE_CMD="tail -n $(printf '%q' "$LOG_LINES") $(printf '%q' "$LOG_FILE") | $STRIP_ANSI"
 fi

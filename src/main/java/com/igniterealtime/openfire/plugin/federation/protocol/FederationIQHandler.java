@@ -414,6 +414,11 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
 
+        Log.debug("muc-forward: from={} finalDest={} targetRoom={} via=[{}] payload={}[type={},from={}] -> {}",
+                  fromDomain, finalDest, targetRoom, via, payloadEl.getName(),
+                  payloadEl.attributeValue("type"), payloadEl.attributeValue("from"),
+                  (finalDest == null || localDomain.equals(finalDest)) ? "LOCAL+fanOut" : "RELAY");
+
         if (finalDest == null || localDomain.equals(finalDest)) {
             // We are the destination — inject into the local MUC room.
             injectLocally(payloadEl, via, targetRoom, fromDomain);
@@ -467,9 +472,13 @@ public class FederationIQHandler extends IQHandler {
      */
     private void fanOutToOtherMappings(String fromDomain, Element payloadEl,
                                        String targetRoom, String viaTrail) {
-        if (targetRoom == null) return;
+        if (targetRoom == null) { Log.debug("fanOut: skip — null targetRoom (from={})", fromDomain); return; }
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(targetRoom);
-        if (mappings.size() <= 1) return;
+        if (mappings.size() <= 1) {
+            Log.debug("fanOut: skip — only {} mapping(s) for {} (from={})",
+                      mappings.size(), targetRoom, fromDomain);
+            return;
+        }
 
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
@@ -487,10 +496,23 @@ public class FederationIQHandler extends IQHandler {
         // domain explicitly so a user's own presence/message never loops back to them.
         String payloadHome = originOf(virtualNick(payloadEl.attributeValue("from")), "");
 
+        Log.debug("fanOut: enter from={} targetRoom={} via=[{}] payloadFrom={} payloadHome={} mappings={}",
+                  fromDomain, targetRoom, viaTrail, payloadEl.attributeValue("from"), payloadHome,
+                  mappings.stream().map(RoomMapping::remoteDomain).toList());
+
         for (RoomMapping m : mappings) {
-            if (m.remoteDomain().equals(fromDomain)) continue;   // skip direct sender
-            if (viaServers.contains(m.remoteDomain())) continue; // skip source + relay-injected servers
-            if (m.remoteDomain().equals(payloadHome)) continue;  // never echo a user back to their home
+            if (m.remoteDomain().equals(fromDomain)) {
+                Log.debug("fanOut: skip {} — is direct sender", m.remoteDomain());
+                continue;   // skip direct sender
+            }
+            if (viaServers.contains(m.remoteDomain())) {
+                Log.debug("fanOut: skip {} — in via trail [{}]", m.remoteDomain(), viaTrail);
+                continue; // skip source + relay-injected servers
+            }
+            if (m.remoteDomain().equals(payloadHome)) {
+                Log.debug("fanOut: skip {} — is payload home", m.remoteDomain());
+                continue;  // never echo a user back to their home
+            }
 
             String nextHop = manager.getRoutingTable()
                                     .findNextHop(m.remoteDomain())
@@ -607,8 +629,8 @@ public class FederationIQHandler extends IQHandler {
             FederationStanzaFactory.markAsForwarded(delivery);
             FederationStanzaFactory.directDeliver(delivery);
         }
-        Log.debug("injectPresence: {} virtual presence to {} occupant(s) in {}",
-                  leaving ? "leave" : "join", occupants.size(), targetRoom);
+        Log.debug("injectPresence: {} virtual presence for {} (from={}, via fromDomain={}) to {} occupant(s) in {}",
+                  leaving ? "leave" : "join", senderNick, originalFrom, fromDomain, occupants.size(), targetRoom);
 
         // Keep the virtual occupant roster up-to-date so eviction on peer removal
         // can send the right leave presences to local clients.  Track both the user's
@@ -616,7 +638,22 @@ public class FederationIQHandler extends IQHandler {
         // them from (arrivedVia) so reachability- and mapping-driven eviction stay correct
         // on multi-hop paths without re-deriving one from the other later.
         if (leaving) {
-            manager.getRoomManager().untrackVirtualOccupant(targetRoom, senderNick);
+            // Capture the occupant's split-horizon metadata BEFORE untracking so the leave
+            // can be propagated the same way joins are (forwardVirtualOccupants). Fall back to
+            // the immediate sender if we somehow weren't tracking it.
+            String leaveOrigin = originOf(senderNick, fromDomain);
+            Set<String> leaveArrivedVia = manager.getRoomManager().getVirtualOccupants(targetRoom).stream()
+                    .filter(vo -> vo.nick().equals(senderNick))
+                    .findFirst()
+                    .map(vo -> new HashSet<>(vo.arrivedVia()))
+                    .orElseGet(() -> new HashSet<>(Collections.singletonList(fromDomain)));
+
+            // Propagate the leave to other mappings ONLY on the first removal — a duplicate
+            // leave (arriving via both the fan-out and this state-based forward) removes
+            // nothing and must not re-forward, or leaves would multiply at every hop.
+            if (manager.getRoomManager().untrackVirtualOccupant(targetRoom, senderNick)) {
+                manager.forwardVirtualLeave(targetRoom, senderNick, leaveOrigin, leaveArrivedVia);
+            }
         } else {
             manager.getRoomManager().trackVirtualOccupant(targetRoom, originOf(senderNick, fromDomain),
                                                            fromDomain, senderNick);
