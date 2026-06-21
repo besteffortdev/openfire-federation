@@ -21,7 +21,10 @@ that have no direct link. End users do nothing special — they just join their 
 - **Live activation** — peers, mappings and settings take effect immediately; no Openfire restart.
 - **Self‑healing S2S** — automatic reconnect with exponential back‑off, keepalives, and idle‑reaper handling
   so links stay up and rosters re‑sync without users rejoining.
-- **Ghost‑occupant cleanup** — when a peer or route drops, remote users are cleanly removed from local rooms.
+- **Ghost‑occupant cleanup** — when a peer or route drops, *or a remote user disconnects (including several
+  hops away)*, that user is cleanly removed from every local room across the federation.
+- **Access control** — federation traffic only ever touches rooms you explicitly enable; an optional peer
+  allowlist restricts who may federate at all; the admin API is CSRF‑protected. See [Security](#security).
 - **Admin console UI** — manage peers, watch the routing table and S2S sessions, and federate rooms from a
   dedicated **Federation** tab.
 
@@ -97,6 +100,7 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.keepaliveSeconds` | `240` | Interval for lightweight keepalive pings to reachable peers. Min 30. Auto‑clamped below Openfire's S2S idle timeout. |
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
+| `plugin.federation.peerAllowlist` | `false` | Opt‑in trust mode. When `true`, only admin‑approved peers may drive federation; every action from any other peer is rejected. See [Security](#security). |
 
 ### Note on `disableS2SIdle`
 
@@ -109,6 +113,28 @@ often the keepalive fires — producing repeated `Connection has been idle` reco
 Because the plugin manages liveness itself (poll + reconnect back‑off), it disables that reaper on startup.
 This is **server‑wide** — it affects *all* S2S connections, not just federation peers. Set the property to
 `false` to leave Openfire's idle timeout untouched.
+
+---
+
+## Security
+
+The federation trust boundary is enforced at several points:
+
+- **Rooms are opt‑in.** A remote peer can only map — or inject presence/messages into — a local room an admin
+  has explicitly toggled **Federated**. Forwarded traffic aimed at any non‑federated room is dropped and logged
+  with a `SECURITY:` tag. This stops a peer from siphoning the roster of, or injecting into, a room it was never
+  granted (injection otherwise bypasses MUC's own non‑occupant check).
+- **Peer allowlist (optional).** By default any server that can establish S2S and speak the federation protocol
+  is accepted (open federation). Set `plugin.federation.peerAllowlist=true` to require explicit approval: only
+  peers you **Add** in the admin console may drive federation, and every action from any other peer is rejected.
+  Turning it on **grandfathers your current peers**, so an existing mesh keeps working — you only manage new
+  peers from then on. Recommended for internet‑facing servers whose S2S is not otherwise restricted.
+- **Admin API CSRF.** The Federation tab's API uses a double‑submit token (a `fed-csrf` cookie echoed back as a
+  request parameter), so a forged request from another site cannot trigger peer/room changes in a logged‑in
+  admin's browser. After upgrading, reload an already‑open Federation tab once so its scripts pick up the token.
+- **Identity.** Remote users are injected under their home‑qualified nick, and the plugin drops any forwarded
+  stanza claiming to originate from a **local** user (anti‑spoofing). As with any federation, peers are trusted
+  to represent **their own** users honestly — a compromised peer can still misrepresent users of domains it relays.
 
 ---
 
