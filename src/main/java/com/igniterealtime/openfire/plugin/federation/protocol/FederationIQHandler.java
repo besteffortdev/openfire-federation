@@ -481,9 +481,16 @@ public class FederationIQHandler extends IQHandler {
         Set<String> viaServers = viaTrail.isEmpty() ? Collections.emptySet()
             : new HashSet<>(Arrays.asList(viaTrail.split(",")));
 
+        // Home server of the user this packet is about. Because we RESET the via trail to
+        // just the local domain above, the incoming trail no longer protects against a
+        // downstream relay forwarding the packet back to its origin. Skip the user's home
+        // domain explicitly so a user's own presence/message never loops back to them.
+        String payloadHome = originOf(virtualNick(payloadEl.attributeValue("from")), "");
+
         for (RoomMapping m : mappings) {
             if (m.remoteDomain().equals(fromDomain)) continue;   // skip direct sender
             if (viaServers.contains(m.remoteDomain())) continue; // skip source + relay-injected servers
+            if (m.remoteDomain().equals(payloadHome)) continue;  // never echo a user back to their home
 
             String nextHop = manager.getRoutingTable()
                                     .findNextHop(m.remoteDomain())
@@ -517,6 +524,15 @@ public class FederationIQHandler extends IQHandler {
 
         JID targetJID      = new JID(targetRoom);
         String senderNick  = virtualNick(msgEl.attributeValue("from"));
+
+        // Self-echo guard (see injectPresence): never re-deliver one of our OWN users'
+        // messages looped back through a cyclic topology — they already got it locally.
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (localDomain.equals(originOf(senderNick, localDomain))) {
+            Log.debug("injectMessage: dropping self-echo of local user {} into {}", senderNick, targetRoom);
+            return;
+        }
+
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;
 
         for (MUCOccupant occupant : occupants) {
@@ -549,6 +565,20 @@ public class FederationIQHandler extends IQHandler {
         String originalFrom = presEl.attributeValue("from");
         boolean leaving     = "unavailable".equals(presEl.attributeValue("type"));
         String senderNick   = virtualNick(originalFrom);
+
+        // Self-echo guard: never inject one of OUR OWN local users as a remote virtual
+        // occupant. On a cyclic/diamond topology a user's presence can loop back to their
+        // home server through a relay's fan-out (which resets the via trail, see
+        // fanOutToOtherMappings), producing the "user sees a ghost copy of themself" bug.
+        // The home server already has the real occupant, so drop it here. This is the
+        // robust boundary guard — it catches the loop regardless of which forwarding path
+        // produced it (mirrors the home-domain exclusion in forwardVirtualOccupants).
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (localDomain.equals(originOf(senderNick, fromDomain))) {
+            Log.debug("injectPresence: dropping self-echo of local user {} looped back via {} into {}",
+                      senderNick, fromDomain, targetRoom);
+            return;
+        }
 
         JID targetJID      = new JID(targetRoom);
         JID virtualFromJID = new JID(targetJID.getNode(), targetJID.getDomain(), senderNick);
