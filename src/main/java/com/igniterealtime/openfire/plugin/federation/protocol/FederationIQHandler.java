@@ -13,6 +13,7 @@ import org.jivesoftware.openfire.handler.IQHandler;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.IQ;
@@ -78,6 +79,16 @@ public class FederationIQHandler extends IQHandler {
 
         Element child = (Element) fed.elements().stream().findFirst().orElse(null);
         if (child == null) return error(packet, "Empty federation element");
+
+        // Opt-in peer allowlist: when enabled, drop every federation action from a peer the
+        // admin hasn't approved (default mode is open — any peer accepted). This is the trust
+        // gate for internet-facing deployments where Openfire's S2S is not itself restricted.
+        if (allowlistEnabled() && !manager.getPeerRegistry().isApproved(fromDomain)) {
+            Log.warn("SECURITY: dropping federation '{}' from non-allowlisted peer {} "
+                   + "(approve it with Add peer, or set plugin.federation.peerAllowlist=false)",
+                     child.getName(), fromDomain);
+            return IQ.createResultIQ(packet);
+        }
 
         switch (child.getName()) {
             case "peer-announce"       -> handlePeerAnnounce(fromDomain, child);
@@ -790,6 +801,11 @@ public class FederationIQHandler extends IQHandler {
      */
     private boolean isFederatedLocalRoom(String roomJid) {
         return roomJid != null && manager.getRoomManager().isFederated(roomJid);
+    }
+
+    /** Opt-in peer allowlist toggle (default false = open federation, current behaviour). */
+    private boolean allowlistEnabled() {
+        return JiveGlobals.getBooleanProperty("plugin.federation.peerAllowlist", false);
     }
 
     private Packet parsePacket(Element el) throws Exception {

@@ -85,6 +85,7 @@ public class FederationManager {
 
     public PeerServer addPeer(String domain) {
         PeerServer peer = peerRegistry.addPeer(domain);
+        peerRegistry.approve(domain);   // an explicit admin add is also an allowlist approval
         Log.info("Peer added: {}", domain);
         sendPeerAnnounce(domain);
         return peer;
@@ -223,6 +224,7 @@ public class FederationManager {
         killSession(domain, "outgoing");
         killSession(domain, "incoming");
         boolean removed = peerRegistry.removePeer(domain);
+        peerRegistry.unapprove(domain);   // removing a peer also revokes its allowlist approval
         if (removed) {
             Set<String> removedRoutes = routingTable.removePeer(domain);
             // Drop cached rooms and evict ghost occupants for this peer AND every
