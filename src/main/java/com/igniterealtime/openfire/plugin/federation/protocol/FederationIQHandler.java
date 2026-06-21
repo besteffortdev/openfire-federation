@@ -659,36 +659,37 @@ public class FederationIQHandler extends IQHandler {
                                                            fromDomain, senderNick);
         }
 
-        // On join: push our local occupants back to the sender so they immediately
+        // On join: push our local occupants back to the joiner so they immediately
         // see everyone already in the room (fixes join-ordering race).
         // Skip for sync presences (fed-origin present) to prevent ping-pong loops.
         if (!leaving && presEl.element("fed-origin") == null) {
-            syncLocalOccupantsToRemote(targetRoom, occupants, fromDomain);
+            syncLocalOccupantsToRemote(targetRoom, occupants, fromDomain, originOf(senderNick, fromDomain));
         }
     }
 
     /**
-     * Pushes a synthetic join presence for every occupant of localRoom back toward
-     * the federation mapping that corresponds to {@code fromDomain}.
+     * Pushes a synthetic join presence for every occupant of localRoom back toward the
+     * joining user so they see who is already in the room.
      *
-     * In the direct-connection case {@code fromDomain} is the hub or spoke we
-     * have a room mapping with, so we push only to that mapping.
-     *
-     * In the multi-hop fan-out case {@code fromDomain} is an intermediate relay
-     * (e.g. server6 for a spoke on server7 whose mapping targets server2).  The
-     * direct lookup will return nothing, so we fall back to syncing through ALL
-     * our mappings.  This ensures occupants from multi-hop spokes become visible
-     * to late-joining clients instead of only being visible after the remote user
-     * re-joins.
+     * Target selection must reach the JOINER, which is not always the domain we received
+     * their presence from.  When two rooms are mapped across a relay (e.g. a 2504-room↔
+     * 2501-room mapping whose servers both peer only with hub 2502), the join arrives at
+     * the far end with {@code fromDomain} = the relay (2502), not the joiner's home (2504).
+     * Targeting the relay's mapping would sync our occupants to the hub — which has no
+     * mapping back to the joiner — so a directly-mapped local occupant would never reach
+     * them.  We therefore target the mapping for the joiner's HOME ({@code joinerOrigin})
+     * as well as the one matching {@code fromDomain}; routing then carries it through the
+     * relay to the joiner.  If neither matches (true multi-hop where the joiner's home is
+     * not directly mapped to us) we fall back to syncing through ALL mappings.
      */
     private void syncLocalOccupantsToRemote(String localRoom,
                                             Collection<MUCOccupant> occupants,
-                                            String fromDomain) {
+                                            String fromDomain, String joinerOrigin) {
         List<RoomMapping> allMappings = manager.getRoomManager().getMappingsForLocal(localRoom);
         if (allMappings.isEmpty()) return;
 
         List<RoomMapping> targets = allMappings.stream()
-            .filter(m -> m.remoteDomain().equals(fromDomain))
+            .filter(m -> m.remoteDomain().equals(joinerOrigin) || m.remoteDomain().equals(fromDomain))
             .collect(Collectors.toList());
         if (targets.isEmpty()) targets = allMappings;   // multi-hop relay: sync through all hubs
 
