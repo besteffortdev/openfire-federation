@@ -679,8 +679,10 @@ public class FederationIQHandler extends IQHandler {
      * mapping back to the joiner — so a directly-mapped local occupant would never reach
      * them.  We therefore target the mapping for the joiner's HOME ({@code joinerOrigin})
      * as well as the one matching {@code fromDomain}; routing then carries it through the
-     * relay to the joiner.  If neither matches (true multi-hop where the joiner's home is
-     * not directly mapped to us) we fall back to syncing through ALL mappings.
+     * relay to the joiner.  Tiered so the common case sends to exactly one mapping rather
+     * than duplicating to the relay too: (1) the joiner's HOME mapping; else (2) the mapping
+     * for the domain we received them from; else (3) — true multi-hop where the joiner's home
+     * is not directly mapped to us — sync through ALL mappings.
      */
     private void syncLocalOccupantsToRemote(String localRoom,
                                             Collection<MUCOccupant> occupants,
@@ -688,10 +690,18 @@ public class FederationIQHandler extends IQHandler {
         List<RoomMapping> allMappings = manager.getRoomManager().getMappingsForLocal(localRoom);
         if (allMappings.isEmpty()) return;
 
+        // Tier 1: the joiner's HOME mapping — reaches them directly through any relay.
         List<RoomMapping> targets = allMappings.stream()
-            .filter(m -> m.remoteDomain().equals(joinerOrigin) || m.remoteDomain().equals(fromDomain))
+            .filter(m -> m.remoteDomain().equals(joinerOrigin))
             .collect(Collectors.toList());
-        if (targets.isEmpty()) targets = allMappings;   // multi-hop relay: sync through all hubs
+        // Tier 2: else the mapping for the domain we actually received the join from.
+        if (targets.isEmpty()) {
+            targets = allMappings.stream()
+                .filter(m -> m.remoteDomain().equals(fromDomain))
+                .collect(Collectors.toList());
+        }
+        // Tier 3: true multi-hop (joiner's home not directly mapped) — sync through all mappings.
+        if (targets.isEmpty()) targets = allMappings;
 
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 

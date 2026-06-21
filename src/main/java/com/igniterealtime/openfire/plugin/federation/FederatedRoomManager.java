@@ -389,8 +389,10 @@ public class FederatedRoomManager {
      * has to guess one from the other.
      */
     public void trackVirtualOccupant(String localRoomJid, String origin, String arrivedVia, String virtualNick) {
-        virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>())
-                        .compute(virtualNick, (n, existing) -> {
+        boolean newRoom = !virtualOccupants.containsKey(localRoomJid);
+        ConcurrentHashMap<String, VirtualOccupant> byNick =
+            virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>());
+        VirtualOccupant vo = byNick.compute(virtualNick, (n, existing) -> {
             if (existing == null) {
                 Set<String> via = ConcurrentHashMap.newKeySet();
                 via.add(arrivedVia);
@@ -399,7 +401,12 @@ public class FederatedRoomManager {
             existing.arrivedVia().add(arrivedVia);   // additional reachable path for an existing occupant
             return existing;
         });
-        persistVirtualOccupantsForRoom(localRoomJid);
+        // Incremental persistence: write ONLY the changed occupant + the nicks list (and the
+        // rooms index only when this room is new), instead of rewriting every occupant entry
+        // on every track — which was N+2 DB writes per join on a room with N occupants.
+        JiveGlobals.setProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, vo.nick()), voccEntryValue(vo));
+        JiveGlobals.setProperty(String.format(PROP_VOCC_NICKS, localRoomJid), String.join(",", byNick.keySet()));
+        if (newRoom) persistVirtualOccupantRoomsIndex();
     }
 
     /**
@@ -412,11 +419,15 @@ public class FederatedRoomManager {
         ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
         if (byNick == null) return false;
         if (byNick.remove(virtualNick) == null) return false;
+        // Incremental persistence: drop only this occupant's entry and rewrite the nicks list,
+        // instead of rewriting every remaining occupant entry.
+        JiveGlobals.deleteProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, virtualNick));
         if (byNick.isEmpty()) {
             virtualOccupants.remove(localRoomJid, byNick);
-            clearPersistedVirtualOccupantsForRoom(localRoomJid);
+            JiveGlobals.deleteProperty(String.format(PROP_VOCC_NICKS, localRoomJid));
+            persistVirtualOccupantRoomsIndex();
         } else {
-            persistVirtualOccupantsForRoom(localRoomJid);
+            JiveGlobals.setProperty(String.format(PROP_VOCC_NICKS, localRoomJid), String.join(",", byNick.keySet()));
         }
         return true;
     }
@@ -620,9 +631,14 @@ public class FederatedRoomManager {
                                 String.join(",", byNick.keySet()));
         for (VirtualOccupant vo : byNick.values()) {
             JiveGlobals.setProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, vo.nick()),
-                                    vo.origin() + "|" + String.join(";", vo.arrivedVia()));
+                                    voccEntryValue(vo));
         }
         persistVirtualOccupantRoomsIndex();
+    }
+
+    /** Serialised persistence value for one occupant: "origin|via1;via2;...". */
+    private static String voccEntryValue(VirtualOccupant vo) {
+        return vo.origin() + "|" + String.join(";", vo.arrivedVia());
     }
 
     /** Deletes all persisted state for one room and refreshes the rooms index. */
