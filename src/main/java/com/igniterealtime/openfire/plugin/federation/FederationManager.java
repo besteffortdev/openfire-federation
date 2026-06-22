@@ -16,6 +16,7 @@ import org.jivesoftware.openfire.muc.MultiUserChatService;
 import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.openfire.session.IncomingServerSession;
 import org.jivesoftware.openfire.session.OutgoingServerSession;
+import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.JID;
@@ -52,6 +53,7 @@ public class FederationManager {
     public void start() {
         Log.info("Federation plugin starting…");
 
+        seedDefaultProperties();
         peerRegistry.load();
         roomManager.load();
 
@@ -65,6 +67,19 @@ public class FederationManager {
         s2sMonitor.start();
 
         Log.info("Federation plugin started — {} peer(s) configured", peerRegistry.getPeers().size());
+    }
+
+    /**
+     * Persists the default value of properties that are otherwise only ever READ (with a
+     * fallback), so they appear in Admin Console → Server → System Properties and can be
+     * toggled from the UI. Openfire only lists properties that have actually been written;
+     * a property read via JiveGlobals.getXProperty(key, default) is invisible until set.
+     * Only seeds when absent, so an admin's chosen value is never overwritten.
+     */
+    private void seedDefaultProperties() {
+        if (JiveGlobals.getProperty("plugin.federation.peerAllowlist") == null) {
+            JiveGlobals.setProperty("plugin.federation.peerAllowlist", "false");
+        }
     }
 
     public void stop() {
