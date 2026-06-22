@@ -138,6 +138,25 @@ public class FederationIQHandler extends IQHandler {
             Log.info("Auto-registered federation peer via incoming connection: {}", fromDomain);
         }
 
+        // Link-level trust negotiation: record the remote's declared stance and block the link
+        // if it disagrees with ours. Trust is a property of the LINK — both admins must agree;
+        // a one-sided change blocks (TRUST_MISMATCH) rather than silently changing behaviour.
+        final boolean remoteUntrusted = "true".equals(el.attributeValue("untrusted"));
+        manager.getPeerRegistry().getPeer(fromDomain)
+               .ifPresent(p -> p.setRemoteUntrusted(remoteUntrusted));
+        boolean localUntrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
+        if (localUntrusted != remoteUntrusted) {
+            Log.warn("Trust mismatch from {}: local untrusted={}, remote untrusted={} — blocking link",
+                     fromDomain, localUntrusted, remoteUntrusted);
+            manager.blockForTrustMismatch(fromDomain);
+            return;
+        }
+        // Stances agree — if we were holding a prior mismatch block, lift it so we can re-gossip.
+        if (current == PeerServer.Status.TRUST_MISMATCH) {
+            manager.getPeerRegistry().clearTrustMismatch(fromDomain);
+            current = PeerServer.Status.UNKNOWN;
+        }
+
         manager.getRoutingTable().addDirectPeer(fromDomain);
 
         // Only reply with full gossip if we didn't already initiate this exchange.

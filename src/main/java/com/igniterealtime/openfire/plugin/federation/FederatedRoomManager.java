@@ -580,6 +580,19 @@ public class FederatedRoomManager {
         return Collections.unmodifiableMap(remoteRooms);
     }
 
+    /**
+     * Rooms advertised TO us via a specific neighbour (the immediate relay), regardless of
+     * their origin. Used by the admin UI to show, per untrusted link, what that peer is
+     * exposing inbound — the right-hand column opposite the rooms we expose outbound.
+     */
+    public List<FederatedRoom> getRemoteRoomsViaPeer(String peerDomain) {
+        List<FederatedRoom> out = new ArrayList<>();
+        for (Map.Entry<String, List<FederatedRoom>> e : remoteRooms.entrySet()) {
+            if (peerDomain.equals(roomRelaySource.get(e.getKey()))) out.addAll(e.getValue());
+        }
+        return out;
+    }
+
     // ── Persistence helpers ───────────────────────────────────────────────────
 
     private void persistRoomsIndex() {

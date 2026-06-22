@@ -60,6 +60,18 @@ public class FederationApiServlet extends HttpServlet {
                 fe = false;
                 sb.append("\"").append(esc(room)).append("\"");
             }
+            // Rooms this peer advertises TO us (right-hand column of the per-link view); only
+            // computed for untrusted peers to keep the trusted-peer payload small.
+            sb.append("],\"advertisedRooms\":[");
+            if (p.isUntrusted()) {
+                boolean fa = true;
+                for (FederatedRoom room : mgr.getRoomManager().getRemoteRoomsViaPeer(p.getDomain())) {
+                    if (!fa) sb.append(",");
+                    fa = false;
+                    sb.append("{\"jid\":\"").append(esc(room.jid())).append("\",")
+                      .append("\"name\":\"").append(esc(room.name())).append("\"}");
+                }
+            }
             sb.append("]}");
         }
         sb.append("],");
@@ -219,6 +231,7 @@ public class FederationApiServlet extends HttpServlet {
                 mgr.addPeer(d);
                 if (Boolean.parseBoolean(req.getParameter("untrusted"))) {
                     mgr.getPeerRegistry().setUntrusted(d, true);
+                    mgr.applyLocalTrustChange(d);   // announce our untrusted stance to the peer
                 }
                 out.print("{\"ok\":true}");
                 return;
@@ -370,9 +383,9 @@ public class FederationApiServlet extends HttpServlet {
                     return;
                 }
                 mgr.getPeerRegistry().setUntrusted(d, Boolean.parseBoolean(untrusted.strip()));
-                // Re-push so the change takes effect at once: a now-trusted peer gets the full
-                // routing/room state; a now-untrusted peer gets only its (possibly empty) exposed set.
-                if (isReachable(mgr, d)) { mgr.sendRoutingUpdate(d); mgr.sendRoomState(d); }
+                // Negotiate the new stance over the link: announce it, and block or re-push
+                // immediately based on the remote's last-known stance (trust is per-link).
+                mgr.applyLocalTrustChange(d);
                 out.print("{\"ok\":true}");
                 return;
             }

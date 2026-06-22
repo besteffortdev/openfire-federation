@@ -138,6 +138,20 @@ public class PeerRegistry {
         }
     }
 
+    /** Marks a link blocked because the two ends disagree on trust. Not persisted (re-derived). */
+    public void setTrustMismatch(String domain) {
+        PeerServer peer = peers.get(domain);
+        if (peer != null) peer.setStatus(PeerServer.Status.TRUST_MISMATCH);
+    }
+
+    /** Clears a TRUST_MISMATCH block (the ends now agree); leaves other statuses untouched. */
+    public void clearTrustMismatch(String domain) {
+        PeerServer peer = peers.get(domain);
+        if (peer != null && peer.getStatus() == PeerServer.Status.TRUST_MISMATCH) {
+            peer.setStatus(PeerServer.Status.UNKNOWN);
+        }
+    }
+
     private static Set<String> parseCsv(String csv) {
         Set<String> out = new LinkedHashSet<>();
         if (csv != null && !csv.isBlank()) {
@@ -169,7 +183,10 @@ public class PeerRegistry {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
         PeerServer.Status cur = peer.getStatus();
-        if (cur == PeerServer.Status.DISABLED || cur == PeerServer.Status.REMOTE_DISABLED) return;
+        // Sticky statuses are never overwritten by live polling: DISABLED/REMOTE_DISABLED are
+        // admin blocks; TRUST_MISMATCH is a negotiated block cleared only by a matching announce.
+        if (cur == PeerServer.Status.DISABLED || cur == PeerServer.Status.REMOTE_DISABLED
+                || cur == PeerServer.Status.TRUST_MISMATCH) return;
         peer.setStatus(status);
         if (status == PeerServer.Status.REACHABLE) {
             peer.markSeen();

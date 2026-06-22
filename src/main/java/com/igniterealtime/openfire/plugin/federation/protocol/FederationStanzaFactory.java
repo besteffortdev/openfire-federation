@@ -50,7 +50,11 @@ public final class FederationStanzaFactory {
     // ── peer-announce ──────────────────────────────────────────────────────────
 
     public static IQ peerAnnounce(String toDomain) {
-        return peerAnnounce(toDomain, false);
+        return peerAnnounce(toDomain, false, false);
+    }
+
+    public static IQ peerAnnounce(String toDomain, boolean isReply) {
+        return peerAnnounce(toDomain, isReply, false);
     }
 
     /**
@@ -58,12 +62,16 @@ public final class FederationStanzaFactory {
      *        The receiver does not reply to a reply, so one side's keepalive timer
      *        warms BOTH S2S directions (each direction is a separate socket with its
      *        own idle timer) without an endless ping-pong.
+     * @param untrusted our trust stance toward this peer. Trust is a property of the LINK:
+     *        the receiver compares it with its own and blocks the link (TRUST_MISMATCH) if
+     *        they disagree. Absent attribute = trusted (back-compat with pre-1.3.39 peers).
      */
-    public static IQ peerAnnounce(String toDomain, boolean isReply) {
+    public static IQ peerAnnounce(String toDomain, boolean isReply, boolean untrusted) {
         IQ iq = base(toDomain);
         Element fed = iq.setChildElement("federation", NS);
         Element ann = fed.addElement("peer-announce");
         if (isReply) ann.addAttribute("reply", "true");
+        if (untrusted) ann.addAttribute("untrusted", "true");
         ann.addElement("server").setText(localJID().getDomain());
         ann.addElement("version").setText("1");
         return iq;

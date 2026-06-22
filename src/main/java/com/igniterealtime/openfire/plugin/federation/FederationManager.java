@@ -735,6 +735,63 @@ public class FederationManager {
         return dests;
     }
 
+    // ── Link-level trust negotiation ────────────────────────────────────────────
+    //
+    // Trust is a property of the LINK, not one local flag. Each side announces its stance
+    // (untrusted true/false) in peer-announce; if the two ends disagree the link is blocked
+    // (TRUST_MISMATCH) until both match. Most-restrictive does NOT silently win — the admins
+    // must agree — so an accidental one-sided change is visible rather than quietly downgrading.
+
+    /**
+     * Blocks federation with a peer because the two ends disagree on trust. Tears down routes
+     * and mappings toward it and marks TRUST_MISMATCH. Idempotent; only re-announces our stance
+     * on the transition INTO mismatch so the two sides don't ping-pong announces. The link
+     * auto-recovers once both ends declare the same stance.
+     */
+    public void blockForTrustMismatch(String domain) {
+        boolean wasMismatch = peerRegistry.getPeer(domain)
+                .map(p -> p.getStatus() == PeerServer.Status.TRUST_MISMATCH).orElse(false);
+        for (String localJid : new ArrayList<>(roomManager.getLocalMappings().keySet())) {
+            if (roomManager.getMappingForLocal(localJid, domain) != null) {
+                roomManager.removeMapping(localJid, domain);
+            }
+        }
+        Set<String> removed = routingTable.removePeer(domain);
+        handleUnreachableDestinations(removed.isEmpty() ? Set.of(domain) : removed);
+        peerRegistry.setTrustMismatch(domain);
+        if (!removed.isEmpty()) propagateTopologyChange(domain);
+        if (!wasMismatch) {
+            Log.warn("SECURITY: trust mismatch with {} — link blocked until both ends agree", domain);
+            sendPeerAnnounce(domain);   // notify the peer once so it blocks too
+        }
+    }
+
+    /**
+     * Re-evaluates a link after the LOCAL admin changed our trust stance: announces the new
+     * stance, then blocks or clears the block immediately based on the remote's last-known
+     * stance, so the UI reflects the change without waiting for the next keepalive cycle.
+     */
+    public void applyLocalTrustChange(String domain) {
+        sendPeerAnnounce(domain);   // tell the peer our new stance
+        peerRegistry.getPeer(domain).ifPresent(p -> {
+            Boolean remote = p.getRemoteUntrusted();
+            if (remote == null) return;                     // not heard from them yet; defer to announce
+            boolean local = p.isUntrusted();
+            if (local != remote) {
+                blockForTrustMismatch(domain);
+            } else {
+                // Stances agree. Clear any prior block (the announce round-trip re-gossips), and
+                // if the link is live re-push filtered routing + rooms so the new stance applies.
+                if (p.getStatus() == PeerServer.Status.TRUST_MISMATCH) {
+                    peerRegistry.clearTrustMismatch(domain);
+                } else if (p.getStatus() == PeerServer.Status.REACHABLE) {
+                    sendRoutingUpdate(domain);
+                    sendRoomState(domain);
+                }
+            }
+        });
+    }
+
     // ── Gossip sending ─────────────────────────────────────────────────────────
 
     public void sendFullGossip(String toDomain) {
@@ -773,7 +830,7 @@ public class FederationManager {
     public void sendPeerAnnounce(String toDomain) {
         try {
             XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.peerAnnounce(toDomain));
+                      .route(FederationStanzaFactory.peerAnnounce(toDomain, false, isUntrusted(toDomain)));
         } catch (Exception e) {
             Log.warn("Failed to send peer-announce to {}: {}", toDomain, e.getMessage());
         }
@@ -796,7 +853,7 @@ public class FederationManager {
     public void sendPeerAnnounceReply(String toDomain) {
         try {
             XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.peerAnnounce(toDomain, true));
+                      .route(FederationStanzaFactory.peerAnnounce(toDomain, true, isUntrusted(toDomain)));
         } catch (Exception e) {
             Log.warn("Failed to send peer-announce reply to {}: {}", toDomain, e.getMessage());
         }

@@ -138,6 +138,11 @@ The federation trust boundary is enforced at several points:
   your topology. Enforcement is two‑way: inbound `room-mapping`/`muc-forward` from an untrusted peer aimed at any
   room not on its exposed list is dropped and logged with a `SECURITY:` tag. This is the **edge‑server** pattern:
   federate with a partner organisation through one gateway that exposes only a curated set of rooms.
+  - **Trust is a property of the link.** Each end announces its stance (trusted/untrusted) in `peer-announce`;
+    if the two disagree, the link is **blocked** (status *Trust mismatch*) and no federation flows until **both**
+    admins set the same trust level. It then comes up automatically — no reconnect needed. The *Rooms* editor
+    shows both directions: on the left, the rooms you allow to **leave** to that peer (editable); on the right,
+    the rooms that peer is **advertising to you** (read‑only).
 - **Admin API CSRF.** The Federation tab's API uses a double‑submit token (a `fed-csrf` cookie echoed back as a
   request parameter), so a forged request from another site cannot trigger peer/room changes in a logged‑in
   admin's browser. After upgrading, reload an already‑open Federation tab once so its scripts pick up the token.

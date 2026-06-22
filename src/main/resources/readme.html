@@ -133,7 +133,12 @@
         federated local rooms and any remote rooms reachable through this server. It is sent only those rooms and
         only routes to the servers hosting them, and any mapping/message it sends toward a room you did
         <em>not</em> expose is dropped (logged <code>SECURITY:</code>). Use this for an edge server fronting a
-        partner organisation that should see only a curated set of rooms.</li>
+        partner organisation that should see only a curated set of rooms.
+        <br><strong>Trust is per‑link:</strong> both ends must set the same trust level. If one side marks the link
+        untrusted and the other leaves it trusted, the link shows <em>Trust mismatch</em> and carries no
+        federation until they agree — then it comes up on its own. The <em>Rooms</em> editor has two columns: on
+        the left the rooms you allow to <em>leave</em> to that peer (editable), on the right the rooms that peer is
+        <em>advertising to you</em> (read‑only).</li>
     <li><strong>Admin API CSRF.</strong> This tab's actions are protected by a double‑submit token. After
         upgrading the plugin, reload an already‑open Federation tab once so it picks up the new token.</li>
 </ul>

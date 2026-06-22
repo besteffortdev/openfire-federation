@@ -146,7 +146,11 @@
 
         /* ── Untrusted peer: exposed-room editor ──────────────────── */
         .exposed-editor-row td { background: #fbfcfd; }
-        .exposed-editor { padding: 4px 2px 6px; }
+        .exposed-cols { display: flex; gap: 18px; padding: 4px 2px 6px; }
+        .exposed-col { flex: 1 1 0; min-width: 0; }
+        .exposed-col + .exposed-col { border-left: 1px solid #e9ecef; padding-left: 18px; }
+        .exposed-col-h { font-weight: 600; font-size: 12px; margin-bottom: 6px; }
+        .exposed-col-sub { display: block; font-weight: 400; color: #6c757d; font-size: 11px; margin-top: 2px; }
         .exposed-room {
             display: flex; align-items: center; gap: 8px;
             padding: 4px 6px; border-bottom: 1px solid #f0f0f0; font-size: 13px;

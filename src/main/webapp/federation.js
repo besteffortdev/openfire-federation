@@ -140,10 +140,12 @@ function renderPeers(peers) {
             : '';
 
         let statusLabel;
-        if (isWithdrawn)           statusLabel = 'Disconnected by remote';
-        else if (isDisabled)       statusLabel = 'Disabled';
-        else if (isRemoteDisabled) statusLabel = 'Disabled by remote';
-        else                       statusLabel = p.status;
+        if (isWithdrawn)               statusLabel = 'Disconnected by remote';
+        else if (isDisabled)           statusLabel = 'Disabled';
+        else if (isRemoteDisabled)     statusLabel = 'Disabled by remote';
+        else if (p.status === 'TRUST_MISMATCH')
+            statusLabel = 'Trust mismatch — both ends must set the same trust level';
+        else                           statusLabel = p.status;
         if (isUnreachable) {
             const retryAt = p.nextRetryAt || 0;
             if (retryAt > now) {
@@ -195,6 +197,7 @@ function exposableRooms() {
 
 function renderExposedEditor(p) {
     const id = jidToElemId(p.domain);
+    // ── Left: rooms we ALLOW TO LEAVE to this peer (editable). ──
     // Pending edits win over the persisted set so a refresh doesn't reset the admin's work.
     const checkedSet = editedExposed[p.domain] || new Set(p.exposedRooms || []);
     const rooms = exposableRooms();
@@ -203,7 +206,7 @@ function renderExposedEditor(p) {
         if (!rooms.some(r => r.jid === jid)) rooms.push({ jid, name: '', scope: 'unavailable' });
     });
 
-    const list = rooms.length === 0
+    const leftList = rooms.length === 0
         ? '<p class="empty" style="margin:4px 0">No federated or remote rooms available to expose yet.</p>'
         : rooms.map(r => {
             const checked = checkedSet.has(r.jid) ? 'checked' : '';
@@ -220,18 +223,35 @@ function renderExposedEditor(p) {
             </label>`;
         }).join('');
 
+    // ── Right: rooms this peer ADVERTISES TO US (read-only). ──
+    const adv = p.advertisedRooms || [];
+    const rightList = adv.length === 0
+        ? '<p class="empty" style="margin:4px 0">This peer is not advertising any rooms to us yet.</p>'
+        : adv.map(r => `
+            <div class="exposed-room">
+                <span>${escHtml(r.name || r.jid)}</span>
+                <small>${escHtml(r.jid)}</small>
+            </div>`).join('');
+
     return `
         <tr class="exposed-editor-row">
             <td colspan="4">
-                <div class="exposed-editor">
-                    <div style="font-weight:600;font-size:12px;margin-bottom:6px">
-                        Rooms exposed to ${escHtml(p.domain)}
-                        <span style="font-weight:400;color:#6c757d">— this peer sees only the checked rooms and gets routes only to their servers.</span>
+                <div class="exposed-cols">
+                    <div class="exposed-col">
+                        <div class="exposed-col-h">↑ Rooms allowed to leave to ${escHtml(p.domain)}
+                            <span class="exposed-col-sub">checked rooms are shared outbound; this peer gets routes only to their servers</span>
+                        </div>
+                        ${leftList}
+                        <div style="margin-top:8px">
+                            <button class="btn-small btn-primary" onclick="saveExposedRooms('${escHtml(p.domain)}')">Save</button>
+                            <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
+                        </div>
                     </div>
-                    ${list}
-                    <div style="margin-top:8px">
-                        <button class="btn-small btn-primary" onclick="saveExposedRooms('${escHtml(p.domain)}')">Save exposed rooms</button>
-                        <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
+                    <div class="exposed-col">
+                        <div class="exposed-col-h">↓ Rooms ${escHtml(p.domain)} advertises to us
+                            <span class="exposed-col-sub">what the remote is exposing inbound (read-only)</span>
+                        </div>
+                        ${rightList}
                     </div>
                 </div>
             </td>
@@ -460,6 +480,7 @@ function statusClass(s) {
     if (s === 'REACHABLE')  return 'green';
     if (s === 'UNREACHABLE') return 'red';
     if (s === 'WITHDRAWN')   return 'orange';
+    if (s === 'TRUST_MISMATCH') return 'orange';
     if (s === 'DISABLED' || s === 'REMOTE_DISABLED') return 'red';
     return 'grey';
 }

@@ -19,8 +19,11 @@ public final class PeerServer {
      *            locally, and re-asserted to the peer even if it re-creates the link.
      * REMOTE_DISABLED — the remote administratively disabled the link; persistent and
      *            NOT re-enableable locally (only the remote can lift it).
+     * TRUST_MISMATCH — the two ends disagree on trust (one marked the link untrusted, the
+     *            other trusted). The link is blocked (no federation) until both ends match;
+     *            derived from peer-announce negotiation, not persisted, auto-clears on match.
      */
-    public enum Status { UNKNOWN, REACHABLE, UNREACHABLE, WITHDRAWN, DISABLED, REMOTE_DISABLED }
+    public enum Status { UNKNOWN, REACHABLE, UNREACHABLE, WITHDRAWN, DISABLED, REMOTE_DISABLED, TRUST_MISMATCH }
 
     private final String domain;
     private final AtomicReference<Status> status = new AtomicReference<>(Status.UNKNOWN);
@@ -37,6 +40,14 @@ public final class PeerServer {
 
     /** Room JIDs an untrusted peer is allowed to see/map (empty = expose nothing). */
     private final Set<String> exposedRooms = ConcurrentHashMap.newKeySet();
+
+    /**
+     * The remote end's last-declared trust stance, learned from its peer-announce
+     * ({@code untrusted="true|false"}). null until we've heard from it. Trust is a property
+     * of the LINK: if this disagrees with our own {@link #untrusted}, the link is blocked
+     * (TRUST_MISMATCH) until both ends match.
+     */
+    private volatile Boolean remoteUntrusted = null;
 
     public PeerServer(String domain) {
         this.domain = domain;
@@ -63,6 +74,11 @@ public final class PeerServer {
     public boolean exposes(String roomJid) {
         return roomJid != null && exposedRooms.contains(roomJid);
     }
+
+    /** The remote's last-declared trust stance, or null if not yet heard. */
+    public Boolean getRemoteUntrusted() { return remoteUntrusted; }
+
+    public void setRemoteUntrusted(boolean remoteUntrusted) { this.remoteUntrusted = remoteUntrusted; }
 
     public Status getStatus() { return status.get(); }
 
