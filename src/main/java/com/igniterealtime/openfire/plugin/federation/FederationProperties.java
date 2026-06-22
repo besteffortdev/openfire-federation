@@ -19,15 +19,15 @@ public final class FederationProperties {
     private static final String PLUGIN = "federation";
 
     /**
-     * Opt-in peer trust gate. When true, only configured peers (see {@link PeerRegistry#isApproved})
-     * may drive federation. Defaults to FALSE (open federation, auto-registration works): turning it
-     * on with an incomplete peer list would reject peers and break the mesh, so enabling it is a
-     * deliberate admin action once peers are configured on both ends.
+     * Peer trust gate (secure by default). When true, only configured peers
+     * (see {@link PeerRegistry#isApproved}) may drive federation; actions from any other server are
+     * rejected. NOTE: with this on, both ends must explicitly add each other — auto-registration of
+     * unknown peers is suppressed. Set to false for open federation (accept any server that connects).
      */
     public static final SystemProperty<Boolean> PEER_ALLOWLIST = SystemProperty.Builder.ofType(Boolean.class)
         .setKey("plugin.federation.peerAllowlist")
         .setPlugin(PLUGIN)
-        .setDefaultValue(false)
+        .setDefaultValue(true)
         .setDynamic(true)
         .build();
 

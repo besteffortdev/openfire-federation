@@ -123,10 +123,10 @@
     <li><strong>Rooms are opt‑in.</strong> A remote peer can only map, or inject presence/messages into, a
         local room you have explicitly marked <em>Federated</em>. Forwarded traffic aimed at any other local
         room is dropped (logged with a <code>SECURITY:</code> tag).</li>
-    <li><strong>Peer allowlist (optional).</strong> By default any server that can establish S2S is accepted.
-        Set <code>plugin.federation.peerAllowlist</code> to <code>true</code> to require explicit approval —
-        only peers you <em>Add</em> here may federate; all others are rejected. Enabling it keeps your current
-        peers (they are grandfathered), so you only manage new peers from then on.</li>
+    <li><strong>Peer allowlist (default on).</strong> <code>plugin.federation.peerAllowlist</code> defaults to
+        <code>true</code>: only peers you <em>Add</em> here may federate; all others are rejected. Both ends must
+        add each other (auto-registration of unknown peers is suppressed). Set it to <code>false</code> (or use
+        the Security toggle on this tab) for open federation, accepting any server that connects.</li>
     <li><strong>Admin API CSRF.</strong> This tab's actions are protected by a double‑submit token. After
         upgrading the plugin, reload an already‑open Federation tab once so it picks up the new token.</li>
 </ul>

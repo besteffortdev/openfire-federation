@@ -100,7 +100,7 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.keepaliveSeconds` | `240` | Interval for lightweight keepalive pings to reachable peers. Min 30. Auto‑clamped below Openfire's S2S idle timeout. |
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
-| `plugin.federation.peerAllowlist` | `false` | Opt‑in trust mode. When `true`, only admin‑approved peers may drive federation; every action from any other peer is rejected. See [Security](#security). |
+| `plugin.federation.peerAllowlist` | `true` | Secure‑by‑default trust mode. Only configured peers may drive federation; every action from any other peer is rejected. Set `false` for open federation. See [Security](#security). |
 
 ### Note on `disableS2SIdle`
 
@@ -124,11 +124,11 @@ The federation trust boundary is enforced at several points:
   has explicitly toggled **Federated**. Forwarded traffic aimed at any non‑federated room is dropped and logged
   with a `SECURITY:` tag. This stops a peer from siphoning the roster of, or injecting into, a room it was never
   granted (injection otherwise bypasses MUC's own non‑occupant check).
-- **Peer allowlist (optional).** By default any server that can establish S2S and speak the federation protocol
-  is accepted (open federation). Set `plugin.federation.peerAllowlist=true` to require explicit approval: only
-  peers you **Add** in the admin console may drive federation, and every action from any other peer is rejected.
-  Turning it on **grandfathers your current peers**, so an existing mesh keeps working — you only manage new
-  peers from then on. Recommended for internet‑facing servers whose S2S is not otherwise restricted.
+- **Peer allowlist (default on).** `plugin.federation.peerAllowlist` defaults to `true`: only configured peers
+  (those you **Add** in the admin console) may drive federation; every action from any other server is rejected.
+  A peer is "configured" if you added it, so **both ends must add each other** — with the allowlist on,
+  auto‑registration of unknown peers is suppressed. Set it to `false` (or use the **Security** toggle on the
+  Peer Servers tab) for open federation, where any server that can connect is accepted and auto‑registered.
 - **Admin API CSRF.** The Federation tab's API uses a double‑submit token (a `fed-csrf` cookie echoed back as a
   request parameter), so a forged request from another site cannot trigger peer/room changes in a logged‑in
   admin's browser. After upgrading, reload an already‑open Federation tab once so its scripts pick up the token.
