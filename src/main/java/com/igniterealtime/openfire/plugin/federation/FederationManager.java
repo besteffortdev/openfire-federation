@@ -16,7 +16,6 @@ import org.jivesoftware.openfire.muc.MultiUserChatService;
 import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.openfire.session.IncomingServerSession;
 import org.jivesoftware.openfire.session.OutgoingServerSession;
-import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.JID;
@@ -54,7 +53,6 @@ public class FederationManager {
         Log.info("Federation plugin starting…");
 
         FederationProperties.register();   // expose all plugin properties under the Federation plugin
-        migrateProperties();
         peerRegistry.load();
         roomManager.load();
 
@@ -68,20 +66,6 @@ public class FederationManager {
         s2sMonitor.start();
 
         Log.info("Federation plugin started — {} peer(s) configured", peerRegistry.getPeers().size());
-    }
-
-    /**
-     * One-time property migration. The peer allowlist now defaults to ON (secure by default);
-     * earlier builds either left it unset or auto-seeded "false". Flip it to true exactly once
-     * (guarded by an init marker) so existing deployments adopt the new default, while still
-     * letting an admin turn it back off afterwards — the marker stops us re-forcing it.
-     */
-    private void migrateProperties() {
-        if (!JiveGlobals.getBooleanProperty("plugin.federation.peerAllowlist.init", false)) {
-            FederationProperties.PEER_ALLOWLIST.setValue(true);
-            JiveGlobals.setProperty("plugin.federation.peerAllowlist.init", "true");
-            Log.info("Peer allowlist enabled by default (one-time migration); existing peers are grandfathered");
-        }
     }
 
     public void stop() {
@@ -102,7 +86,6 @@ public class FederationManager {
 
     public PeerServer addPeer(String domain) {
         PeerServer peer = peerRegistry.addPeer(domain);
-        peerRegistry.approve(domain);   // an explicit admin add is also an allowlist approval
         Log.info("Peer added: {}", domain);
         sendPeerAnnounce(domain);
         return peer;
@@ -241,7 +224,6 @@ public class FederationManager {
         killSession(domain, "outgoing");
         killSession(domain, "incoming");
         boolean removed = peerRegistry.removePeer(domain);
-        peerRegistry.unapprove(domain);   // removing a peer also revokes its allowlist approval
         if (removed) {
             Set<String> removedRoutes = routingTable.removePeer(domain);
             // Drop cached rooms and evict ghost occupants for this peer AND every

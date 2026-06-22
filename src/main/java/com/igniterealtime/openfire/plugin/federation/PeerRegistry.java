@@ -8,7 +8,6 @@ import org.slf4j.LoggerFactory;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -21,17 +20,8 @@ public class PeerRegistry {
     private static final Logger Log = LoggerFactory.getLogger(PeerRegistry.class);
     private static final String PROP_PEERS      = "federation.peers";
     private static final String PROP_PEER_STATE = "federation.peer.state.";   // + domain → DISABLED|REMOTE_DISABLED
-    private static final String PROP_APPROVED      = "federation.peers.approved";       // CSV of admin-approved domains
-    private static final String PROP_APPROVED_INIT = "federation.peers.approved.init";  // one-time grandfather marker
 
     private final ConcurrentHashMap<String, PeerServer> peers = new ConcurrentHashMap<>();
-
-    /**
-     * Domains the local admin has explicitly approved as federation peers. Only consulted
-     * when the opt-in allowlist (plugin.federation.peerAllowlist) is enabled; in the default
-     * open mode any peer is accepted and this set is irrelevant.
-     */
-    private final Set<String> approved = ConcurrentHashMap.newKeySet();
 
     /** Called once by FederationManager.start() — loads persisted peers. */
     public void load() {
@@ -59,46 +49,17 @@ public class PeerRegistry {
                 }
             }
         }
-        loadApproved();
     }
 
     /**
-     * Loads the admin-approved set. On first run after upgrade (no init marker) it grandfathers
-     * every currently-configured peer as approved, so turning the allowlist on later never drops
-     * the existing mesh — the admin only has to manage NEW peers from then on.
+     * Whether a domain is allowed to federate when the peer allowlist is enabled. The single
+     * source of truth is the configured peer registry itself: a peer is approved iff it is a
+     * configured peer (added by the admin, or auto-registered while the allowlist was off).
+     * Using the registry directly — rather than a parallel "approved" set — avoids the two
+     * desyncing, which previously could leave the approved set empty and reject every peer.
      */
-    private void loadApproved() {
-        if (JiveGlobals.getBooleanProperty(PROP_APPROVED_INIT, false)) {
-            String stored = JiveGlobals.getProperty(PROP_APPROVED, "").strip();
-            for (String d : stored.split(",")) {
-                d = d.strip();
-                if (!d.isEmpty()) approved.add(d);
-            }
-        } else {
-            approved.addAll(peers.keySet());   // grandfather the current peer set, once
-            JiveGlobals.setProperty(PROP_APPROVED_INIT, "true");
-            persistApproved();
-            if (!approved.isEmpty()) Log.info("Initialised federation peer allowlist with {} existing peer(s)", approved.size());
-        }
-    }
-
-    /** Marks a domain as an admin-approved peer (the opt-in allowlist). */
-    public void approve(String domain) {
-        if (approved.add(domain)) persistApproved();
-    }
-
-    /** Revokes a domain's approval. */
-    public void unapprove(String domain) {
-        if (approved.remove(domain)) persistApproved();
-    }
-
-    /** Whether a domain is on the admin-approved allowlist. */
     public boolean isApproved(String domain) {
-        return approved.contains(domain);
-    }
-
-    private void persistApproved() {
-        JiveGlobals.setProperty(PROP_APPROVED, String.join(",", approved));
+        return peers.containsKey(domain);
     }
 
     /**
