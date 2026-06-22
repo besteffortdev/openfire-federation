@@ -168,7 +168,8 @@ public class FederationApiServlet extends HttpServlet {
         // ── settings ──────────────────────────────────────────────────────────
         sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds()).append(",");
         sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
-        sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds());
+        sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds()).append(",");
+        sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue());
 
         sb.append("}");
         out.print(sb.toString());
@@ -332,6 +333,16 @@ public class FederationApiServlet extends HttpServlet {
                 } catch (NumberFormatException e) {
                     out.print("{\"error\":\"seconds must be an integer\"}");
                 }
+                return;
+            }
+            case "set-allowlist": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.PEER_ALLOWLIST.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"peerAllowlist\":" + FederationProperties.PEER_ALLOWLIST.getValue() + "}");
                 return;
             }
             default:

@@ -13,7 +13,6 @@ import org.jivesoftware.openfire.handler.IQHandler;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
-import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.IQ;
@@ -803,9 +802,9 @@ public class FederationIQHandler extends IQHandler {
         return roomJid != null && manager.getRoomManager().isFederated(roomJid);
     }
 
-    /** Opt-in peer allowlist toggle (default false = open federation, current behaviour). */
+    /** Peer allowlist toggle (default true = only admin-approved peers may federate). */
     private boolean allowlistEnabled() {
-        return JiveGlobals.getBooleanProperty("plugin.federation.peerAllowlist", false);
+        return com.igniterealtime.openfire.plugin.federation.FederationProperties.PEER_ALLOWLIST.getValue();
     }
 
     private Packet parsePacket(Element el) throws Exception {

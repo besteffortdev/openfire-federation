@@ -52,6 +52,7 @@ function refresh() {
             updateStatusBadge(data.peers || []);
             updateKeepaliveInput(data.keepaliveSeconds);
             updateReconnectInput(data.reconnectSeconds);
+            updateAllowlistToggle(data.peerAllowlist);
         })
         .catch(err => console.error('Federation API error:', err));
 }
@@ -267,6 +268,39 @@ function saveReconnect() {
 function killSession(domain, direction) {
     if (!confirm('Close ' + direction + ' S2S session with ' + domain + '?')) return;
     post({ action: 'kill-session', domain, direction }).then(refresh);
+}
+
+// ── Security: peer allowlist toggle ────────────────────────────────────────────
+
+function updateAllowlistToggle(enabled) {
+    const cb = document.getElementById('allowlist-toggle');
+    const lbl = document.getElementById('allowlist-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Approved peers only' : 'Open federation';
+}
+
+function saveAllowlist() {
+    const cb = document.getElementById('allowlist-toggle');
+    if (!cb) return;
+    const enabled = cb.checked;
+    if (enabled && !confirm(
+        'Restrict federation to approved peers?\n\n' +
+        'Only peers added on this page will be able to federate; any other server is rejected. ' +
+        'Your existing peers stay approved.')) {
+        cb.checked = false;
+        return;
+    }
+    post({ action: 'set-allowlist', enabled })
+        .then(result => {
+            if (result && result.ok) {
+                const badge = document.getElementById('allowlist-saved');
+                if (badge) {
+                    badge.style.display = 'inline';
+                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
+                }
+                refresh();
+            }
+        });
 }
 
 function removePeer(domain) {

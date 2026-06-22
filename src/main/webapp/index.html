@@ -280,6 +280,37 @@
                 </table>
             </div>
         </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Security</div>
+            <div class="section-box-body">
+                <table class="settings-table">
+                    <tr>
+                        <td>
+                            <label for="allowlist-toggle" style="font-weight:600;font-size:13px">
+                                Restrict federation to approved peers
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When enabled, only peers you have explicitly added here may federate;
+                                federation actions from any other server are rejected. Disable for open
+                                federation (accept any server that can connect). Existing peers stay
+                                approved when this is turned on.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="allowlist-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveAllowlist()">
+                            <span id="allowlist-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="allowlist-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
     </div>
 
     <!-- ── Routing table panel ──────────────────────────────────────────────── -->
