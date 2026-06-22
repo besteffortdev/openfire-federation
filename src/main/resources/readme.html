@@ -127,6 +127,13 @@
         <code>true</code>: only peers you <em>Add</em> here may federate; all others are rejected. Both ends must
         add each other (auto-registration of unknown peers is suppressed). Set it to <code>false</code> (or use
         the Security toggle on this tab) for open federation, accepting any server that connects.</li>
+    <li><strong>Untrusted peers (filtered exposure).</strong> Tick <em>Untrusted</em> when adding a peer (or use
+        <em>Make untrusted</em> on its row) and it gets <strong>no</strong> routing updates and <strong>no</strong>
+        room advertisements. Open its <em>Rooms</em> editor to choose exactly which rooms it may see — from your
+        federated local rooms and any remote rooms reachable through this server. It is sent only those rooms and
+        only routes to the servers hosting them, and any mapping/message it sends toward a room you did
+        <em>not</em> expose is dropped (logged <code>SECURITY:</code>). Use this for an edge server fronting a
+        partner organisation that should see only a curated set of rooms.</li>
     <li><strong>Admin API CSRF.</strong> This tab's actions are protected by a double‑submit token. After
         upgrading the plugin, reload an already‑open Federation tab once so it picks up the new token.</li>
 </ul>
@@ -137,6 +144,9 @@
         can be added again later.</li>
     <li><strong>Disable</strong> — an authoritative, persistent block. The disabled peer cannot re‑establish
         the connection (even by re‑adding) until you re‑enable it.</li>
+    <li><strong>Untrusted</strong> — toggle filtered exposure for a peer (see <a href="#">Security</a>). An
+        untrusted peer's <em>Rooms</em> editor lets you pick precisely which rooms it may see; everything else in
+        your network stays hidden from it.</li>
 </ul>
 
 <h2>Troubleshooting</h2>

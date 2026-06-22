@@ -315,6 +315,12 @@ public class FederationIQHandler extends IQHandler {
                         String theirLocal  = map.attributeValue("local");
                         String theirRemote = map.attributeValue("remote");
                         if (theirLocal != null && theirRemote != null) {
+                            // theirRemote is the room IN OUR NETWORK the peer wants to map onto.
+                            if (!untrustedAllows(fromDomain, theirRemote)) {
+                                Log.warn("SECURITY: rejecting relayed room-mapping from untrusted peer {} "
+                                       + "toward room {} — not in its exposed set", fromDomain, theirRemote);
+                                continue;
+                            }
                             try {
                                 XMPPServer.getInstance().getPacketRouter()
                                           .route(FederationStanzaFactory.roomMapping(
@@ -345,6 +351,11 @@ public class FederationIQHandler extends IQHandler {
                 if (!isFederatedLocalRoom(theirRemote)) {
                     Log.warn("SECURITY: rejecting room-mapping from {} onto local room {} — "
                            + "that room is not federation-enabled here", actualOrigin, theirRemote);
+                    continue;
+                }
+                if (!untrustedAllows(fromDomain, theirRemote)) {
+                    Log.warn("SECURITY: rejecting room-mapping from untrusted peer {} onto local room {} — "
+                           + "not in its exposed set", fromDomain, theirRemote);
                     continue;
                 }
                 manager.getRoomManager().addMapping(theirRemote, theirLocal, actualOrigin);
@@ -429,6 +440,15 @@ public class FederationIQHandler extends IQHandler {
         Element payloadEl = (Element) el.elements().stream().findFirst().orElse(null);
         if (payloadEl == null) {
             Log.warn("muc-forward from {} has no payload", fromDomain);
+            return;
+        }
+
+        // Untrusted-peer exposure gate: an untrusted peer may only move traffic for rooms on
+        // its exposed allowlist, whether we inject it here or relay it onward.
+        if (!untrustedAllows(fromDomain, targetRoom)) {
+            Log.warn("SECURITY: dropping muc-forward from untrusted peer {} for non-exposed room {} "
+                   + "(type={}, from={})", fromDomain, targetRoom,
+                     payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
             return;
         }
 
@@ -800,6 +820,17 @@ public class FederationIQHandler extends IQHandler {
      */
     private boolean isFederatedLocalRoom(String roomJid) {
         return roomJid != null && manager.getRoomManager().isFederated(roomJid);
+    }
+
+    /**
+     * Inbound exposure gate for untrusted peers: a trusted peer is always allowed; an
+     * untrusted peer may only map/inject/relay toward rooms on its exposed allowlist.
+     * Composed with {@link #isFederatedLocalRoom} so an untrusted peer is bounded by BOTH
+     * "the room is federation-enabled" and "the room was exposed to this peer".
+     */
+    private boolean untrustedAllows(String fromDomain, String roomJid) {
+        if (!manager.getPeerRegistry().isUntrusted(fromDomain)) return true;
+        return roomJid != null && manager.getPeerRegistry().getExposedRooms(fromDomain).contains(roomJid);
     }
 
     /** Peer allowlist toggle (default true = only admin-approved peers may federate). */

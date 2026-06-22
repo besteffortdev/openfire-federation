@@ -4,6 +4,7 @@ import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import org.dom4j.Element;
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
+import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationIQHandler;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationPacketInterceptor;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
@@ -23,10 +24,13 @@ import org.xmpp.packet.Presence;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Central coordinator for the federation plugin.
@@ -679,15 +683,56 @@ public class FederationManager {
             if (peer.getDomain().equals(excludeDomain)) continue;
             if (via != null && via.contains(peer.getDomain())) continue;
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                // Untrusted peer: relay only the exposed subset; skip if it's allowed none
+                // (but still relay an empty list, which is a withdrawal and reveals nothing).
+                List<FederatedRoom> toSend = filterRoomsForPeer(peer.getDomain(), rooms);
+                if (toSend.isEmpty() && !rooms.isEmpty()) continue;
                 try {
                     XMPPServer.getInstance().getPacketRouter()
                               .route(FederationStanzaFactory.roomAdvertisement(
-                                  peer.getDomain(), rooms, originDomain, via));
+                                  peer.getDomain(), toSend, originDomain, via));
                 } catch (Exception e) {
                     Log.warn("Failed to relay room-advertisement to {}: {}", peer.getDomain(), e.getMessage());
                 }
             }
         }
+    }
+
+    // ── Untrusted-peer exposure filtering ──────────────────────────────────────
+    //
+    // An untrusted peer (e.g. a foreign org reached only through this edge server) gets
+    // NO routes and NO room advertisements except for the rooms the admin has explicitly
+    // exposed to it, and only routes to those rooms' hosting servers. All per-peer senders
+    // funnel through the methods below, so filtering here covers gossip/propagate/solicit.
+
+    private boolean isUntrusted(String domain) {
+        return peerRegistry.isUntrusted(domain);
+    }
+
+    /** Restricts a room list to a peer's exposed set; returns it unchanged for trusted peers. */
+    private List<FederatedRoom> filterRoomsForPeer(String domain, List<FederatedRoom> rooms) {
+        if (!isUntrusted(domain)) return rooms;
+        Set<String> exposed = peerRegistry.getExposedRooms(domain);
+        if (exposed.isEmpty()) return Collections.emptyList();
+        return rooms.stream().filter(r -> exposed.contains(r.jid())).collect(Collectors.toList());
+    }
+
+    /**
+     * Hosting server domains of an untrusted peer's exposed REMOTE rooms — the only routes
+     * we may advertise to it. Exposed LOCAL rooms need no route (the peer reaches us directly),
+     * so they contribute nothing here. Origins are read from the cached remote-room map; an
+     * exposed room not yet cached is simply omitted until it is re-learned (self-healing).
+     */
+    private Set<String> exposedDestinations(String domain) {
+        Set<String> exposed = peerRegistry.getExposedRooms(domain);
+        if (exposed.isEmpty()) return Collections.emptySet();
+        Set<String> dests = new HashSet<>();
+        for (Map.Entry<String, List<FederatedRoom>> e : roomManager.getRemoteRooms().entrySet()) {
+            for (FederatedRoom r : e.getValue()) {
+                if (exposed.contains(r.jid())) { dests.add(e.getKey()); break; }
+            }
+        }
+        return dests;
     }
 
     // ── Gossip sending ─────────────────────────────────────────────────────────
@@ -712,8 +757,8 @@ public class FederationManager {
         for (Map.Entry<String, List<FederatedRoom>> entry : roomManager.getRemoteRooms().entrySet()) {
             String originDomain = entry.getKey();
             if (originDomain.equals(toDomain)) continue;  // don't send a server its own rooms
-            List<FederatedRoom> rooms = entry.getValue();
-            if (rooms.isEmpty()) continue;
+            List<FederatedRoom> rooms = filterRoomsForPeer(toDomain, entry.getValue());
+            if (rooms.isEmpty()) continue;                // untrusted peer: none of these exposed
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.roomAdvertisement(
@@ -759,16 +804,23 @@ public class FederationManager {
 
     public void sendRoutingUpdate(String toDomain) {
         try {
+            Collection<RouteEntry> table = routingTable.getRoutesExcludingNextHop(toDomain);
+            if (isUntrusted(toDomain)) {
+                // Untrusted peer: reveal only routes to the servers hosting its exposed rooms.
+                Set<String> allowed = exposedDestinations(toDomain);
+                table = table.stream()
+                             .filter(e -> allowed.contains(e.destination()))
+                             .collect(Collectors.toList());
+            }
             XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.routingUpdate(
-                          toDomain, routingTable.getRoutesExcludingNextHop(toDomain)));
+                      .route(FederationStanzaFactory.routingUpdate(toDomain, table));
         } catch (Exception e) {
             Log.warn("Failed to send routing-update to {}: {}", toDomain, e.getMessage());
         }
     }
 
     public void sendRoomAdvertisement(String toDomain) {
-        List<FederatedRoom> rooms = roomManager.getLocalFederatedRoomsWithDetails();
+        List<FederatedRoom> rooms = filterRoomsForPeer(toDomain, roomManager.getLocalFederatedRoomsWithDetails());
         try {
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.roomAdvertisement(toDomain, rooms));

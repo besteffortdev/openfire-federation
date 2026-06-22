@@ -51,8 +51,16 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"domain\":\"").append(esc(p.getDomain())).append("\",")
               .append("\"status\":\"").append(p.getStatus().name()).append("\",")
               .append("\"lastSeen\":").append(p.getLastSeenMillis()).append(",")
-              .append("\"nextRetryAt\":").append(mgr.getNextRetryAt(p.getDomain()))
-              .append("}");
+              .append("\"nextRetryAt\":").append(mgr.getNextRetryAt(p.getDomain())).append(",")
+              .append("\"untrusted\":").append(p.isUntrusted()).append(",")
+              .append("\"exposedRooms\":[");
+            boolean fe = true;
+            for (String room : p.getExposedRooms()) {
+                if (!fe) sb.append(",");
+                fe = false;
+                sb.append("\"").append(esc(room)).append("\"");
+            }
+            sb.append("]}");
         }
         sb.append("],");
 
@@ -207,7 +215,11 @@ public class FederationApiServlet extends HttpServlet {
                     out.print("{\"error\":\"domain required\"}");
                     return;
                 }
-                mgr.addPeer(domain.strip().toLowerCase());
+                String d = domain.strip().toLowerCase();
+                mgr.addPeer(d);
+                if (Boolean.parseBoolean(req.getParameter("untrusted"))) {
+                    mgr.getPeerRegistry().setUntrusted(d, true);
+                }
                 out.print("{\"ok\":true}");
                 return;
             }
@@ -345,6 +357,49 @@ public class FederationApiServlet extends HttpServlet {
                 out.print("{\"ok\":true,\"peerAllowlist\":" + FederationProperties.PEER_ALLOWLIST.getValue() + "}");
                 return;
             }
+            case "set-untrusted": {
+                String domain    = req.getParameter("domain");
+                String untrusted = req.getParameter("untrusted");
+                if (domain == null || domain.isBlank() || untrusted == null) {
+                    out.print("{\"error\":\"domain and untrusted required\"}");
+                    return;
+                }
+                String d = domain.strip().toLowerCase();
+                if (!mgr.getPeerRegistry().contains(d)) {
+                    out.print("{\"error\":\"not a configured peer\"}");
+                    return;
+                }
+                mgr.getPeerRegistry().setUntrusted(d, Boolean.parseBoolean(untrusted.strip()));
+                // Re-push so the change takes effect at once: a now-trusted peer gets the full
+                // routing/room state; a now-untrusted peer gets only its (possibly empty) exposed set.
+                if (isReachable(mgr, d)) { mgr.sendRoutingUpdate(d); mgr.sendRoomState(d); }
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "set-exposed-rooms": {
+                String domain = req.getParameter("domain");
+                String rooms  = req.getParameter("rooms");   // comma-separated room JIDs ("" = none)
+                if (domain == null || domain.isBlank()) {
+                    out.print("{\"error\":\"domain required\"}");
+                    return;
+                }
+                String d = domain.strip().toLowerCase();
+                if (!mgr.getPeerRegistry().contains(d)) {
+                    out.print("{\"error\":\"not a configured peer\"}");
+                    return;
+                }
+                java.util.List<String> list = new java.util.ArrayList<>();
+                if (rooms != null) {
+                    for (String r : rooms.split(",")) {
+                        if (!r.isBlank()) list.add(r.strip());
+                    }
+                }
+                mgr.getPeerRegistry().setExposedRooms(d, list);
+                // Re-advertise the new exposed set + matching routes immediately.
+                if (isReachable(mgr, d)) { mgr.sendRoutingUpdate(d); mgr.sendRoomState(d); }
+                out.print("{\"ok\":true}");
+                return;
+            }
             default:
                 out.print("{\"error\":\"unknown action\"}");
         }
@@ -378,4 +433,11 @@ public class FederationApiServlet extends HttpServlet {
     }
 
     private String str(Object o) { return o == null ? "" : o.toString(); }
+
+    /** True if the peer currently has a live (REACHABLE) federation link. */
+    private boolean isReachable(FederationManager mgr, String domain) {
+        return mgr.getPeerRegistry().getPeer(domain)
+                  .map(p -> p.getStatus() == PeerServer.Status.REACHABLE)
+                  .orElse(false);
+    }
 }

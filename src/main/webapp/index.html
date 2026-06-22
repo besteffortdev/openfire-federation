@@ -142,6 +142,18 @@
         .badge-fed    { background: #fff3cd; color: #664d03; margin-left: 4px; }
         .badge-tls    { background: #f8d7da; color: #58151c; margin-left: 4px; }
         .badge-tls-ok { background: #d1e7dd; color: #0a3622; margin-left: 4px; }
+        .badge-untrusted { background: #f8d7da; color: #58151c; margin-left: 8px; }
+
+        /* ── Untrusted peer: exposed-room editor ──────────────────── */
+        .exposed-editor-row td { background: #fbfcfd; }
+        .exposed-editor { padding: 4px 2px 6px; }
+        .exposed-room {
+            display: flex; align-items: center; gap: 8px;
+            padding: 4px 6px; border-bottom: 1px solid #f0f0f0; font-size: 13px;
+        }
+        .exposed-room:last-of-type { border-bottom: none; }
+        .exposed-room input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
+        .exposed-room small { color: #6c757d; }
 
         /* ── Mapping connection state ─────────────────────────────── */
         .mapping-state          { font-size: 11px; font-weight: 600; margin-left: 6px; }
@@ -176,11 +188,18 @@
                     <input type="text" id="input-peer-domain"
                            placeholder="xmpp.example.com"
                            required autocomplete="off">
+                    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#495057;white-space:nowrap">
+                        <input type="checkbox" id="input-peer-untrusted"
+                               style="width:15px;height:15px;cursor:pointer">
+                        Untrusted
+                    </label>
                     <button type="submit" class="btn btn-primary">Add peer</button>
                 </form>
                 <small style="color:#999">
                     Enter the XMPP domain of the other Openfire server.
                     An S2S connection will be established automatically.
+                    Tick <strong>Untrusted</strong> for a peer that should see nothing until you
+                    explicitly expose specific rooms to it (e.g. a partner reached via an edge server).
                 </small>
             </div>
         </div>
