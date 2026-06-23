@@ -576,8 +576,36 @@ public class FederationManager {
     public void handleUnreachableDestinations(Collection<String> destinations) {
         for (String dest : destinations) {
             if (routingTable.isReachable(dest)) continue;   // still reachable another way
-            evictAllVirtualOccupantsFromDomain(dest);
+            evictAllVirtualOccupantsFromDomain(dest);       // by ORIGIN home domain
+            evictOccupantsForLostHub(dest);                 // by mapped hub (catches un-routed origins)
             roomManager.clearRemoteRooms(dest);
+        }
+    }
+
+    /**
+     * A room's federation hub just became unreachable: drop the occupants we learned through it.
+     *
+     * <p>{@link #evictAllVirtualOccupantsFromDomain} only evicts occupants whose HOME (origin)
+     * domain equals the lost destination — fine on a fully-trusted mesh, where every hop carries
+     * routes to all origins. But across an <b>untrusted edge</b>, routes are filtered down to the
+     * exposed rooms' hosting servers only: occupants from the servers <i>behind</i> the hub flow
+     * through as muc-forwards yet their origin domains are never routable here, so by-origin
+     * eviction misses them and they linger as ghosts after the link drops.
+     *
+     * <p>So for every local room mapped to the now-unreachable hub, if that was the room's only
+     * remaining reachable federation path, evict <i>every</i> virtual occupant in it — they all
+     * reached us through the hub we just lost. If the room still has another reachable mapping
+     * (multi-hub), we leave its occupants alone; the per-origin pass above covers what it can.
+     */
+    private void evictOccupantsForLostHub(String lostDomain) {
+        for (String localJid : roomManager.getRoomsWithAnyVirtualOccupants()) {
+            List<RoomMapping> mappings = roomManager.getMappingsForLocal(localJid);
+            boolean mappedToLost = mappings.stream().anyMatch(m -> m.remoteDomain().equals(lostDomain));
+            if (!mappedToLost) continue;
+            boolean anyReachable = mappings.stream().anyMatch(m -> routingTable.isReachable(m.remoteDomain()));
+            if (!anyReachable) {
+                evictAllVirtualOccupantsInRoom(localJid);
+            }
         }
     }
 
