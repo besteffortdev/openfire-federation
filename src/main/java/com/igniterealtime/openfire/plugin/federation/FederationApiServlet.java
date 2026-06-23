@@ -407,6 +407,12 @@ public class FederationApiServlet extends HttpServlet {
                         if (!r.isBlank()) list.add(r.strip());
                     }
                 }
+                // Defense-in-depth: never expose back to a peer the rooms it advertised to US
+                // (its own rooms or anything it relayed). The far side ignores own-origin ads, so
+                // it would be a no-op echo — strip it so the persisted set stays meaningful.
+                java.util.Set<String> viaPeer = new java.util.HashSet<>();
+                for (FederatedRoom r : mgr.getRoomManager().getRemoteRoomsViaPeer(d)) viaPeer.add(r.jid());
+                list.removeIf(viaPeer::contains);
                 mgr.getPeerRegistry().setExposedRooms(d, list);
                 // Re-advertise the new exposed set + matching routes immediately.
                 if (isReachable(mgr, d)) { mgr.sendRoutingUpdate(d); mgr.sendRoomState(d); }

@@ -181,16 +181,22 @@ function renderPeers(peers) {
 
 // ── Untrusted peers: exposed-room editor ───────────────────────────────────────
 
-/** Rooms this server can expose to an untrusted peer: its federated local rooms + all known remote rooms. */
-function exposableRooms() {
+/**
+ * Rooms this server can expose to untrusted peer p: its federated local rooms + known remote
+ * rooms, MINUS anything we received via p itself (its own rooms and whatever it relayed to us).
+ * Re-exposing those back to p is a meaningless echo and they aren't ours to share — p.advertisedRooms
+ * is exactly "rooms advertised to us via p" (the right-hand column), so we exclude them here.
+ */
+function exposableRooms(p) {
+    const excluded = new Set((p && p.advertisedRooms ? p.advertisedRooms : []).map(r => r.jid));
     const out = [];
     const seen = new Set();
     (lastData.localRooms || []).filter(r => r.federated).forEach(r => {
-        if (!seen.has(r.jid)) { seen.add(r.jid); out.push({ jid: r.jid, name: r.name, scope: 'local' }); }
+        if (!seen.has(r.jid) && !excluded.has(r.jid)) { seen.add(r.jid); out.push({ jid: r.jid, name: r.name, scope: 'local' }); }
     });
     const rr = lastData.remoteRooms || {};
     Object.keys(rr).forEach(origin => (rr[origin] || []).forEach(r => {
-        if (!seen.has(r.jid)) { seen.add(r.jid); out.push({ jid: r.jid, name: r.name, scope: origin }); }
+        if (!seen.has(r.jid) && !excluded.has(r.jid)) { seen.add(r.jid); out.push({ jid: r.jid, name: r.name, scope: origin }); }
     }));
     return out;
 }
@@ -200,10 +206,14 @@ function renderExposedEditor(p) {
     // ── Left: rooms we ALLOW TO LEAVE to this peer (editable). ──
     // Pending edits win over the persisted set so a refresh doesn't reset the admin's work.
     const checkedSet = editedExposed[p.domain] || new Set(p.exposedRooms || []);
-    const rooms = exposableRooms();
-    // Include any exposed jids no longer in the candidate list (e.g. peer offline) so they're not silently lost.
+    const rooms = exposableRooms(p);
+    // Include any exposed jids no longer in the candidate list (e.g. peer offline) so they're not
+    // silently lost — but NOT ones excluded because they came via this peer (can't expose back to it).
+    const excludedJids = new Set((p.advertisedRooms || []).map(r => r.jid));
     (p.exposedRooms || []).forEach(jid => {
-        if (!rooms.some(r => r.jid === jid)) rooms.push({ jid, name: '', scope: 'unavailable' });
+        if (!excludedJids.has(jid) && !rooms.some(r => r.jid === jid)) {
+            rooms.push({ jid, name: '', scope: 'unavailable' });
+        }
     });
 
     const leftList = rooms.length === 0
