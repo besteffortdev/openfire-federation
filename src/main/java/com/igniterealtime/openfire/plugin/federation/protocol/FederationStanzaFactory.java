@@ -155,6 +155,10 @@ public final class FederationStanzaFactory {
             r.addAttribute("jid",         room.jid());
             r.addAttribute("name",        room.name()        != null ? room.name()        : "");
             r.addAttribute("description", room.description() != null ? room.description() : "");
+            // Per-room visibility ACL travels with the ad so every relay enforces it (absent = all).
+            if (room.visibleTo() != null && !room.visibleTo().isEmpty()) {
+                r.addAttribute("visibleto", String.join(",", room.visibleTo()));
+            }
         }
         return iq;
     }

@@ -41,6 +41,12 @@ public class FederationApiServlet extends HttpServlet {
 
         sb.append("\"localDomain\":\"").append(esc(localDomain)).append("\",");
 
+        // Candidate servers for the per-room visibility ACL (routing-table destinations).
+        sb.append("\"routableServers\":[");
+        boolean frs = true;
+        for (String s : mgr.routableServers()) { if (!frs) sb.append(","); frs = false; sb.append("\"").append(esc(s)).append("\""); }
+        sb.append("],");
+
         // ── peers ─────────────────────────────────────────────────────────────
         sb.append("\"peers\":[");
         boolean first = true;
@@ -123,6 +129,12 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"description\":\"").append(esc(str(room.get("description")))).append("\",")
               .append("\"federated\":").append(room.get("federated")).append(",")
               .append("\"occupants\":").append(room.get("occupants")).append(",")
+              .append("\"visibleTo\":[");
+            @SuppressWarnings("unchecked")
+            List<String> visTo = (List<String>) room.getOrDefault("visibleTo", java.util.Collections.emptyList());
+            boolean fv = true;
+            for (String s : visTo) { if (!fv) sb.append(","); fv = false; sb.append("\"").append(esc(s)).append("\""); }
+            sb.append("],")
               .append("\"mappings\":[");
 
             boolean fm = true;
@@ -275,6 +287,23 @@ public class FederationApiServlet extends HttpServlet {
                     return;
                 }
                 mgr.setRoomFederated(jid.strip(), Boolean.parseBoolean(fedParam));
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "set-room-visibility": {
+                String jid     = req.getParameter("jid");
+                String servers = req.getParameter("servers");   // csv of server domains ("" = all)
+                if (jid == null || jid.isBlank()) {
+                    out.print("{\"error\":\"jid required\"}");
+                    return;
+                }
+                java.util.List<String> list = new java.util.ArrayList<>();
+                if (servers != null) {
+                    for (String s : servers.split(",")) {
+                        if (!s.isBlank()) list.add(s.strip().toLowerCase());
+                    }
+                }
+                mgr.setRoomVisibility(jid.strip(), list);
                 out.print("{\"ok\":true}");
                 return;
             }

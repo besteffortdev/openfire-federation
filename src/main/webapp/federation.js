@@ -15,6 +15,10 @@ let lastData = {};
 const expandedPeerRooms = new Set();
 // In-flight exposed-server edits per domain (server -> checked) so a 5 s refresh doesn't clobber them.
 const editedExposed = {};
+// Federated rooms whose per-room visibility editor is expanded (persisted across refreshes).
+const expandedRoomVis = new Set();
+// In-flight visibility edits per room jid (server -> checked) so a 5 s refresh doesn't clobber them.
+const editedRoomVis = {};
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -554,6 +558,9 @@ function renderLocalRooms(rooms) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty">No local MUC rooms found.</td></tr>';
         return;
     }
+    // Snapshot in-flight visibility edits before rebuilding so a poll mid-edit isn't lost.
+    expandedRoomVis.forEach(jid => captureRoomVisEdits(jid));
+
     tbody.innerHTML = rooms.map(r => {
         let mappedCell;
         if (r.mappings && r.mappings.length > 0) {
@@ -573,8 +580,17 @@ function renderLocalRooms(rooms) {
         } else {
             mappedCell = '<span style="color:#999;font-size:11px">not mapped</span>';
         }
+        // Per-room visibility control (only meaningful while the room is federated).
+        const visList = r.visibleTo || [];
+        const visExpanded = expandedRoomVis.has(r.jid);
+        const visCtl = r.federated
+            ? `<div style="margin-top:6px">
+                   <button class="btn-small" style="background:#e2e3e5;color:#383d41"
+                           onclick="toggleRoomVis('${escHtml(r.jid)}')">Visible: ${visList.length ? visList.length + ' server(s)' : 'all'} ${visExpanded ? '▾' : '▸'}</button>
+               </div>`
+            : '';
         const visible = r.jid.toLowerCase().includes(roomFilter) ? '' : 'display:none';
-        return `
+        let row = `
         <tr data-jid="${escHtml(r.jid)}" style="${visible}">
             <td><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small></td>
             <td>${escHtml(r.description || '—')}</td>
@@ -585,14 +601,97 @@ function renderLocalRooms(rooms) {
                            onchange="setRoomFederated('${escHtml(r.jid)}', this.checked)">
                     <span class="slider"></span>
                 </label>
+                ${visCtl}
             </td>
             <td>${mappedCell}</td>
         </tr>`;
+        if (r.federated && visExpanded) row += renderRoomVisEditor(r);
+        return row;
     }).join('');
 }
 
 function setRoomFederated(jid, federated) {
     post({ action: 'set-room', jid, federated: federated.toString() }).then(refresh);
+}
+
+// ── Per-room visibility ACL editor ─────────────────────────────────────────────
+
+function renderRoomVisEditor(r) {
+    const id = jidToElemId(r.jid);
+    const checkedSet = editedRoomVis[r.jid] || new Set(r.visibleTo || []);
+    // Candidate servers = routable destinations ∪ whatever is already in the ACL (so an offline /
+    // manually pre-provisioned server still shows and stays selectable).
+    const candidates = new Set(lastData.routableServers || []);
+    (r.visibleTo || []).forEach(s => candidates.add(s));
+    const rows = Array.from(candidates).sort().map(s => {
+        const checked = checkedSet.has(s) ? 'checked' : '';
+        const routable = (lastData.routableServers || []).includes(s);
+        const tag = routable ? '' : '<span class="badge badge-out" title="no current route — pending">pending</span>';
+        return `
+        <label class="exposed-room">
+            <input type="checkbox" class="roomvis-cb" data-jid="${escHtml(r.jid)}" value="${escHtml(s)}" ${checked}
+                   onchange="captureRoomVisEdits('${escHtml(r.jid)}')">
+            <span>${escHtml(s)}</span> ${tag}
+        </label>`;
+    }).join('') || '<p class="empty" style="margin:4px 0">No routable servers yet — add one below.</p>';
+
+    return `
+    <tr class="exposed-editor-row">
+        <td colspan="5">
+            <div class="exposed-col-h">Servers allowed to see <strong>${escHtml(r.name || r.jid)}</strong>
+                <span class="exposed-col-sub">leave all unchecked = visible to every peer; a checked server with no route yet is pending until one appears</span>
+            </div>
+            ${rows}
+            <div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <input type="text" id="roomvis-add-${id}" placeholder="add a server not listed yet"
+                       style="padding:4px 6px;font-size:12px;min-width:220px"
+                       onkeydown="if(event.key==='Enter'){addRoomVisServer('${escHtml(r.jid)}');event.preventDefault();}">
+                <button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="addRoomVisServer('${escHtml(r.jid)}')">Add</button>
+                <button class="btn-small btn-primary" onclick="saveRoomVis('${escHtml(r.jid)}')">Save</button>
+                <span id="roomvis-saved-${id}" style="display:none;color:#28a745;font-size:12px">Saved ✓</span>
+            </div>
+        </td>
+    </tr>`;
+}
+
+function captureRoomVisEdits(jid) {
+    const boxes = document.querySelectorAll(`.roomvis-cb[data-jid="${cssEscape(jid)}"]`);
+    if (boxes.length === 0 && !editedRoomVis[jid]) return;
+    const set = editedRoomVis[jid] || new Set();
+    boxes.forEach(b => { if (b.checked) set.add(b.value); else set.delete(b.value); });
+    editedRoomVis[jid] = set;
+}
+
+function toggleRoomVis(jid) {
+    if (expandedRoomVis.has(jid)) { captureRoomVisEdits(jid); expandedRoomVis.delete(jid); }
+    else expandedRoomVis.add(jid);
+    renderLocalRooms(lastData.localRooms || []);
+}
+
+function addRoomVisServer(jid) {
+    const id = jidToElemId(jid);
+    const input = document.getElementById('roomvis-add-' + id);
+    if (!input) return;
+    const srv = input.value.trim().toLowerCase();
+    if (!srv) return;
+    captureRoomVisEdits(jid);
+    (editedRoomVis[jid] = editedRoomVis[jid] || new Set()).add(srv);
+    input.value = '';
+    renderLocalRooms(lastData.localRooms || []);
+}
+
+function saveRoomVis(jid) {
+    captureRoomVisEdits(jid);
+    const set = editedRoomVis[jid] || new Set();
+    post({ action: 'set-room-visibility', jid, servers: Array.from(set).join(',') })
+        .then(result => {
+            if (result && result.ok) {
+                delete editedRoomVis[jid];
+                const badge = document.getElementById('roomvis-saved-' + jidToElemId(jid));
+                if (badge) { badge.style.display = 'inline'; setTimeout(() => { badge.style.display = 'none'; }, 2500); }
+                refresh();
+            }
+        });
 }
 
 /**

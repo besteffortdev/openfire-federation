@@ -147,6 +147,11 @@
         under the same domain name presents a different cert/CA), the peer is auto‑marked untrusted and flagged
         <em>⚠ cert changed</em>; federation toward it is blocked until you click <em>Trust new cert</em>. Needs a
         TLS‑secured S2S link — a plain dialback link presents no certificate and is not pinned.</li>
+    <li><strong>Per‑room visibility.</strong> Each federated room has a <em>Visible</em> control listing the servers
+        allowed to see it — pick from the routable peers, or add a server manually before it is reachable (the room
+        advertises to it automatically once a route appears). Empty = visible to all peers. The visibility set travels
+        with the advertisement so every relay confines the room to the path toward its allowed destinations; the ACL is
+        persisted and survives a listed server being offline. (On‑path servers must run this version or newer.)</li>
     <li><strong>Admin API CSRF.</strong> This tab's actions are protected by a double‑submit token. After
         upgrading the plugin, reload an already‑open Federation tab once so it picks up the new token.</li>
 </ul>

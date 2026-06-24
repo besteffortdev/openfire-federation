@@ -300,8 +300,12 @@ public class FederationIQHandler extends IQHandler {
             String jid  = r.attributeValue("jid");
             String name = r.attributeValue("name", "");
             String desc = r.attributeValue("description", "");
+            // Carry the per-room visibility ACL so we enforce it when relaying onward (absent = all).
+            String visibleto = r.attributeValue("visibleto", "");
+            java.util.Set<String> visibleTo = new java.util.LinkedHashSet<>();
+            for (String s : visibleto.split(",")) if (!s.isBlank()) visibleTo.add(s.strip().toLowerCase());
             if (jid != null) {
-                rooms.add(new FederatedRoom(jid, name, desc, sourceDomain));
+                rooms.add(new FederatedRoom(jid, name, desc, sourceDomain, visibleTo));
             }
         }
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;

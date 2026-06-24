@@ -32,6 +32,7 @@ public class FederatedRoomManager {
 
     private static final String PROP_ROOMS_INDEX = "federation.rooms.index";
     private static final String PROP_ROOM_PREFIX = "federation.room.federated.";
+    private static final String PROP_ROOM_VISIBLE = "federation.room.visibleto."; // + roomJid → csv of server domains
     private static final String PROP_MAP_INDEX   = "federation.rooms.mappings.index";
     private static final String PROP_MAP_COUNT   = "federation.rooms.mapping.%s.count";
     private static final String PROP_MAP_REMOTE  = "federation.rooms.mapping.%s.%d.remote";
@@ -48,6 +49,9 @@ public class FederatedRoomManager {
 
     /** Room JIDs (room@conference.domain) tagged locally as federatable. */
     private final Set<String> localFederatedRooms = ConcurrentHashMap.newKeySet();
+
+    /** Local room JID → per-room visibility ACL (server domains allowed to see it; empty = all). */
+    private final ConcurrentHashMap<String, Set<String>> roomVisibility = new ConcurrentHashMap<>();
 
     /** peer domain → rooms that peer has advertised as federatable. */
     private final ConcurrentHashMap<String, List<FederatedRoom>> remoteRooms = new ConcurrentHashMap<>();
@@ -94,7 +98,10 @@ public class FederatedRoomManager {
                 jid = jid.strip();
                 if (!jid.isEmpty() && JiveGlobals.getBooleanProperty(PROP_ROOM_PREFIX + jid, false)) {
                     localFederatedRooms.add(jid);
-                    Log.info("Loaded federated room: {}", jid);
+                    Set<String> vis = parseCsvSet(JiveGlobals.getProperty(PROP_ROOM_VISIBLE + jid, ""));
+                    if (!vis.isEmpty()) roomVisibility.put(jid, vis);
+                    Log.info("Loaded federated room: {}{}", jid,
+                             vis.isEmpty() ? "" : " (visible to " + vis.size() + " server(s))");
                 }
             }
         }
@@ -222,6 +229,9 @@ public class FederatedRoomManager {
             localFederatedRooms.add(roomJid);
         } else {
             localFederatedRooms.remove(roomJid);
+            // Drop the visibility ACL too — it's meaningless once the room isn't federated.
+            roomVisibility.remove(roomJid);
+            JiveGlobals.deleteProperty(PROP_ROOM_VISIBLE + roomJid);
         }
         JiveGlobals.setProperty(PROP_ROOM_PREFIX + roomJid, String.valueOf(federated));
         persistRoomsIndex();
@@ -230,6 +240,39 @@ public class FederatedRoomManager {
 
     public boolean isFederated(String roomJid) {
         return localFederatedRooms.contains(roomJid);
+    }
+
+    // ── Per-room visibility ACL (which destination servers may see this room) ───
+
+    /** Server domains allowed to see {@code roomJid}; empty = visible to all peers. */
+    public Set<String> getRoomVisibility(String roomJid) {
+        return roomVisibility.getOrDefault(roomJid, Collections.emptySet());
+    }
+
+    /** Replaces a room's visibility ACL and persists it. Empty/null = visible to all. */
+    public void setRoomVisibility(String roomJid, Collection<String> servers) {
+        Set<String> set = (servers == null) ? Collections.emptySet()
+                : servers.stream().filter(s -> s != null && !s.isBlank())
+                         .map(s -> s.strip().toLowerCase())
+                         .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+        if (set.isEmpty()) {
+            roomVisibility.remove(roomJid);
+            JiveGlobals.deleteProperty(PROP_ROOM_VISIBLE + roomJid);
+        } else {
+            roomVisibility.put(roomJid, set);
+            JiveGlobals.setProperty(PROP_ROOM_VISIBLE + roomJid, String.join(",", set));
+        }
+        Log.info("Room {} visibility → {}", roomJid, set.isEmpty() ? "all peers" : set);
+    }
+
+    private static Set<String> parseCsvSet(String csv) {
+        Set<String> out = new java.util.LinkedHashSet<>();
+        if (csv != null && !csv.isBlank()) {
+            for (String s : csv.split(",")) {
+                if (!s.isBlank()) out.add(s.strip().toLowerCase());
+            }
+        }
+        return out;
     }
 
     public Set<String> getLocalFederatedRoomJids() {
@@ -256,7 +299,8 @@ public class FederatedRoomManager {
                 }
                 if (room == null) continue;
                 result.add(new FederatedRoom(jid, room.getNaturalLanguageName(),
-                                             room.getDescription(), localDomain));
+                                             room.getDescription(), localDomain,
+                                             getRoomVisibility(jid)));
             } catch (Exception e) {
                 Log.warn("Could not read room details for {}: {}", jid, e.getMessage());
             }
@@ -286,6 +330,7 @@ public class FederatedRoomManager {
                 entry.put("name",        room.getNaturalLanguageName());
                 entry.put("description", room.getDescription());
                 entry.put("federated",   localFederatedRooms.contains(jid));
+                entry.put("visibleTo",   new ArrayList<>(getRoomVisibility(jid)));
                 entry.put("occupants",   room.getOccupantsCount());
                 entry.put("mappings",    mappingsList);
                 result.add(entry);

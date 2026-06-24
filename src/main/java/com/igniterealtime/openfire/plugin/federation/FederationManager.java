@@ -252,6 +252,20 @@ public class FederationManager {
             }
         }
         roomManager.setFederated(roomJid, federated);
+        reAdvertiseToAllReachable();
+    }
+
+    /**
+     * Sets a room's visibility ACL (server domains allowed to see it; empty = all) and re-advertises
+     * to every reachable peer so the change (including withdrawals from now-excluded peers) takes
+     * effect immediately. The ACL is persisted, so it survives a listed server being unavailable.
+     */
+    public void setRoomVisibility(String roomJid, Collection<String> servers) {
+        roomManager.setRoomVisibility(roomJid, servers);
+        reAdvertiseToAllReachable();
+    }
+
+    private void reAdvertiseToAllReachable() {
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 sendRoomAdvertisement(peer.getDomain());
@@ -713,9 +727,9 @@ public class FederationManager {
             if (peer.getDomain().equals(excludeDomain)) continue;
             if (via != null && via.contains(peer.getDomain())) continue;
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
-                // Untrusted peer: relay only the exposed subset; skip if it's allowed none
-                // (but still relay an empty list, which is a withdrawal and reveals nothing).
-                List<FederatedRoom> toSend = filterRoomsForPeer(peer.getDomain(), rooms);
+                // Untrusted-peer exposure + per-room visibility: relay only the allowed subset; skip if
+                // none remain (but still relay a genuinely empty list, which is a withdrawal).
+                List<FederatedRoom> toSend = filterRoomsForHop(peer.getDomain(), rooms);
                 if (toSend.isEmpty() && !rooms.isEmpty()) continue;
                 try {
                     XMPPServer.getInstance().getPacketRouter()
@@ -748,6 +762,35 @@ public class FederationManager {
         Set<String> exposed = peerRegistry.getExposedServers(domain);
         if (exposed.isEmpty()) return Collections.emptyList();
         return rooms.stream().filter(r -> exposed.contains(r.originServer())).collect(Collectors.toList());
+    }
+
+    /**
+     * Per-room visibility ACL check for one outbound hop. A room is sent/relayed to {@code peerDomain}
+     * when its ACL is empty (visible to all), names the peer directly, or the peer is the next hop
+     * toward some allowed destination — so the ad both reaches multi-hop destinations and stays on the
+     * route toward them. An allowed destination with no current route is simply pending until one appears.
+     */
+    private boolean roomVisibleAtHop(Set<String> visibleTo, String peerDomain) {
+        if (visibleTo == null || visibleTo.isEmpty()) return true;
+        if (visibleTo.contains(peerDomain)) return true;
+        for (String member : visibleTo) {
+            if (routingTable.findNextHop(member).map(h -> h.equals(peerDomain)).orElse(false)) return true;
+        }
+        return false;
+    }
+
+    /** Untrusted-peer server filter AND per-room visibility ACL, for one destination peer. */
+    private List<FederatedRoom> filterRoomsForHop(String toDomain, List<FederatedRoom> rooms) {
+        return filterRoomsForPeer(toDomain, rooms).stream()
+                .filter(r -> roomVisibleAtHop(r.visibleTo(), toDomain))
+                .collect(Collectors.toList());
+    }
+
+    /** Distinct routing-table destinations — the candidate servers for a room's visibility ACL. */
+    public Set<String> routableServers() {
+        Set<String> out = new LinkedHashSet<>();
+        for (RouteEntry e : routingTable.getAll()) out.add(e.destination());
+        return out;
     }
 
     /**
@@ -956,8 +999,8 @@ public class FederationManager {
         for (Map.Entry<String, List<FederatedRoom>> entry : roomManager.getRemoteRooms().entrySet()) {
             String originDomain = entry.getKey();
             if (originDomain.equals(toDomain)) continue;  // don't send a server its own rooms
-            List<FederatedRoom> rooms = filterRoomsForPeer(toDomain, entry.getValue());
-            if (rooms.isEmpty()) continue;                // untrusted peer: none of these exposed
+            List<FederatedRoom> rooms = filterRoomsForHop(toDomain, entry.getValue());
+            if (rooms.isEmpty()) continue;                // untrusted/not-visible: nothing for this peer
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.roomAdvertisement(
@@ -1019,7 +1062,7 @@ public class FederationManager {
     }
 
     public void sendRoomAdvertisement(String toDomain) {
-        List<FederatedRoom> rooms = filterRoomsForPeer(toDomain, roomManager.getLocalFederatedRoomsWithDetails());
+        List<FederatedRoom> rooms = filterRoomsForHop(toDomain, roomManager.getLocalFederatedRoomsWithDetails());
         try {
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.roomAdvertisement(toDomain, rooms));
