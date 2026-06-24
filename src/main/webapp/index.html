@@ -204,6 +204,8 @@
                     An S2S connection will be established automatically.
                     Tick <strong>Untrusted</strong> for a peer that should see nothing until you
                     explicitly expose specific servers to it (e.g. a partner reached via an edge server).
+                    Peers under a different parent domain are ticked automatically. The S2S certificate
+                    is pinned on first contact; if it later changes, the peer is auto-untrusted and flagged.
                 </small>
             </div>
         </div>

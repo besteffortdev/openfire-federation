@@ -27,6 +27,7 @@ public class PeerRegistry {
     private static final String PROP_EXPOSED_SRV = "federation.peer.exposedsrv."; // + domain → csv of server domains
     /** Legacy room-level exposure key (1.3.38–41); now dead — deleted on load/remove. */
     private static final String PROP_EXPOSED_LEGACY = "federation.peer.exposed.";
+    private static final String PROP_CERTFP     = "federation.peer.certfp.";    // + domain → sha256 hex of pinned cert
 
     private final ConcurrentHashMap<String, PeerServer> peers = new ConcurrentHashMap<>();
 
@@ -61,6 +62,9 @@ public class PeerRegistry {
                         Log.info("Loaded untrusted peer {} with {} exposed server(s)",
                                  domain, peer.getExposedServers().size());
                     }
+                    // Restore the pinned S2S cert fingerprint (TOFU). Mismatch is re-derived live.
+                    String fp = JiveGlobals.getProperty(PROP_CERTFP + domain, "").strip();
+                    if (!fp.isEmpty()) peer.setPinnedCertFp(fp);
                     peers.put(domain, peer);
                 }
             }
@@ -99,6 +103,7 @@ public class PeerRegistry {
             JiveGlobals.deleteProperty(PROP_UNTRUSTED + domain);
             JiveGlobals.deleteProperty(PROP_EXPOSED_SRV + domain);
             JiveGlobals.deleteProperty(PROP_EXPOSED_LEGACY + domain);
+            JiveGlobals.deleteProperty(PROP_CERTFP + domain);
             persist();
         }
         return removed;
@@ -141,6 +146,41 @@ public class PeerRegistry {
         } else {
             JiveGlobals.setProperty(PROP_EXPOSED_SRV + domain, String.join(",", stored));
         }
+    }
+
+    // ── S2S certificate pinning (TOFU) ─────────────────────────────────────────
+
+    /** The pinned top-of-chain cert fingerprint (hex), or null if not yet pinned. */
+    public String getPinnedCertFp(String domain) {
+        PeerServer peer = peers.get(domain);
+        return peer == null ? null : peer.getPinnedCertFp();
+    }
+
+    /** Pins (or clears) a peer's cert fingerprint and persists it. No-op if unknown. */
+    public void setPinnedCertFp(String domain, String fp) {
+        PeerServer peer = peers.get(domain);
+        if (peer == null) return;
+        peer.setPinnedCertFp(fp);
+        if (fp == null || fp.isBlank()) {
+            JiveGlobals.deleteProperty(PROP_CERTFP + domain);
+        } else {
+            JiveGlobals.setProperty(PROP_CERTFP + domain, fp);
+        }
+    }
+
+    public void setLastSeenCertFp(String domain, String fp) {
+        PeerServer peer = peers.get(domain);
+        if (peer != null) peer.setLastSeenCertFp(fp);
+    }
+
+    public void setCertMismatch(String domain, boolean mismatch) {
+        PeerServer peer = peers.get(domain);
+        if (peer != null) peer.setCertMismatch(mismatch);
+    }
+
+    public boolean isCertMismatch(String domain) {
+        PeerServer peer = peers.get(domain);
+        return peer != null && peer.isCertMismatch();
     }
 
     /** Marks a link blocked because the two ends disagree on trust. Not persisted (re-derived). */

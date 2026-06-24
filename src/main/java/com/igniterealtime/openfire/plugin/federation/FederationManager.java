@@ -17,12 +17,14 @@ import org.jivesoftware.openfire.muc.MultiUserChatService;
 import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.openfire.session.IncomingServerSession;
 import org.jivesoftware.openfire.session.OutgoingServerSession;
+import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Presence;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -764,6 +766,115 @@ public class FederationManager {
             out.add(dest);
         }
         return out;
+    }
+
+    // ── Trust-on-first-use: foreign-domain default + S2S cert pinning ───────────
+    //
+    // A peer whose PARENT domain differs from ours is treated as a stranger and defaults to
+    // untrusted on add. Separately, the top-of-chain cert each peer presents on the S2S link is
+    // pinned on first sighting; if it later changes (a server re-created under the same domain
+    // name presents a different cert/CA) the peer is auto-untrusted and the admin is alerted.
+
+    /** Number of trailing DNS labels that define the "parent" (registrable) domain. */
+    private int trustDomainLabels() {
+        return Math.max(1, JiveGlobals.getIntProperty("plugin.federation.trustDomainLabels", 2));
+    }
+
+    /** The last {@link #trustDomainLabels()} dot-separated labels of {@code domain}, lowercased. */
+    private String parentDomain(String domain) {
+        if (domain == null) return "";
+        String[] labels = domain.strip().toLowerCase().split("\\.");
+        int n = Math.min(trustDomainLabels(), labels.length);
+        return String.join(".", Arrays.copyOfRange(labels, labels.length - n, labels.length));
+    }
+
+    /** True if {@code peerDomain} is under a different parent domain than this server. */
+    public boolean isForeignDomain(String peerDomain) {
+        String local = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        return !parentDomain(peerDomain).equals(parentDomain(local));
+    }
+
+    /** SHA-256 (lowercase hex) of a certificate's encoded form, or null on failure. */
+    private static String sha256Hex(java.security.cert.Certificate cert) {
+        try {
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(cert.getEncoded());
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte b : d) sb.append(Character.forDigit((b >> 4) & 0xF, 16))
+                               .append(Character.forDigit(b & 0xF, 16));
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** The top-of-chain cert the peer presents on the S2S link (outgoing session preferred). */
+    private java.security.cert.Certificate[] peerCertChain(String domain) {
+        String local = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        SessionManager sm = XMPPServer.getInstance().getSessionManager();
+        try {
+            OutgoingServerSession out = sm.getOutgoingServerSession(new DomainPair(local, domain));
+            if (out != null) {
+                java.security.cert.Certificate[] c = out.getPeerCertificates();
+                if (c != null && c.length > 0) return c;
+            }
+            for (IncomingServerSession in : sm.getIncomingServerSessions(domain)) {
+                java.security.cert.Certificate[] c = in.getPeerCertificates();
+                if (c != null && c.length > 0) return c;
+            }
+        } catch (Exception e) {
+            Log.debug("Could not read S2S certificates for {}: {}", domain, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Observes the peer's current S2S cert and applies TOFU pinning: pins on first sighting,
+     * accepts a matching cert, and on a CHANGED cert auto-untrusts the peer and raises an alert.
+     * Called from the poll loop for each REACHABLE peer. No-op when no certificate is available
+     * (e.g. a plain server-dialback link with no TLS).
+     */
+    public void observePeerCertificate(String domain) {
+        java.security.cert.Certificate[] chain = peerCertChain(domain);
+        if (chain == null) return;                       // no TLS cert visible — nothing to pin
+        String fp = sha256Hex(chain[chain.length - 1]);  // top-of-chain (closest to root presented)
+        if (fp == null) return;
+        peerRegistry.setLastSeenCertFp(domain, fp);
+
+        String pinned = peerRegistry.getPinnedCertFp(domain);
+        if (pinned == null || pinned.isBlank()) {
+            peerRegistry.setPinnedCertFp(domain, fp);
+            peerRegistry.setCertMismatch(domain, false);
+            Log.info("Pinned S2S cert for {} ({}…)", domain, fp.substring(0, Math.min(12, fp.length())));
+            return;
+        }
+        if (pinned.equals(fp)) {
+            peerRegistry.setCertMismatch(domain, false);
+            return;
+        }
+        // Cert changed under the same domain name — possible impersonation. Act once on transition.
+        if (!peerRegistry.isCertMismatch(domain)) {
+            peerRegistry.setCertMismatch(domain, true);
+            Log.warn("SECURITY: S2S cert for {} changed (pinned={}…, seen={}…) — auto-untrusting; "
+                   + "admin must accept the new cert to restore", domain,
+                     pinned.substring(0, Math.min(12, pinned.length())),
+                     fp.substring(0, Math.min(12, fp.length())));
+            if (!peerRegistry.isUntrusted(domain)) {
+                peerRegistry.setUntrusted(domain, true);
+                applyLocalTrustChange(domain);
+            }
+        }
+    }
+
+    /** Admin accepted a changed cert: re-pin the last observed fingerprint and clear the alert. */
+    public void acceptNewCertificate(String domain) {
+        String fp = peerRegistry.getPeer(domain).map(PeerServer::getLastSeenCertFp).orElse(null);
+        if (fp == null || fp.isBlank()) {
+            Log.warn("accept-cert for {} ignored — no observed certificate to pin", domain);
+            return;
+        }
+        peerRegistry.setPinnedCertFp(domain, fp);
+        peerRegistry.setCertMismatch(domain, false);
+        Log.info("Admin accepted new S2S cert for {} ({}…)", domain, fp.substring(0, Math.min(12, fp.length())));
     }
 
     // ── Link-level trust negotiation ────────────────────────────────────────────

@@ -268,6 +268,12 @@ public class S2SMonitor {
                 s2sUp = false;
             }
 
+            // Trust-on-first-use cert check on every live link (catches startup pin + any
+            // post-reconnect change), independent of the status transition below.
+            if (s2sUp) {
+                federationManager.observePeerCertificate(domain);
+            }
+
             PeerServer.Status prev = peer.getStatus();
             PeerServer.Status next = s2sUp ? PeerServer.Status.REACHABLE : PeerServer.Status.UNREACHABLE;
 

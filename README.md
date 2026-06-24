@@ -141,9 +141,19 @@ The federation trust boundary is enforced at several points:
   set of servers.
   - **Trust is a property of the link.** Each end announces its stance (trusted/untrusted) in `peer-announce`;
     if the two disagree, the link is **blocked** (status *Trust mismatch*) and no federation flows until **both**
-    admins set the same trust level. It then comes up automatically — no reconnect needed. The *Rooms* editor
-    shows both directions: on the left, the rooms you allow to **leave** to that peer (editable); on the right,
-    the rooms that peer is **advertising to you** (read‑only).
+    admins set the same trust level. It then comes up automatically — no reconnect needed. The *Servers* editor
+    shows both directions: on the left, the servers you expose to that peer (editable); on the right, the servers
+    that peer is **advertising through** to you (read‑only).
+  - **Untrusted by default for foreign peers.** When you add a peer whose **parent domain** differs from this
+    server's (the last two DNS labels, e.g. `example.net`; adjustable via `plugin.federation.trustDomainLabels`),
+    the *Untrusted* box is ticked automatically — a stranger shares nothing until you choose what it may see.
+    Same‑parent peers default trusted.
+- **S2S certificate pinning (trust‑on‑first‑use).** The first time a peer's S2S link comes up, the plugin pins the
+  SHA‑256 of the top‑of‑chain certificate it presents. If that certificate later **changes** — e.g. a server is
+  re‑created under the same domain name and presents a different cert/CA — the peer is **auto‑marked untrusted** and
+  flagged in the Peers list (*⚠ cert changed*); federation toward it is blocked until you review and click
+  *Trust new cert* to pin the new one. Requires a TLS‑secured S2S link (a plain server‑dialback link presents no
+  certificate, so nothing is pinned).
 - **Admin API CSRF.** The Federation tab's API uses a double‑submit token (a `fed-csrf` cookie echoed back as a
   request parameter), so a forged request from another site cannot trigger peer/room changes in a logged‑in
   admin's browser. After upgrading, reload an already‑open Federation tab once so its scripts pick up the token.

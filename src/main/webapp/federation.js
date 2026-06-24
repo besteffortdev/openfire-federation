@@ -77,19 +77,37 @@ function updateStatusBadge(peers) {
 // ── Peers tab ─────────────────────────────────────────────────────────────────
 
 function bindPeerForm() {
+    const domainField = document.getElementById('input-peer-domain');
+    const untrustedCb = document.getElementById('input-peer-untrusted');
+    // Default the Untrusted box ON for a foreign parent domain (admin can still override).
+    if (domainField && untrustedCb) {
+        domainField.addEventListener('input', () => {
+            untrustedCb.checked = isForeignDomain(domainField.value.trim());
+        });
+    }
     document.getElementById('form-add-peer').addEventListener('submit', e => {
         e.preventDefault();
-        const domain = document.getElementById('input-peer-domain').value.trim();
+        const domain = domainField.value.trim();
         if (!domain) return;
-        const untrustedCb = document.getElementById('input-peer-untrusted');
         const untrusted = untrustedCb ? untrustedCb.checked : false;
         post({ action: 'add-peer', domain, untrusted })
             .then(() => {
-                document.getElementById('input-peer-domain').value = '';
+                domainField.value = '';
                 if (untrustedCb) untrustedCb.checked = false;
                 refresh();
             });
     });
+}
+
+/** Parent (registrable) domain = last two DNS labels. Mirrors the server-side default. */
+function parentOf(domain) {
+    return String(domain || '').toLowerCase().split('.').slice(-2).join('.');
+}
+
+/** True if `domain` is under a different parent domain than this server. */
+function isForeignDomain(domain) {
+    if (!domain || !lastData.localDomain) return false;
+    return parentOf(domain) !== parentOf(lastData.localDomain);
 }
 
 function renderPeers(peers) {
@@ -160,17 +178,39 @@ function renderPeers(peers) {
             ? `<span class="badge badge-untrusted" title="Shares only the servers you expose">untrusted · ${(p.exposedServers || []).length} server(s)</span>`
             : '';
 
+        // S2S cert pinning: a changed cert (possible impersonation) shows a red alert + accept
+        // button; a quietly-pinned cert shows an unobtrusive lock.
+        const certBadge = p.certMismatch
+            ? `<span class="badge badge-untrusted" title="The S2S certificate changed since it was first pinned">⚠ cert changed</span>`
+            : (p.certPinned ? `<span class="badge badge-in" title="S2S certificate pinned (trust-on-first-use)">🔒 pinned</span>` : '');
+        const certBtn = p.certMismatch
+            ? `<button class="btn-small btn-warn" style="margin-right:4px"
+                       onclick="acceptCert('${escHtml(p.domain)}')">Trust new cert</button>`
+            : '';
+
         let row = `
         <tr>
-            <td>${escHtml(p.domain)}${untrustedBadge}</td>
+            <td>${escHtml(p.domain)}${untrustedBadge}${certBadge}</td>
             <td><span class="status-dot ${statusClass(p.status)}"></span> ${statusLabel}</td>
             <td>${p.lastSeen ? new Date(p.lastSeen).toLocaleString() : '—'}</td>
             <td style="white-space:nowrap">
-                ${actionBtns}${trustBtn}${roomsBtn}
+                ${certBtn}${actionBtns}${trustBtn}${roomsBtn}
                 <button class="btn-small btn-danger"
                         onclick="removePeer('${escHtml(p.domain)}')">Remove</button>
             </td>
         </tr>`;
+
+        if (p.certMismatch) {
+            row += `
+        <tr class="exposed-editor-row">
+            <td colspan="4" style="color:#58151c">
+                ⚠ <strong>${escHtml(p.domain)}</strong> presented a different S2S certificate than the
+                one pinned on first contact — this can mean a server was re-created, or an impersonation
+                attempt. The peer has been auto-marked untrusted. If you trust the change, click
+                <em>Trust new cert</em>; otherwise investigate before restoring trust.
+            </td>
+        </tr>`;
+        }
 
         if (p.untrusted && expanded) {
             row += renderExposedServerEditor(p);
@@ -269,6 +309,13 @@ function setUntrusted(domain, untrusted) {
         if (!untrusted) { expandedPeerRooms.delete(domain); delete editedExposed[domain]; }
         refresh();
     });
+}
+
+function acceptCert(domain) {
+    if (!confirm('Trust the new S2S certificate for ' + domain + '?\n\n'
+        + 'Only do this if you know the server was legitimately re-created or its certificate '
+        + 'was renewed. The new certificate will be pinned and the alert cleared.')) return;
+    post({ action: 'accept-cert', domain }).then(refresh);
 }
 
 function saveExposedServers(domain) {

@@ -53,6 +53,9 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"lastSeen\":").append(p.getLastSeenMillis()).append(",")
               .append("\"nextRetryAt\":").append(mgr.getNextRetryAt(p.getDomain())).append(",")
               .append("\"untrusted\":").append(p.isUntrusted()).append(",")
+              .append("\"foreign\":").append(mgr.isForeignDomain(p.getDomain())).append(",")
+              .append("\"certPinned\":").append(p.getPinnedCertFp() != null).append(",")
+              .append("\"certMismatch\":").append(p.isCertMismatch()).append(",")
               .append("\"exposedServers\":[");
             boolean fe = true;
             for (String srv : p.getExposedServers()) {
@@ -242,7 +245,13 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 String d = domain.strip().toLowerCase();
                 mgr.addPeer(d);
-                if (Boolean.parseBoolean(req.getParameter("untrusted"))) {
+                // Default the untrusted flag from the parent-domain rule when the caller didn't
+                // specify it (the UI always sends the checkbox; this guards API callers).
+                String untrustedParam = req.getParameter("untrusted");
+                boolean untrusted = untrustedParam != null
+                        ? Boolean.parseBoolean(untrustedParam.strip())
+                        : mgr.isForeignDomain(d);
+                if (untrusted) {
                     mgr.getPeerRegistry().setUntrusted(d, true);
                     mgr.applyLocalTrustChange(d);   // announce our untrusted stance to the peer
                 }
@@ -428,6 +437,21 @@ public class FederationApiServlet extends HttpServlet {
                 mgr.getPeerRegistry().setExposedServers(d, list);
                 // Re-advertise the new exposed set + matching routes immediately.
                 if (isReachable(mgr, d)) { mgr.sendRoutingUpdate(d); mgr.sendRoomState(d); }
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "accept-cert": {
+                String domain = req.getParameter("domain");
+                if (domain == null || domain.isBlank()) {
+                    out.print("{\"error\":\"domain required\"}");
+                    return;
+                }
+                String d = domain.strip().toLowerCase();
+                if (!mgr.getPeerRegistry().contains(d)) {
+                    out.print("{\"error\":\"not a configured peer\"}");
+                    return;
+                }
+                mgr.acceptNewCertificate(d);
                 out.print("{\"ok\":true}");
                 return;
             }

@@ -50,6 +50,23 @@ public final class PeerServer {
      */
     private volatile Boolean remoteUntrusted = null;
 
+    /**
+     * SHA-256 (hex) of the top-of-chain certificate this peer presented on the S2S link, pinned
+     * on first sighting (TOFU). null = not yet pinned. A later observed cert that differs from
+     * this pin is treated as possible impersonation — see {@link #certMismatch}. Persisted.
+     */
+    private volatile String pinnedCertFp = null;
+
+    /** The most recently observed top-of-chain cert fingerprint, used to (re)pin on admin accept. */
+    private volatile String lastSeenCertFp = null;
+
+    /**
+     * True when the last observed S2S cert fingerprint differs from {@link #pinnedCertFp}.
+     * Transient — re-derived each observation cycle, never persisted. While set, the peer is
+     * auto-untrusted and the admin is alerted until they accept the new cert.
+     */
+    private volatile boolean certMismatch = false;
+
     public PeerServer(String domain) {
         this.domain = domain;
     }
@@ -80,6 +97,18 @@ public final class PeerServer {
     public Boolean getRemoteUntrusted() { return remoteUntrusted; }
 
     public void setRemoteUntrusted(boolean remoteUntrusted) { this.remoteUntrusted = remoteUntrusted; }
+
+    public String getPinnedCertFp() { return pinnedCertFp; }
+
+    public void setPinnedCertFp(String fp) { this.pinnedCertFp = fp; }
+
+    public String getLastSeenCertFp() { return lastSeenCertFp; }
+
+    public void setLastSeenCertFp(String fp) { this.lastSeenCertFp = fp; }
+
+    public boolean isCertMismatch() { return certMismatch; }
+
+    public void setCertMismatch(boolean certMismatch) { this.certMismatch = certMismatch; }
 
     public Status getStatus() { return status.get(); }
 
