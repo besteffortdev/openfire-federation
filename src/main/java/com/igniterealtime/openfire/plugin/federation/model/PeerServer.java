@@ -31,15 +31,16 @@ public final class PeerServer {
 
     /**
      * Untrusted peers (e.g. a foreign organisation reached only through an edge server)
-     * receive NO routing updates and NO room advertisements by default — only the rooms
-     * the admin has explicitly placed in {@link #exposedRooms}, and only routes to those
-     * rooms' hosting servers.  Inbound mapping/forward from an untrusted peer is likewise
-     * gated to the exposed set.  Default false = a fully-trusted peer.
+     * receive NO routing updates and NO room advertisements by default — only the servers
+     * the admin has explicitly placed in {@link #exposedServers}.  Exposing a server means
+     * the peer sees that server's federated rooms (and a route to reach it); local rooms are
+     * exposed by listing our own domain.  Inbound mapping/forward from an untrusted peer is
+     * likewise gated to those servers.  Default false = a fully-trusted peer.
      */
     private volatile boolean untrusted = false;
 
-    /** Room JIDs an untrusted peer is allowed to see/map (empty = expose nothing). */
-    private final Set<String> exposedRooms = ConcurrentHashMap.newKeySet();
+    /** Server domains an untrusted peer is allowed to see/map onto (empty = expose nothing). */
+    private final Set<String> exposedServers = ConcurrentHashMap.newKeySet();
 
     /**
      * The remote end's last-declared trust stance, learned from its peer-announce
@@ -59,20 +60,20 @@ public final class PeerServer {
 
     public void setUntrusted(boolean untrusted) { this.untrusted = untrusted; }
 
-    public Set<String> getExposedRooms() { return exposedRooms; }
+    public Set<String> getExposedServers() { return exposedServers; }
 
-    public void setExposedRooms(Collection<String> rooms) {
-        exposedRooms.clear();
-        if (rooms != null) {
-            for (String r : rooms) {
-                if (r != null && !r.isBlank()) exposedRooms.add(r.strip());
+    public void setExposedServers(Collection<String> servers) {
+        exposedServers.clear();
+        if (servers != null) {
+            for (String s : servers) {
+                if (s != null && !s.isBlank()) exposedServers.add(s.strip());
             }
         }
     }
 
-    /** True if {@code roomJid} is on this peer's exposed list. */
-    public boolean exposes(String roomJid) {
-        return roomJid != null && exposedRooms.contains(roomJid);
+    /** True if {@code serverDomain} is on this peer's exposed list. */
+    public boolean exposesServer(String serverDomain) {
+        return serverDomain != null && exposedServers.contains(serverDomain);
     }
 
     /** The remote's last-declared trust stance, or null if not yet heard. */

@@ -129,16 +129,16 @@
         the Security toggle on this tab) for open federation, accepting any server that connects.</li>
     <li><strong>Untrusted peers (filtered exposure).</strong> Tick <em>Untrusted</em> when adding a peer (or use
         <em>Make untrusted</em> on its row) and it gets <strong>no</strong> routing updates and <strong>no</strong>
-        room advertisements. Open its <em>Rooms</em> editor to choose exactly which rooms it may see — from your
-        federated local rooms and any remote rooms reachable through this server. It is sent only those rooms and
-        only routes to the servers hosting them, and any mapping/message it sends toward a room you did
-        <em>not</em> expose is dropped (logged <code>SECURITY:</code>). Use this for an edge server fronting a
-        partner organisation that should see only a curated set of rooms.
+        room advertisements. Open its <em>Servers</em> editor to choose exactly which servers it may see — this
+        server itself (its federated local rooms) and any server reachable through this one. It is sent only the
+        federated rooms homed on those servers, plus a route to each, and any mapping/message it sends toward a room
+        homed on a server you did <em>not</em> expose is dropped (logged <code>SECURITY:</code>). Use this for an
+        edge server fronting a partner organisation that should see only a curated set of servers.
         <br><strong>Trust is per‑link:</strong> both ends must set the same trust level. If one side marks the link
         untrusted and the other leaves it trusted, the link shows <em>Trust mismatch</em> and carries no
-        federation until they agree — then it comes up on its own. The <em>Rooms</em> editor has two columns: on
-        the left the rooms you allow to <em>leave</em> to that peer (editable), on the right the rooms that peer is
-        <em>advertising to you</em> (read‑only).</li>
+        federation until they agree — then it comes up on its own. The <em>Servers</em> editor has two columns: on
+        the left the servers you expose to that peer (editable), on the right the servers that peer is
+        <em>advertising through</em> to you (read‑only).</li>
     <li><strong>Admin API CSRF.</strong> This tab's actions are protected by a double‑submit token. After
         upgrading the plugin, reload an already‑open Federation tab once so it picks up the new token.</li>
 </ul>
@@ -150,7 +150,7 @@
     <li><strong>Disable</strong> — an authoritative, persistent block. The disabled peer cannot re‑establish
         the connection (even by re‑adding) until you re‑enable it.</li>
     <li><strong>Untrusted</strong> — toggle filtered exposure for a peer (see <a href="#">Security</a>). An
-        untrusted peer's <em>Rooms</em> editor lets you pick precisely which rooms it may see; everything else in
+        untrusted peer's <em>Servers</em> editor lets you pick precisely which servers it may see; everything else in
         your network stays hidden from it.</li>
 </ul>
 

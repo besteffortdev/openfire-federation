@@ -24,7 +24,7 @@ that have no direct link. End users do nothing special — they just join their 
 - **Ghost‑occupant cleanup** — when a peer or route drops, *or a remote user disconnects (including several
   hops away)*, that user is cleanly removed from every local room across the federation.
 - **Access control** — federation traffic only ever touches rooms you explicitly enable; an optional peer
-  allowlist restricts who may federate at all; **untrusted peers** see only the rooms you expose to them
+  allowlist restricts who may federate at all; **untrusted peers** see only the servers you expose to them
   (ideal for an edge server fronting a partner network); the admin API is CSRF‑protected. See [Security](#security).
 - **Admin console UI** — manage peers, watch the routing table and S2S sessions, and federate rooms from a
   dedicated **Federation** tab.
@@ -132,12 +132,13 @@ The federation trust boundary is enforced at several points:
   Peer Servers tab) for open federation, where any server that can connect is accepted and auto‑registered.
 - **Untrusted peers (filtered exposure).** Mark a peer **Untrusted** (the checkbox next to *Add peer*, or the
   *Make untrusted* button on its row) and it receives **no** routing updates and **no** room advertisements at
-  all. You then pick — per peer, via its *Rooms* editor — exactly which rooms it may see, chosen from this
-  server's federated local rooms *and* any remote rooms reachable through it. The untrusted peer is sent only
-  those room advertisements and only routes to the servers hosting them, so it learns nothing about the rest of
-  your topology. Enforcement is two‑way: inbound `room-mapping`/`muc-forward` from an untrusted peer aimed at any
-  room not on its exposed list is dropped and logged with a `SECURITY:` tag. This is the **edge‑server** pattern:
-  federate with a partner organisation through one gateway that exposes only a curated set of rooms.
+  all. You then pick — per peer, via its *Servers* editor — exactly which **servers** it may see, chosen from
+  this server itself (its federated local rooms) *and* any server reachable through it. The untrusted peer is sent
+  only the federated rooms homed on those servers, plus a route to each, so it learns nothing about the rest of
+  your topology. Enforcement is two‑way: inbound `room-mapping`/`muc-forward` from an untrusted peer aimed at a
+  room homed on a server it was **not** exposed to is dropped and logged with a `SECURITY:` tag. This is the
+  **edge‑server** pattern: federate with a partner organisation through one gateway that exposes only a curated
+  set of servers.
   - **Trust is a property of the link.** Each end announces its stance (trusted/untrusted) in `peer-announce`;
     if the two disagree, the link is **blocked** (status *Trust mismatch*) and no federation flows until **both**
     admins set the same trust level. It then comes up automatically — no reconnect needed. The *Rooms* editor

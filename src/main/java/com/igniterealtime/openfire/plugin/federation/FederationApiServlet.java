@@ -53,23 +53,36 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"lastSeen\":").append(p.getLastSeenMillis()).append(",")
               .append("\"nextRetryAt\":").append(mgr.getNextRetryAt(p.getDomain())).append(",")
               .append("\"untrusted\":").append(p.isUntrusted()).append(",")
-              .append("\"exposedRooms\":[");
+              .append("\"exposedServers\":[");
             boolean fe = true;
-            for (String room : p.getExposedRooms()) {
+            for (String srv : p.getExposedServers()) {
                 if (!fe) sb.append(",");
                 fe = false;
-                sb.append("\"").append(esc(room)).append("\"");
+                sb.append("\"").append(esc(srv)).append("\"");
             }
-            // Rooms this peer advertises TO us (right-hand column of the per-link view); only
-            // computed for untrusted peers to keep the trusted-peer payload small.
-            sb.append("],\"advertisedRooms\":[");
+            // Candidate servers we may expose, and the servers this peer advertises THROUGH to us
+            // (right-hand column of the per-link view); only computed for untrusted peers to keep
+            // the trusted-peer payload small.
+            sb.append("],\"exposableServers\":[");
             if (p.isUntrusted()) {
-                boolean fa = true;
+                boolean fx = true;
+                for (String srv : mgr.exposableServers(p.getDomain())) {
+                    if (!fx) sb.append(",");
+                    fx = false;
+                    sb.append("\"").append(esc(srv)).append("\"");
+                }
+            }
+            sb.append("],\"advertisedVia\":[");
+            if (p.isUntrusted()) {
+                java.util.Set<String> via = new java.util.LinkedHashSet<>();
                 for (FederatedRoom room : mgr.getRoomManager().getRemoteRoomsViaPeer(p.getDomain())) {
+                    via.add(room.originServer());
+                }
+                boolean fa = true;
+                for (String srv : via) {
                     if (!fa) sb.append(",");
                     fa = false;
-                    sb.append("{\"jid\":\"").append(esc(room.jid())).append("\",")
-                      .append("\"name\":\"").append(esc(room.name())).append("\"}");
+                    sb.append("\"").append(esc(srv)).append("\"");
                 }
             }
             sb.append("]}");
@@ -389,9 +402,9 @@ public class FederationApiServlet extends HttpServlet {
                 out.print("{\"ok\":true}");
                 return;
             }
-            case "set-exposed-rooms": {
-                String domain = req.getParameter("domain");
-                String rooms  = req.getParameter("rooms");   // comma-separated room JIDs ("" = none)
+            case "set-exposed-servers": {
+                String domain  = req.getParameter("domain");
+                String servers = req.getParameter("servers");  // comma-separated server domains ("" = none)
                 if (domain == null || domain.isBlank()) {
                     out.print("{\"error\":\"domain required\"}");
                     return;
@@ -401,19 +414,18 @@ public class FederationApiServlet extends HttpServlet {
                     out.print("{\"error\":\"not a configured peer\"}");
                     return;
                 }
+                // Constrain to the legitimate candidate set: this server plus destinations not
+                // reachable via the peer itself. This drops the peer's own domain / echoed servers
+                // as defense-in-depth, so the persisted set stays meaningful.
+                java.util.Set<String> allowed = mgr.exposableServers(d);
                 java.util.List<String> list = new java.util.ArrayList<>();
-                if (rooms != null) {
-                    for (String r : rooms.split(",")) {
-                        if (!r.isBlank()) list.add(r.strip());
+                if (servers != null) {
+                    for (String s : servers.split(",")) {
+                        String srv = s.strip().toLowerCase();
+                        if (!srv.isBlank() && allowed.contains(srv)) list.add(srv);
                     }
                 }
-                // Defense-in-depth: never expose back to a peer the rooms it advertised to US
-                // (its own rooms or anything it relayed). The far side ignores own-origin ads, so
-                // it would be a no-op echo — strip it so the persisted set stays meaningful.
-                java.util.Set<String> viaPeer = new java.util.HashSet<>();
-                for (FederatedRoom r : mgr.getRoomManager().getRemoteRoomsViaPeer(d)) viaPeer.add(r.jid());
-                list.removeIf(viaPeer::contains);
-                mgr.getPeerRegistry().setExposedRooms(d, list);
+                mgr.getPeerRegistry().setExposedServers(d, list);
                 // Re-advertise the new exposed set + matching routes immediately.
                 if (isReachable(mgr, d)) { mgr.sendRoutingUpdate(d); mgr.sendRoomState(d); }
                 out.print("{\"ok\":true}");

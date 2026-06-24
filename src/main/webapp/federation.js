@@ -9,11 +9,11 @@ let roomFilter = '';
 // Tracks which peer sections are manually collapsed across refreshes.
 const collapsedPeers = new Set();
 
-// Latest status payload, so per-peer room editors can be built from localRooms/remoteRooms.
+// Latest status payload, so per-peer server editors can be built from the peer's exposableServers.
 let lastData = {};
-// Untrusted peers whose exposed-room editor is expanded (persisted across refreshes).
+// Untrusted peers whose exposed-server editor is expanded (persisted across refreshes).
 const expandedPeerRooms = new Set();
-// In-flight exposed-room edits per domain (jid -> checked) so a 5 s refresh doesn't clobber them.
+// In-flight exposed-server edits per domain (server -> checked) so a 5 s refresh doesn't clobber them.
 const editedExposed = {};
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ function renderPeers(peers) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty">No peers configured yet.</td></tr>';
         return;
     }
-    // Snapshot any in-flight room-editor edits BEFORE we rebuild the table, so a poll
+    // Snapshot any in-flight server-editor edits BEFORE we rebuild the table, so a poll
     // refresh mid-edit doesn't discard the admin's pending checkbox changes.
     expandedPeerRooms.forEach(domain => captureExposedEdits(domain));
 
@@ -127,7 +127,7 @@ function renderPeers(peers) {
                        onclick="disablePeer('${escHtml(p.domain)}')">Disable</button>`;
         }
 
-        // Trust controls: toggle untrusted, and (when untrusted) open the exposed-room editor.
+        // Trust controls: toggle untrusted, and (when untrusted) open the exposed-server editor.
         const trustBtn = p.untrusted
             ? `<button class="btn-small btn-primary" style="margin-right:4px"
                        onclick="setUntrusted('${escHtml(p.domain)}', false)">Make trusted</button>`
@@ -136,7 +136,7 @@ function renderPeers(peers) {
         const expanded = expandedPeerRooms.has(p.domain);
         const roomsBtn = p.untrusted
             ? `<button class="btn-small" style="margin-right:4px;background:#e2e3e5;color:#383d41"
-                       onclick="togglePeerRooms('${escHtml(p.domain)}')">Rooms ${expanded ? '▾' : '▸'}</button>`
+                       onclick="togglePeerRooms('${escHtml(p.domain)}')">Servers ${expanded ? '▾' : '▸'}</button>`
             : '';
 
         let statusLabel;
@@ -157,7 +157,7 @@ function renderPeers(peers) {
         }
 
         const untrustedBadge = p.untrusted
-            ? `<span class="badge badge-untrusted" title="Shares only the rooms you expose">untrusted · ${(p.exposedRooms || []).length} exposed</span>`
+            ? `<span class="badge badge-untrusted" title="Shares only the servers you expose">untrusted · ${(p.exposedServers || []).length} server(s)</span>`
             : '';
 
         let row = `
@@ -173,92 +173,66 @@ function renderPeers(peers) {
         </tr>`;
 
         if (p.untrusted && expanded) {
-            row += renderExposedEditor(p);
+            row += renderExposedServerEditor(p);
         }
         return row;
     }).join('');
 }
 
-// ── Untrusted peers: exposed-room editor ───────────────────────────────────────
+// ── Untrusted peers: exposed-server editor ─────────────────────────────────────
 
-/**
- * Rooms this server can expose to untrusted peer p: its federated local rooms + known remote
- * rooms, MINUS anything we received via p itself (its own rooms and whatever it relayed to us).
- * Re-exposing those back to p is a meaningless echo and they aren't ours to share — p.advertisedRooms
- * is exactly "rooms advertised to us via p" (the right-hand column), so we exclude them here.
- */
-function exposableRooms(p) {
-    const excluded = new Set((p && p.advertisedRooms ? p.advertisedRooms : []).map(r => r.jid));
-    const out = [];
-    const seen = new Set();
-    (lastData.localRooms || []).filter(r => r.federated).forEach(r => {
-        if (!seen.has(r.jid) && !excluded.has(r.jid)) { seen.add(r.jid); out.push({ jid: r.jid, name: r.name, scope: 'local' }); }
-    });
-    const rr = lastData.remoteRooms || {};
-    Object.keys(rr).forEach(origin => (rr[origin] || []).forEach(r => {
-        if (!seen.has(r.jid) && !excluded.has(r.jid)) { seen.add(r.jid); out.push({ jid: r.jid, name: r.name, scope: origin }); }
-    }));
-    return out;
-}
-
-function renderExposedEditor(p) {
+function renderExposedServerEditor(p) {
     const id = jidToElemId(p.domain);
-    // ── Left: rooms we ALLOW TO LEAVE to this peer (editable). ──
+    // ── Left: SERVERS we expose to this peer (editable). ──
     // Pending edits win over the persisted set so a refresh doesn't reset the admin's work.
-    const checkedSet = editedExposed[p.domain] || new Set(p.exposedRooms || []);
-    const rooms = exposableRooms(p);
-    // Include any exposed jids no longer in the candidate list (e.g. peer offline) so they're not
-    // silently lost — but NOT ones excluded because they came via this peer (can't expose back to it).
-    const excludedJids = new Set((p.advertisedRooms || []).map(r => r.jid));
-    (p.exposedRooms || []).forEach(jid => {
-        if (!excludedJids.has(jid) && !rooms.some(r => r.jid === jid)) {
-            rooms.push({ jid, name: '', scope: 'unavailable' });
-        }
-    });
+    const checkedSet = editedExposed[p.domain] || new Set(p.exposedServers || []);
+    const candidates = (p.exposableServers || []).slice();
+    // Include any exposed server no longer in the candidate list (e.g. route lost) so it's not
+    // silently dropped from the UI while still persisted.
+    (p.exposedServers || []).forEach(s => { if (!candidates.includes(s)) candidates.push(s); });
 
-    const leftList = rooms.length === 0
-        ? '<p class="empty" style="margin:4px 0">No federated or remote rooms available to expose yet.</p>'
-        : rooms.map(r => {
-            const checked = checkedSet.has(r.jid) ? 'checked' : '';
-            const scopeTag = r.scope === 'local'
-                ? '<span class="badge badge-in">local</span>'
-                : `<span class="badge badge-out" title="${escHtml(r.scope)}">via ${escHtml(r.scope)}</span>`;
+    const leftList = candidates.length === 0
+        ? '<p class="empty" style="margin:4px 0">No servers available to expose yet.</p>'
+        : candidates.map(s => {
+            const checked = checkedSet.has(s) ? 'checked' : '';
+            const isLocal = s === lastData.localDomain;
+            const tag = isLocal
+                ? '<span class="badge badge-in">this server</span>'
+                : (p.exposableServers || []).includes(s)
+                    ? ''
+                    : '<span class="badge badge-out" title="no current route">unavailable</span>';
             return `
             <label class="exposed-room">
                 <input type="checkbox" class="exposed-cb" data-domain="${escHtml(p.domain)}"
-                       value="${escHtml(r.jid)}" ${checked}
+                       value="${escHtml(s)}" ${checked}
                        onchange="captureExposedEdits('${escHtml(p.domain)}')">
-                <span>${escHtml(r.name || r.jid)}</span>
-                <small>${escHtml(r.jid)}</small> ${scopeTag}
+                <span>${escHtml(s)}</span> ${tag}
             </label>`;
         }).join('');
 
-    // ── Right: rooms this peer ADVERTISES TO US (read-only). ──
-    const adv = p.advertisedRooms || [];
+    // ── Right: SERVERS this peer advertises through to us (read-only). ──
+    const adv = p.advertisedVia || [];
     const rightList = adv.length === 0
-        ? '<p class="empty" style="margin:4px 0">This peer is not advertising any rooms to us yet.</p>'
-        : adv.map(r => `
-            <div class="exposed-room">
-                <span>${escHtml(r.name || r.jid)}</span>
-                <small>${escHtml(r.jid)}</small>
-            </div>`).join('');
+        ? '<p class="empty" style="margin:4px 0">This peer is not advertising any servers to us yet.</p>'
+        : adv.map(s => `
+            <div class="exposed-room"><span>${escHtml(s)}</span></div>`).join('');
 
     return `
         <tr class="exposed-editor-row">
             <td colspan="4">
                 <div class="exposed-cols">
                     <div class="exposed-col">
-                        <div class="exposed-col-h">↑ Rooms allowed to leave to ${escHtml(p.domain)}
-                            <span class="exposed-col-sub">checked rooms are shared outbound; this peer gets routes only to their servers</span>
+                        <div class="exposed-col-h">↑ Servers exposed to ${escHtml(p.domain)}
+                            <span class="exposed-col-sub">this peer sees each checked server's federated rooms and a route to it</span>
                         </div>
                         ${leftList}
                         <div style="margin-top:8px">
-                            <button class="btn-small btn-primary" onclick="saveExposedRooms('${escHtml(p.domain)}')">Save</button>
+                            <button class="btn-small btn-primary" onclick="saveExposedServers('${escHtml(p.domain)}')">Save</button>
                             <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
                         </div>
                     </div>
                     <div class="exposed-col">
-                        <div class="exposed-col-h">↓ Rooms ${escHtml(p.domain)} advertises to us
+                        <div class="exposed-col-h">↓ Servers ${escHtml(p.domain)} advertises through
                             <span class="exposed-col-sub">what the remote is exposing inbound (read-only)</span>
                         </div>
                         ${rightList}
@@ -290,17 +264,17 @@ function togglePeerRooms(domain) {
 function setUntrusted(domain, untrusted) {
     if (untrusted && !confirm('Mark ' + domain + ' as untrusted?\n\n'
         + 'It will immediately stop receiving routing updates and room advertisements. '
-        + 'Use "Rooms" to choose exactly which rooms it may see.')) return;
+        + 'Use "Servers" to choose exactly which servers it may see.')) return;
     post({ action: 'set-untrusted', domain, untrusted }).then(() => {
         if (!untrusted) { expandedPeerRooms.delete(domain); delete editedExposed[domain]; }
         refresh();
     });
 }
 
-function saveExposedRooms(domain) {
+function saveExposedServers(domain) {
     captureExposedEdits(domain);
     const set = editedExposed[domain] || new Set();
-    post({ action: 'set-exposed-rooms', domain, rooms: Array.from(set).join(',') })
+    post({ action: 'set-exposed-servers', domain, servers: Array.from(set).join(',') })
         .then(result => {
             if (result && result.ok) {
                 delete editedExposed[domain];   // persisted set is now authoritative

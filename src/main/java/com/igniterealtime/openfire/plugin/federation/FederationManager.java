@@ -25,8 +25,8 @@ import org.xmpp.packet.Presence;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -729,38 +729,41 @@ public class FederationManager {
     // ── Untrusted-peer exposure filtering ──────────────────────────────────────
     //
     // An untrusted peer (e.g. a foreign org reached only through this edge server) gets
-    // NO routes and NO room advertisements except for the rooms the admin has explicitly
-    // exposed to it, and only routes to those rooms' hosting servers. All per-peer senders
-    // funnel through the methods below, so filtering here covers gossip/propagate/solicit.
+    // NO routes and NO room advertisements except for the SERVERS the admin has explicitly
+    // exposed to it: it sees each exposed server's federated rooms and a route to reach it.
+    // A room is exposed to the peer iff its originServer is in the exposed set (local rooms
+    // carry originServer == our domain, so the admin exposes them by listing our own domain).
+    // All per-peer senders funnel through the methods below, so filtering here covers
+    // gossip/propagate/solicit.
 
     private boolean isUntrusted(String domain) {
         return peerRegistry.isUntrusted(domain);
     }
 
-    /** Restricts a room list to a peer's exposed set; returns it unchanged for trusted peers. */
+    /** Restricts a room list to rooms homed on a peer's exposed servers; unchanged for trusted peers. */
     private List<FederatedRoom> filterRoomsForPeer(String domain, List<FederatedRoom> rooms) {
         if (!isUntrusted(domain)) return rooms;
-        Set<String> exposed = peerRegistry.getExposedRooms(domain);
+        Set<String> exposed = peerRegistry.getExposedServers(domain);
         if (exposed.isEmpty()) return Collections.emptyList();
-        return rooms.stream().filter(r -> exposed.contains(r.jid())).collect(Collectors.toList());
+        return rooms.stream().filter(r -> exposed.contains(r.originServer())).collect(Collectors.toList());
     }
 
     /**
-     * Hosting server domains of an untrusted peer's exposed REMOTE rooms — the only routes
-     * we may advertise to it. Exposed LOCAL rooms need no route (the peer reaches us directly),
-     * so they contribute nothing here. Origins are read from the cached remote-room map; an
-     * exposed room not yet cached is simply omitted until it is re-learned (self-healing).
+     * The servers the admin may expose to an untrusted peer: this server (its local rooms) plus
+     * every routing destination reachable WITHOUT going through that peer. Destinations whose next
+     * hop is the peer itself — or the peer's own domain — are excluded, so we never offer to
+     * re-expose to a peer the servers it is advertising to us (a meaningless echo). Used by the
+     * admin UI to build the per-peer exposed-server checklist.
      */
-    private Set<String> exposedDestinations(String domain) {
-        Set<String> exposed = peerRegistry.getExposedRooms(domain);
-        if (exposed.isEmpty()) return Collections.emptySet();
-        Set<String> dests = new HashSet<>();
-        for (Map.Entry<String, List<FederatedRoom>> e : roomManager.getRemoteRooms().entrySet()) {
-            for (FederatedRoom r : e.getValue()) {
-                if (exposed.contains(r.jid())) { dests.add(e.getKey()); break; }
-            }
+    public Set<String> exposableServers(String peerDomain) {
+        Set<String> out = new LinkedHashSet<>();
+        out.add(XMPPServer.getInstance().getServerInfo().getXMPPDomain());
+        for (RouteEntry e : routingTable.getAll()) {
+            String dest = e.destination();
+            if (dest.equals(peerDomain) || peerDomain.equals(e.nextHop())) continue;
+            out.add(dest);
         }
-        return dests;
+        return out;
     }
 
     // ── Link-level trust negotiation ────────────────────────────────────────────
@@ -891,8 +894,8 @@ public class FederationManager {
         try {
             Collection<RouteEntry> table = routingTable.getRoutesExcludingNextHop(toDomain);
             if (isUntrusted(toDomain)) {
-                // Untrusted peer: reveal only routes to the servers hosting its exposed rooms.
-                Set<String> allowed = exposedDestinations(toDomain);
+                // Untrusted peer: reveal only routes to the servers the admin has exposed to it.
+                Set<String> allowed = peerRegistry.getExposedServers(toDomain);
                 table = table.stream()
                              .filter(e -> allowed.contains(e.destination()))
                              .collect(Collectors.toList());

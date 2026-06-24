@@ -24,7 +24,9 @@ public class PeerRegistry {
     private static final String PROP_PEERS      = "federation.peers";
     private static final String PROP_PEER_STATE = "federation.peer.state.";   // + domain → DISABLED|REMOTE_DISABLED
     private static final String PROP_UNTRUSTED  = "federation.peer.untrusted."; // + domain → true
-    private static final String PROP_EXPOSED    = "federation.peer.exposed.";   // + domain → csv of room JIDs
+    private static final String PROP_EXPOSED_SRV = "federation.peer.exposedsrv."; // + domain → csv of server domains
+    /** Legacy room-level exposure key (1.3.38–41); now dead — deleted on load/remove. */
+    private static final String PROP_EXPOSED_LEGACY = "federation.peer.exposed.";
 
     private final ConcurrentHashMap<String, PeerServer> peers = new ConcurrentHashMap<>();
 
@@ -50,12 +52,14 @@ public class PeerRegistry {
                     } else {
                         Log.info("Loaded configured federation peer: {}", domain);
                     }
-                    // Restore untrusted flag + exposed-room allowlist (filtered-exposure peers).
+                    // One-time cleanup of the dead room-level exposure key (replaced by server-level).
+                    JiveGlobals.deleteProperty(PROP_EXPOSED_LEGACY + domain);
+                    // Restore untrusted flag + exposed-server allowlist (filtered-exposure peers).
                     if (JiveGlobals.getBooleanProperty(PROP_UNTRUSTED + domain, false)) {
                         peer.setUntrusted(true);
-                        peer.setExposedRooms(parseCsv(JiveGlobals.getProperty(PROP_EXPOSED + domain, "")));
-                        Log.info("Loaded untrusted peer {} with {} exposed room(s)",
-                                 domain, peer.getExposedRooms().size());
+                        peer.setExposedServers(parseCsv(JiveGlobals.getProperty(PROP_EXPOSED_SRV + domain, "")));
+                        Log.info("Loaded untrusted peer {} with {} exposed server(s)",
+                                 domain, peer.getExposedServers().size());
                     }
                     peers.put(domain, peer);
                 }
@@ -93,7 +97,8 @@ public class PeerRegistry {
         if (removed) {
             JiveGlobals.deleteProperty(PROP_PEER_STATE + domain);
             JiveGlobals.deleteProperty(PROP_UNTRUSTED + domain);
-            JiveGlobals.deleteProperty(PROP_EXPOSED + domain);
+            JiveGlobals.deleteProperty(PROP_EXPOSED_SRV + domain);
+            JiveGlobals.deleteProperty(PROP_EXPOSED_LEGACY + domain);
             persist();
         }
         return removed;
@@ -106,11 +111,11 @@ public class PeerRegistry {
         return peer != null && peer.isUntrusted();
     }
 
-    /** Room JIDs an untrusted peer may see/map; empty for trusted peers or none set. */
-    public Set<String> getExposedRooms(String domain) {
+    /** Server domains an untrusted peer may see/map onto; empty for trusted peers or none set. */
+    public Set<String> getExposedServers(String domain) {
         PeerServer peer = peers.get(domain);
         return peer == null ? Collections.emptySet()
-                            : Collections.unmodifiableSet(peer.getExposedRooms());
+                            : Collections.unmodifiableSet(peer.getExposedServers());
     }
 
     /** Marks (or clears) a peer as untrusted and persists the flag. No-op if unknown. */
@@ -125,16 +130,16 @@ public class PeerRegistry {
         }
     }
 
-    /** Replaces an untrusted peer's exposed-room allowlist and persists it. No-op if unknown. */
-    public void setExposedRooms(String domain, Collection<String> rooms) {
+    /** Replaces an untrusted peer's exposed-server allowlist and persists it. No-op if unknown. */
+    public void setExposedServers(String domain, Collection<String> servers) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
-        peer.setExposedRooms(rooms);
-        Set<String> stored = peer.getExposedRooms();
+        peer.setExposedServers(servers);
+        Set<String> stored = peer.getExposedServers();
         if (stored.isEmpty()) {
-            JiveGlobals.deleteProperty(PROP_EXPOSED + domain);
+            JiveGlobals.deleteProperty(PROP_EXPOSED_SRV + domain);
         } else {
-            JiveGlobals.setProperty(PROP_EXPOSED + domain, String.join(",", stored));
+            JiveGlobals.setProperty(PROP_EXPOSED_SRV + domain, String.join(",", stored));
         }
     }
 
