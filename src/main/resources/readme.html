@@ -154,6 +154,13 @@
         advertisement so every relay confines the room to the path toward its allowed destinations; the ACL is
         persisted and survives a listed server being offline. (On‑path servers must run this version or newer; rooms
         already federated at upgrade are migrated to <em>visible to all</em> so existing federation keeps working.)</li>
+    <li><strong>Mapping consent.</strong> Mapping onto a remote room sends a <em>request</em> the other admin must
+        <em>Accept</em> (a <strong>Pending mapping requests</strong> panel + an inline prompt on the room) before any
+        traffic flows; <em>Reject</em> declines it. On accept a per‑mapping <strong>token</strong> is shared and
+        re‑checked on later lifecycle messages, so a remove+re‑add forces a fresh acceptance. A mapping can be
+        <em>Disabled</em> instead of removed (the peer shows "disabled by peer") and re‑enabled. A per‑room
+        <em>Auto‑accept</em> toggle accepts incoming requests automatically. On upgrade, existing mappings drop to
+        pending and must be re‑accepted (the lower‑domain side auto‑re‑requests on reconnect).</li>
     <li><strong>Admin API CSRF.</strong> This tab's actions are protected by a double‑submit token. After
         upgrading the plugin, reload an already‑open Federation tab once so it picks up the new token.</li>
 </ul>

@@ -97,6 +97,10 @@ public class FederationIQHandler extends IQHandler {
             case "routing-solicit"     -> handleRoutingSolicit(fromDomain);
             case "room-advertisement"  -> handleRoomAdvertisement(fromDomain, child);
             case "room-mapping"        -> handleRoomMapping(fromDomain, child);
+            case "room-mapping-accept" -> handleMappingAccept(fromDomain, child);
+            case "room-mapping-reject" -> handleMappingReject(fromDomain, child);
+            case "room-mapping-disable"-> handleMappingDisable(fromDomain, child);
+            case "room-mapping-enable" -> handleMappingEnable(fromDomain, child);
             case "room-unmap"          -> handleRoomUnmap(fromDomain, child);
             case "muc-forward"         -> handleMucForward(fromDomain, child);
             default -> Log.warn("Unknown federation action '{}' from {}", child.getName(), fromDomain);
@@ -382,15 +386,109 @@ public class FederationIQHandler extends IQHandler {
                            + "this server ({}) is not exposed to it", fromDomain, theirRemote, localDomain);
                     continue;
                 }
-                manager.getRoomManager().addMapping(theirRemote, theirLocal, actualOrigin);
-                Log.info("Room mapping received from {}: local={} ↔ remote={}",
+                // Consent: store the request PENDING_IN — it does not forward until we accept.
+                manager.getRoomManager().addMapping(theirRemote, theirLocal, actualOrigin,
+                                                    RoomMapping.State.PENDING_IN, "");
+                Log.info("Mapping request received from {}: local={} ↔ remote={} (pending)",
                          actualOrigin, theirRemote, theirLocal);
-                // Proactively push our full roster (real + virtual occupants) to the
-                // mapping peer so its clients see everyone immediately — even if it has
-                // no occupants of its own to trigger the reverse sync.
-                manager.pushRosterToPeer(theirRemote, actualOrigin, theirLocal);
+                // Auto-accept if the admin has opened this room to anyone.
+                if (manager.getRoomManager().isAutoAccept(theirRemote)) {
+                    manager.acceptMapping(theirRemote, actualOrigin);
+                }
             }
         }
+    }
+
+    // ── room-mapping lifecycle (accept / reject / disable / enable) ─────────────
+
+    private void handleMappingAccept(String fromDomain, Element el) {
+        if (relayMappingControl("room-mapping-accept", el)) return;
+        String actualOrigin = originOf(el, fromDomain);
+        String token = el.attributeValue("token", "");
+        for (Element map : el.elements("map")) {
+            String theirLocal = map.attributeValue("local");   // sender's local = our remote room
+            String ourLocal   = map.attributeValue("remote");  // our local room
+            if (ourLocal != null) manager.onMappingAccepted(ourLocal, actualOrigin, theirLocal, token);
+        }
+    }
+
+    private void handleMappingReject(String fromDomain, Element el) {
+        if (relayMappingControl("room-mapping-reject", el)) return;
+        String actualOrigin = originOf(el, fromDomain);
+        for (Element map : el.elements("map")) {
+            String ourLocal = map.attributeValue("remote");
+            if (ourLocal != null) manager.onMappingRejected(ourLocal, actualOrigin);
+        }
+    }
+
+    private void handleMappingDisable(String fromDomain, Element el) {
+        if (relayMappingControl("room-mapping-disable", el)) return;
+        String actualOrigin = originOf(el, fromDomain);
+        String token = el.attributeValue("token", "");
+        for (Element map : el.elements("map")) {
+            String ourLocal = map.attributeValue("remote");
+            if (ourLocal != null && tokenOk(ourLocal, actualOrigin, token, "disable")) {
+                manager.onMappingDisabledByPeer(ourLocal, actualOrigin);
+            }
+        }
+    }
+
+    private void handleMappingEnable(String fromDomain, Element el) {
+        if (relayMappingControl("room-mapping-enable", el)) return;
+        String actualOrigin = originOf(el, fromDomain);
+        String token = el.attributeValue("token", "");
+        for (Element map : el.elements("map")) {
+            String theirLocal = map.attributeValue("local");
+            String ourLocal   = map.attributeValue("remote");
+            if (ourLocal != null && tokenOk(ourLocal, actualOrigin, token, "enable")) {
+                manager.onMappingEnabledByPeer(ourLocal, actualOrigin, theirLocal);
+            }
+        }
+    }
+
+    private String originOf(Element el, String fromDomain) {
+        String origin = el.attributeValue("origin");
+        return (origin != null) ? origin : fromDomain;
+    }
+
+    /**
+     * Relays a mapping-lifecycle IQ toward its final destination if we are not it. Returns true when
+     * relayed (the caller must stop), false when we are the destination and should apply it locally.
+     */
+    private boolean relayMappingControl(String element, Element el) {
+        String destination = el.attributeValue("destination");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (destination == null || localDomain.equals(destination)) return false;
+        String origin = el.attributeValue("origin");
+        String token  = el.attributeValue("token");
+        String reason = el.attributeValue("reason");
+        manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
+            nextHop -> {
+                for (Element map : el.elements("map")) {
+                    String l = map.attributeValue("local");
+                    String r = map.attributeValue("remote");
+                    if (l != null && r != null) {
+                        try {
+                            XMPPServer.getInstance().getPacketRouter().route(
+                                FederationStanzaFactory.mappingLifecycle(element, nextHop, destination, origin, l, r, token, reason));
+                        } catch (Exception e) {
+                            Log.warn("Could not relay {} toward {}: {}", element, destination, e.getMessage());
+                        }
+                    }
+                }
+            },
+            () -> Log.warn("{}: no route to {}, dropping", element, destination));
+        return true;
+    }
+
+    /** Validates a lifecycle token against the stored mapping (empty stored token = legacy, accepted). */
+    private boolean tokenOk(String localJid, String remoteDomain, String incomingToken, String op) {
+        RoomMapping m = manager.getRoomManager().getMappingForLocal(localJid, remoteDomain);
+        if (m == null) return false;
+        String stored = m.token();
+        if (stored == null || stored.isEmpty() || stored.equals(incomingToken)) return true;
+        Log.warn("SECURITY: dropping mapping-{} for {} from {} — token mismatch", op, localJid, remoteDomain);
+        return false;
     }
 
     // ── room-unmap ────────────────────────────────────────────────────────────
@@ -424,10 +522,12 @@ public class FederationIQHandler extends IQHandler {
         }
 
         String actualOrigin = (origin != null) ? origin : fromDomain;
+        String token = el.attributeValue("token", "");
         for (Element map : el.elements("map")) {
             String theirLocal  = map.attributeValue("local");   // originator's local  = our remote
             String theirRemote = map.attributeValue("remote");  // originator's remote = our local
             if (theirRemote != null) {
+                if (!tokenOk(theirRemote, actualOrigin, token, "unmap")) continue;
                 if (theirLocal != null) {
                     manager.pushVirtualPresences(theirRemote, actualOrigin, theirLocal, true);
                 }
@@ -438,7 +538,7 @@ public class FederationIQHandler extends IQHandler {
                 // now unreachable — evict them ALL. This is essential for multi-hop spokes:
                 // hub-relayed users (from other servers) are tracked under the relay domain, not
                 // the origin, so a per-origin evict would miss them and leave ghosts.
-                if (manager.getRoomManager().getMappingsForLocal(theirRemote).isEmpty()) {
+                if (manager.getRoomManager().getAllMappingsForLocal(theirRemote).isEmpty()) {
                     manager.evictAllVirtualOccupantsInRoom(theirRemote);
                 } else {
                     manager.evictVirtualOccupants(theirRemote, actualOrigin);

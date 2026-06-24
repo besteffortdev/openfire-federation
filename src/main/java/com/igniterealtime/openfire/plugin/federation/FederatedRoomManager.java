@@ -40,6 +40,9 @@ public class FederatedRoomManager {
     private static final String PROP_MAP_COUNT   = "federation.rooms.mapping.%s.count";
     private static final String PROP_MAP_REMOTE  = "federation.rooms.mapping.%s.%d.remote";
     private static final String PROP_MAP_DOMAIN  = "federation.rooms.mapping.%s.%d.domain";
+    private static final String PROP_MAP_STATE   = "federation.rooms.mapping.%s.%d.state";  // consent state
+    private static final String PROP_MAP_TOKEN   = "federation.rooms.mapping.%s.%d.token";  // shared token
+    private static final String PROP_ROOM_AUTOACCEPT = "federation.room.autoaccept."; // + roomJid → true
 
     // Virtual occupant persistence — survives plugin reloads so eviction on peer-down
     // can still send leave presences even if no join events occurred after the reload.
@@ -134,16 +137,29 @@ public class FederatedRoomManager {
                 if (countStr != null) {
                     try {
                         int count = Integer.parseInt(countStr);
+                        boolean rewrite = false;
                         for (int i = 0; i < count; i++) {
                             String remoteJid    = JiveGlobals.getProperty(String.format(PROP_MAP_REMOTE, localJid, i));
                             String remoteDomain = JiveGlobals.getProperty(String.format(PROP_MAP_DOMAIN, localJid, i));
                             if (remoteJid != null && remoteDomain != null) {
-                                RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain);
+                                String stateStr = JiveGlobals.getProperty(String.format(PROP_MAP_STATE, localJid, i));
+                                String token    = JiveGlobals.getProperty(String.format(PROP_MAP_TOKEN, localJid, i), "");
+                                RoomMapping.State state;
+                                if (stateStr == null) {
+                                    // Legacy mapping (pre-consent) — require re-acceptance: load inactive.
+                                    state = RoomMapping.State.PENDING_OUT;
+                                    rewrite = true;
+                                } else {
+                                    try { state = RoomMapping.State.valueOf(stateStr); }
+                                    catch (IllegalArgumentException e) { state = RoomMapping.State.PENDING_OUT; }
+                                }
+                                RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain, state, token);
                                 localMappings.computeIfAbsent(localJid, k -> new ArrayList<>()).add(m);
                                 remoteMappings.put(remoteJid, m);
-                                Log.info("Loaded room mapping: {} ↔ {} ({})", localJid, remoteJid, remoteDomain);
+                                Log.info("Loaded room mapping: {} ↔ {} ({}) [{}]", localJid, remoteJid, remoteDomain, state);
                             }
                         }
+                        if (rewrite) persistMappingsForRoom(localJid);   // persist the migrated state
                     } catch (NumberFormatException e) {
                         Log.warn("Invalid mapping count for {}: {}", localJid, countStr);
                     }
@@ -246,9 +262,10 @@ public class FederatedRoomManager {
             localFederatedRooms.add(roomJid);
         } else {
             localFederatedRooms.remove(roomJid);
-            // Drop the visibility ACL too — it's meaningless once the room isn't federated.
+            // Drop the visibility ACL + auto-accept flag too — meaningless once not federated.
             roomVisibility.remove(roomJid);
             JiveGlobals.deleteProperty(PROP_ROOM_VISIBLE + roomJid);
+            JiveGlobals.deleteProperty(PROP_ROOM_AUTOACCEPT + roomJid);
         }
         JiveGlobals.setProperty(PROP_ROOM_PREFIX + roomJid, String.valueOf(federated));
         persistRoomsIndex();
@@ -280,6 +297,21 @@ public class FederatedRoomManager {
             JiveGlobals.setProperty(PROP_ROOM_VISIBLE + roomJid, String.join(",", set));
         }
         Log.info("Room {} visibility → {}", roomJid, set.isEmpty() ? "all peers" : set);
+    }
+
+    // ── Per-room auto-accept (accept incoming mapping requests without a prompt) ──
+
+    public boolean isAutoAccept(String roomJid) {
+        return JiveGlobals.getBooleanProperty(PROP_ROOM_AUTOACCEPT + roomJid, false);
+    }
+
+    public void setAutoAccept(String roomJid, boolean autoAccept) {
+        if (autoAccept) {
+            JiveGlobals.setProperty(PROP_ROOM_AUTOACCEPT + roomJid, "true");
+        } else {
+            JiveGlobals.deleteProperty(PROP_ROOM_AUTOACCEPT + roomJid);
+        }
+        Log.info("Room {} auto-accept → {}", roomJid, autoAccept);
     }
 
     private static Set<String> parseCsvSet(String csv) {
@@ -338,6 +370,7 @@ public class FederatedRoomManager {
                         Map<String, String> e = new LinkedHashMap<>();
                         e.put("remoteRoomJid", m.remoteRoomJid());
                         e.put("remoteDomain",  m.remoteDomain());
+                        e.put("state",         m.state().name());
                         return e;
                     })
                     .collect(Collectors.toList());
@@ -348,6 +381,7 @@ public class FederatedRoomManager {
                 entry.put("description", room.getDescription());
                 entry.put("federated",   localFederatedRooms.contains(jid));
                 entry.put("visibleTo",   new ArrayList<>(getRoomVisibility(jid)));
+                entry.put("autoAccept",  isAutoAccept(jid));
                 entry.put("occupants",   room.getOccupantsCount());
                 entry.put("mappings",    mappingsList);
                 result.add(entry);
@@ -363,6 +397,11 @@ public class FederatedRoomManager {
      * One local room can have at most one mapping per remote domain.
      */
     public void addMapping(String localJid, String remoteJid, String remoteDomain) {
+        addMapping(localJid, remoteJid, remoteDomain, RoomMapping.State.PENDING_OUT, "");
+    }
+
+    public void addMapping(String localJid, String remoteJid, String remoteDomain,
+                           RoomMapping.State state, String token) {
         List<RoomMapping> list = localMappings.computeIfAbsent(localJid, k -> new ArrayList<>());
 
         // Remove any existing mapping to the same remote domain before adding the new one.
@@ -374,13 +413,32 @@ public class FederatedRoomManager {
             return false;
         });
 
-        RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain);
+        RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain, state, token);
         list.add(m);
         remoteMappings.put(remoteJid, m);
 
         persistMappingsForRoom(localJid);
         persistMappingsIndex();
-        Log.info("Room mapping added: {} ↔ {} ({})", localJid, remoteJid, remoteDomain);
+        Log.info("Room mapping added: {} ↔ {} ({}) [{}]", localJid, remoteJid, remoteDomain, state);
+    }
+
+    /** Transitions an existing mapping to a new state/token. Returns the updated mapping, or null. */
+    public RoomMapping setMappingState(String localJid, String remoteDomain,
+                                       RoomMapping.State state, String token) {
+        List<RoomMapping> list = localMappings.get(localJid);
+        if (list == null) return null;
+        for (int i = 0; i < list.size(); i++) {
+            RoomMapping m = list.get(i);
+            if (m.remoteDomain().equals(remoteDomain)) {
+                RoomMapping updated = m.with(state, token != null ? token : m.token());
+                list.set(i, updated);
+                remoteMappings.put(updated.remoteRoomJid(), updated);
+                persistMappingsForRoom(localJid);
+                Log.info("Room mapping {} ({}) → {}", localJid, remoteDomain, state);
+                return updated;
+            }
+        }
+        return null;
     }
 
     /** Removes ALL mappings for a local room. */
@@ -418,15 +476,32 @@ public class FederatedRoomManager {
         return true;
     }
 
-    /** All mappings for a local room (empty list if none). Never null. */
+    /**
+     * The <b>live</b> mappings for a local room — only {@link RoomMapping.State#ACTIVE} ones. This is
+     * the view used by the interceptor and every forwarding/sync path, so non-active (pending/disabled/
+     * rejected) mappings never forward traffic. Use {@link #getAllMappingsForLocal} for UI/lifecycle.
+     */
     public List<RoomMapping> getMappingsForLocal(String localJid) {
+        List<RoomMapping> list = localMappings.get(localJid);
+        if (list == null) return Collections.emptyList();
+        return list.stream().filter(RoomMapping::isActive).collect(Collectors.toList());
+    }
+
+    /** All mappings for a local room regardless of state (for UI, lifecycle, unmap). Never null. */
+    public List<RoomMapping> getAllMappingsForLocal(String localJid) {
         List<RoomMapping> list = localMappings.get(localJid);
         return list != null ? Collections.unmodifiableList(list) : Collections.emptyList();
     }
 
-    /** The mapping from localJid toward a specific remoteDomain, or null. */
+    /** Every mapping (across all rooms) currently in the given state — e.g. incoming pending requests. */
+    public List<RoomMapping> getMappingsByState(RoomMapping.State state) {
+        return localMappings.values().stream().flatMap(List::stream)
+                .filter(m -> m.state() == state).collect(Collectors.toList());
+    }
+
+    /** The mapping from localJid toward a specific remoteDomain (any state), or null. */
     public RoomMapping getMappingForLocal(String localJid, String remoteDomain) {
-        return getMappingsForLocal(localJid).stream()
+        return getAllMappingsForLocal(localJid).stream()
             .filter(m -> m.remoteDomain().equals(remoteDomain))
             .findFirst().orElse(null);
     }
@@ -671,8 +746,15 @@ public class FederatedRoomManager {
         if (list == null || list.isEmpty()) return;
         JiveGlobals.setProperty(String.format(PROP_MAP_COUNT, localJid), String.valueOf(list.size()));
         for (int i = 0; i < list.size(); i++) {
-            JiveGlobals.setProperty(String.format(PROP_MAP_REMOTE, localJid, i), list.get(i).remoteRoomJid());
-            JiveGlobals.setProperty(String.format(PROP_MAP_DOMAIN, localJid, i), list.get(i).remoteDomain());
+            RoomMapping m = list.get(i);
+            JiveGlobals.setProperty(String.format(PROP_MAP_REMOTE, localJid, i), m.remoteRoomJid());
+            JiveGlobals.setProperty(String.format(PROP_MAP_DOMAIN, localJid, i), m.remoteDomain());
+            JiveGlobals.setProperty(String.format(PROP_MAP_STATE,  localJid, i), m.state().name());
+            if (m.token() != null && !m.token().isEmpty()) {
+                JiveGlobals.setProperty(String.format(PROP_MAP_TOKEN, localJid, i), m.token());
+            } else {
+                JiveGlobals.deleteProperty(String.format(PROP_MAP_TOKEN, localJid, i));
+            }
         }
     }
 
@@ -684,6 +766,8 @@ public class FederatedRoomManager {
                 for (int i = 0; i < count; i++) {
                     JiveGlobals.deleteProperty(String.format(PROP_MAP_REMOTE, localJid, i));
                     JiveGlobals.deleteProperty(String.format(PROP_MAP_DOMAIN, localJid, i));
+                    JiveGlobals.deleteProperty(String.format(PROP_MAP_STATE,  localJid, i));
+                    JiveGlobals.deleteProperty(String.format(PROP_MAP_TOKEN,  localJid, i));
                 }
             } catch (NumberFormatException ignored) {}
             JiveGlobals.deleteProperty(String.format(PROP_MAP_COUNT, localJid));

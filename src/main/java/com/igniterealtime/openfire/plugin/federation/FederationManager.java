@@ -20,6 +20,7 @@ import org.jivesoftware.openfire.session.OutgoingServerSession;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Presence;
 
@@ -246,8 +247,8 @@ public class FederationManager {
 
     public void setRoomFederated(String roomJid, boolean federated) {
         if (!federated) {
-            // Tear down all active mappings before clearing the federation tag.
-            if (!roomManager.getMappingsForLocal(roomJid).isEmpty()) {
+            // Tear down all mappings (any state) before clearing the federation tag.
+            if (!roomManager.getAllMappingsForLocal(roomJid).isEmpty()) {
                 unmapRooms(roomJid);
             }
         }
@@ -280,30 +281,149 @@ public class FederationManager {
      * the remote server.  Can be called multiple times on the hub to connect
      * additional spokes to the same local room.
      */
-    public void mapRooms(String localJid, String remoteJid, String remoteDomain) {
-        roomManager.addMapping(localJid, remoteJid, remoteDomain);
-        // Send the room-mapping IQ first so the remote side stores the mapping before
-        // it receives our occupant-sync presences — this ensures syncLocalOccupantsToRemote
-        // can fire correctly on the remote when it processes our muc-forward stanzas.
+    /**
+     * Requests a mapping from our local room to a remote room. Stores it PENDING_OUT and sends a
+     * room-mapping REQUEST; nothing forwards until the remote accepts (handleMappingAccept). No
+     * roster is pushed yet — that happens on the accept transition.
+     */
+    public void requestMapping(String localJid, String remoteJid, String remoteDomain) {
+        roomManager.addMapping(localJid, remoteJid, remoteDomain, RoomMapping.State.PENDING_OUT, "");
+        sendMappingRequest(localJid, remoteJid, remoteDomain);
+    }
+
+    private void sendMappingRequest(String localJid, String remoteJid, String remoteDomain) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
         try {
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.roomMapping(
                           nextHop, remoteDomain, localDomain, localJid, remoteJid));
+            Log.info("Sent mapping request {} → {} ({})", localJid, remoteJid, remoteDomain);
         } catch (Exception e) {
-            Log.warn("Failed to send room-mapping to {}: {}", remoteDomain, e.getMessage());
+            Log.warn("Failed to send mapping request to {}: {}", remoteDomain, e.getMessage());
         }
-        pushInitialSyncPresences(localJid, remoteDomain, remoteJid);
-        // We may be a hub with no real occupants of our own: the local room can already
-        // hold virtual occupants from OTHER spokes. Forward them to the newly-mapped spoke
-        // so it sees clients on the previously-mapped servers, not only future joiners.
-        forwardVirtualOccupants(localJid, remoteDomain, remoteJid);
     }
 
-    /** Removes ALL spoke mappings for localJid and notifies every remote. */
+    /**
+     * Re-sends pending outgoing mapping requests toward a peer that just came up. To avoid both ends
+     * racing on a legacy/queued link, only the lexicographically-smaller domain initiates; the other
+     * side simply accepts the incoming request.
+     */
+    public void resendPendingRequests(String remoteDomain) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (localDomain.compareTo(remoteDomain) >= 0) return;
+        for (List<RoomMapping> list : roomManager.getLocalMappings().values()) {
+            for (RoomMapping m : list) {
+                if (m.remoteDomain().equals(remoteDomain) && m.state() == RoomMapping.State.PENDING_OUT) {
+                    sendMappingRequest(m.localRoomJid(), m.remoteRoomJid(), remoteDomain);
+                }
+            }
+        }
+    }
+
+    /**
+     * Accepts an incoming mapping request on one of our rooms (we are the room owner). Mints a shared
+     * token, marks the mapping ACTIVE, tells the requester (room-mapping-accept), and pushes our roster.
+     */
+    public void acceptMapping(String localJid, String remoteDomain) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        if (m == null) { Log.warn("acceptMapping: no mapping {} ({})", localJid, remoteDomain); return; }
+        String token = org.jivesoftware.util.StringUtils.randomString(40);
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, token);
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
+        route(FederationStanzaFactory.roomMappingAccept(nextHop, remoteDomain, localDomain,
+                m.localRoomJid(), m.remoteRoomJid(), token), remoteDomain);
+        // Push our roster so the requester's clients see our occupants immediately.
+        pushRosterToPeer(localJid, remoteDomain, m.remoteRoomJid());
+        Log.info("Accepted mapping {} ({})", localJid, remoteDomain);
+    }
+
+    /** Rejects an incoming mapping request: tells the requester and drops our pending record. */
+    public void rejectMapping(String localJid, String remoteDomain) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        if (m == null) return;
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
+        route(FederationStanzaFactory.roomMappingReject(nextHop, remoteDomain, localDomain,
+                m.localRoomJid(), m.remoteRoomJid(), null), remoteDomain);
+        roomManager.removeMapping(localJid, remoteDomain);
+        Log.info("Rejected mapping request {} ({})", localJid, remoteDomain);
+    }
+
+    /** Disables an active mapping from our side; the peer will show "disabled by peer". */
+    public void disableMapping(String localJid, String remoteDomain) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        if (m == null) return;
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.DISABLED_LOCAL, m.token());
+        pushVirtualPresences(localJid, remoteDomain, m.remoteRoomJid(), true);
+        evictVirtualOccupants(localJid, remoteDomain);
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
+        route(FederationStanzaFactory.roomMappingDisable(nextHop, remoteDomain, localDomain,
+                m.localRoomJid(), m.remoteRoomJid(), m.token()), remoteDomain);
+        Log.info("Disabled mapping {} ({})", localJid, remoteDomain);
+    }
+
+    /** Re-enables a mapping we previously disabled (DISABLED_LOCAL → ACTIVE) and re-syncs rosters. */
+    public void enableMapping(String localJid, String remoteDomain) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        if (m == null || m.state() != RoomMapping.State.DISABLED_LOCAL) return;
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, m.token());
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
+        route(FederationStanzaFactory.roomMappingEnable(nextHop, remoteDomain, localDomain,
+                m.localRoomJid(), m.remoteRoomJid(), m.token()), remoteDomain);
+        pushRosterToPeer(localJid, remoteDomain, m.remoteRoomJid());
+        Log.info("Enabled mapping {} ({})", localJid, remoteDomain);
+    }
+
+    // ── Inbound lifecycle transitions (called from FederationIQHandler) ──────────
+
+    /** Requester side: the remote accepted our request → go ACTIVE, store the token, push our roster. */
+    public void onMappingAccepted(String localJid, String remoteDomain, String remoteJid, String token) {
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, token);
+        pushInitialSyncPresences(localJid, remoteDomain, remoteJid);
+        forwardVirtualOccupants(localJid, remoteDomain, remoteJid);
+        Log.info("Mapping {} ({}) accepted by remote — now ACTIVE", localJid, remoteDomain);
+    }
+
+    /** Requester side: the remote rejected our request. */
+    public void onMappingRejected(String localJid, String remoteDomain) {
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.REJECTED, "");
+        Log.info("Mapping {} ({}) rejected by remote", localJid, remoteDomain);
+    }
+
+    /** Peer disabled the mapping → mark DISABLED_REMOTE and evict its virtual occupants. */
+    public void onMappingDisabledByPeer(String localJid, String remoteDomain) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.DISABLED_REMOTE,
+                                    m != null ? m.token() : "");
+        if (m != null) evictVirtualOccupants(localJid, remoteDomain);
+        Log.info("Mapping {} ({}) disabled by peer", localJid, remoteDomain);
+    }
+
+    /** Peer re-enabled the mapping → mark ACTIVE and re-sync. */
+    public void onMappingEnabledByPeer(String localJid, String remoteDomain, String remoteJid) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE,
+                                    m != null ? m.token() : "");
+        pushInitialSyncPresences(localJid, remoteDomain, remoteJid);
+        forwardVirtualOccupants(localJid, remoteDomain, remoteJid);
+        Log.info("Mapping {} ({}) re-enabled by peer", localJid, remoteDomain);
+    }
+
+    private void route(IQ iq, String remoteDomain) {
+        try {
+            XMPPServer.getInstance().getPacketRouter().route(iq);
+        } catch (Exception e) {
+            Log.warn("Failed to route mapping lifecycle IQ to {}: {}", remoteDomain, e.getMessage());
+        }
+    }
+
+    /** Removes ALL spoke mappings for localJid (any state) and notifies every remote. */
     public void unmapRooms(String localJid) {
-        List<RoomMapping> mappings = new ArrayList<>(roomManager.getMappingsForLocal(localJid));
+        List<RoomMapping> mappings = new ArrayList<>(roomManager.getAllMappingsForLocal(localJid));
         for (RoomMapping m : mappings) {
             pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         }
@@ -317,7 +437,7 @@ public class FederationManager {
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.roomUnmapping(
-                              nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid()));
+                              nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid(), m.token()));
             } catch (Exception e) {
                 Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
             }
@@ -333,7 +453,7 @@ public class FederationManager {
         // If this was the room's last mapping, every virtual occupant is now unreachable —
         // evict them all (covers hub-relayed users tracked under a relay domain). Otherwise
         // fall back to evicting the ones from this specific remote.
-        if (roomManager.getMappingsForLocal(localJid).isEmpty()) {
+        if (roomManager.getAllMappingsForLocal(localJid).isEmpty()) {
             evictAllVirtualOccupantsInRoom(localJid);
         } else {
             evictVirtualOccupants(localJid, remoteDomain);
@@ -343,7 +463,7 @@ public class FederationManager {
         try {
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.roomUnmapping(
-                          nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid()));
+                          nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid(), m.token()));
         } catch (Exception e) {
             Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
         }

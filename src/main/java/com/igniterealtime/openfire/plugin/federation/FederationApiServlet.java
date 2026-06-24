@@ -128,6 +128,7 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"name\":\"").append(esc(str(room.get("name")))).append("\",")
               .append("\"description\":\"").append(esc(str(room.get("description")))).append("\",")
               .append("\"federated\":").append(room.get("federated")).append(",")
+              .append("\"autoAccept\":").append(room.get("autoAccept")).append(",")
               .append("\"occupants\":").append(room.get("occupants")).append(",")
               .append("\"visibleTo\":[");
             @SuppressWarnings("unchecked")
@@ -145,10 +146,26 @@ public class FederationApiServlet extends HttpServlet {
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
                   .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\",")
+                  .append("\"state\":\"").append(esc(m.get("state"))).append("\",")
                   .append("\"connected\":").append(connected)
                   .append("}");
             }
             sb.append("]}");
+        }
+        sb.append("],");
+
+        // ── incoming pending mapping requests (for the Pending requests panel) ──
+        sb.append("\"pendingRequests\":[");
+        boolean fp = true;
+        for (com.igniterealtime.openfire.plugin.federation.model.RoomMapping m
+                : mgr.getRoomManager().getMappingsByState(
+                      com.igniterealtime.openfire.plugin.federation.model.RoomMapping.State.PENDING_IN)) {
+            if (!fp) sb.append(",");
+            fp = false;
+            sb.append("{")
+              .append("\"localJid\":\"").append(esc(m.localRoomJid())).append("\",")
+              .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
+              .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\"}");
         }
         sb.append("],");
 
@@ -315,7 +332,36 @@ public class FederationApiServlet extends HttpServlet {
                     out.print("{\"error\":\"localJid, remoteJid, remoteDomain required\"}");
                     return;
                 }
-                mgr.mapRooms(localJid.strip(), remoteJid.strip(), remoteDomain.strip());
+                mgr.requestMapping(localJid.strip(), remoteJid.strip(), remoteDomain.strip());
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "accept-mapping": case "reject-mapping":
+            case "disable-mapping": case "enable-mapping": {
+                String localJid     = req.getParameter("localJid");
+                String remoteDomain = req.getParameter("remoteDomain");
+                if (localJid == null || localJid.isBlank() || remoteDomain == null || remoteDomain.isBlank()) {
+                    out.print("{\"error\":\"localJid and remoteDomain required\"}");
+                    return;
+                }
+                String lj = localJid.strip(), rd = remoteDomain.strip().toLowerCase();
+                switch (action) {
+                    case "accept-mapping"  -> mgr.acceptMapping(lj, rd);
+                    case "reject-mapping"  -> mgr.rejectMapping(lj, rd);
+                    case "disable-mapping" -> mgr.disableMapping(lj, rd);
+                    case "enable-mapping"  -> mgr.enableMapping(lj, rd);
+                }
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "set-room-autoaccept": {
+                String jid    = req.getParameter("jid");
+                String enable = req.getParameter("autoAccept");
+                if (jid == null || jid.isBlank() || enable == null) {
+                    out.print("{\"error\":\"jid and autoAccept required\"}");
+                    return;
+                }
+                mgr.getRoomManager().setAutoAccept(jid.strip(), Boolean.parseBoolean(enable.strip()));
                 out.print("{\"ok\":true}");
                 return;
             }

@@ -349,6 +349,9 @@ public class S2SMonitor {
         // Re-sync occupant rosters for any room mapped to this peer so users that
         // were already in those rooms become visible again without rejoining.
         federationManager.resyncMappedDestinations(Set.of(domain));
+        // Revive any pending mapping requests toward this peer (e.g. legacy mappings awaiting
+        // re-acceptance, or requests queued while it was down).
+        federationManager.resendPendingRequests(domain);
     }
 
     private void onPeerDown(String domain) {

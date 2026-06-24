@@ -59,6 +59,7 @@ function refresh() {
             renderPeers(data.peers || []);
             renderS2SSessions(data.s2sSessions || []);
             renderRouting(data.routing || []);
+            renderPendingRequests(data.pendingRequests || []);
             renderLocalRooms(localRooms);
             renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
             updateStatusBadge(data.peers || []);
@@ -564,19 +565,7 @@ function renderLocalRooms(rooms) {
     tbody.innerHTML = rooms.map(r => {
         let mappedCell;
         if (r.mappings && r.mappings.length > 0) {
-            mappedCell = r.mappings.map(m => {
-                const disconnected = m.connected === false;
-                const stateBadge = disconnected
-                    ? `<span class="mapping-state mapping-disconnected" title="Route to ${escHtml(m.remoteDomain)} is down">⚠ disconnected</span>`
-                    : `<span class="mapping-state mapping-connected">● connected</span>`;
-                return `
-                <div class="mapping-row">
-                    <span class="badge badge-fed" title="${escHtml(m.remoteDomain)}">${escHtml(m.remoteRoomJid)}</span>
-                    ${stateBadge}
-                    <button class="btn-small btn-danger"
-                            onclick="unmapRoom('${escHtml(r.jid)}','${escHtml(m.remoteDomain)}')">Unmap</button>
-                </div>`;
-            }).join('');
+            mappedCell = r.mappings.map(m => renderMappingRow(r.jid, m)).join('');
         } else {
             mappedCell = '<span style="color:#999;font-size:11px">not mapped</span>';
         }
@@ -604,6 +593,10 @@ function renderLocalRooms(rooms) {
                     <span class="slider"></span>
                 </label>
                 ${visCtl}
+                ${r.federated ? `<label style="display:block;margin-top:6px;font-size:11px;color:#495057">
+                    <input type="checkbox" ${r.autoAccept ? 'checked' : ''}
+                           onchange="setRoomAutoAccept('${escHtml(r.jid)}', this.checked)">
+                    auto-accept requests</label>` : ''}
             </td>
             <td>${mappedCell}</td>
         </tr>`;
@@ -614,6 +607,90 @@ function renderLocalRooms(rooms) {
 
 function setRoomFederated(jid, federated) {
     post({ action: 'set-room', jid, federated: federated.toString() }).then(refresh);
+}
+
+function setRoomAutoAccept(jid, autoAccept) {
+    post({ action: 'set-room-autoaccept', jid, autoAccept: autoAccept.toString() }).then(refresh);
+}
+
+// ── Mapping consent: inline rows + pending-requests panel ───────────────────────
+
+/** Renders one mapping row with a state badge and the buttons valid for that state. */
+function renderMappingRow(localJid, m) {
+    const dom = escHtml(m.remoteDomain);
+    const lj = escHtml(localJid);
+    const target = `<span class="badge badge-fed" title="${dom}">${escHtml(m.remoteRoomJid)}</span>`;
+    const unmap = `<button class="btn-small btn-danger" onclick="unmapRoom('${lj}','${dom}')">Unmap</button>`;
+    let badge, buttons;
+    switch (m.state) {
+        case 'ACTIVE':
+            badge = (m.connected === false)
+                ? `<span class="mapping-state mapping-disconnected" title="Route to ${dom} is down">⚠ disconnected</span>`
+                : `<span class="mapping-state mapping-connected">● active</span>`;
+            buttons = `<button class="btn-small btn-warn" onclick="mappingAction('disable-mapping','${lj}','${dom}')">Disable</button> ${unmap}`;
+            break;
+        case 'PENDING_OUT':
+            badge = `<span class="mapping-state" style="color:#856404">⧗ awaiting accept</span>`;
+            buttons = `<button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="mappingAction('','${lj}','${dom}',true)">Re-request</button> ${unmap}`;
+            break;
+        case 'PENDING_IN':
+            badge = `<span class="mapping-state" style="color:#856404">⧗ awaiting your approval</span>`;
+            buttons = `<button class="btn-small btn-primary" onclick="mappingAction('accept-mapping','${lj}','${dom}')">Accept</button>
+                       <button class="btn-small btn-warn" onclick="mappingAction('reject-mapping','${lj}','${dom}')">Reject</button>`;
+            break;
+        case 'DISABLED_LOCAL':
+            badge = `<span class="mapping-state" style="color:#6c757d">⛔ disabled (by you)</span>`;
+            buttons = `<button class="btn-small btn-primary" onclick="mappingAction('enable-mapping','${lj}','${dom}')">Enable</button> ${unmap}`;
+            break;
+        case 'DISABLED_REMOTE':
+            badge = `<span class="mapping-state" style="color:#6c757d">⛔ disabled by peer</span>`;
+            buttons = unmap;
+            break;
+        case 'REJECTED':
+            badge = `<span class="mapping-state mapping-disconnected">✖ rejected</span>`;
+            buttons = `<button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="mappingAction('','${lj}','${dom}',true)">Re-request</button> ${unmap}`;
+            break;
+        default:
+            badge = `<span class="mapping-state">${escHtml(m.state || '')}</span>`;
+            buttons = unmap;
+    }
+    return `<div class="mapping-row">${target} ${badge} ${buttons}</div>`;
+}
+
+/** Generic mapping lifecycle action. When reRequest is true, re-sends the original map request. */
+function mappingAction(action, localJid, remoteDomain, reRequest) {
+    if (reRequest) {
+        // Re-issue the request using the existing mapping's remote room (looked up from lastData).
+        const room = (lastData.localRooms || []).find(x => x.jid === localJid);
+        const m = room && (room.mappings || []).find(x => x.remoteDomain === remoteDomain);
+        if (!m) return;
+        post({ action: 'map-room', localJid, remoteJid: m.remoteRoomJid, remoteDomain }).then(refresh);
+        return;
+    }
+    post({ action, localJid, remoteDomain }).then(refresh);
+}
+
+function renderPendingRequests(reqs) {
+    const box = document.getElementById('pending-requests-box');
+    const body = document.getElementById('pending-requests');
+    const badge = document.getElementById('rooms-tab-badge');
+    if (!box || !body) return;
+    if (!reqs.length) {
+        box.style.display = 'none';
+        if (badge) badge.style.display = 'none';
+        body.innerHTML = '';
+        return;
+    }
+    box.style.display = '';
+    if (badge) { badge.style.display = ''; badge.textContent = reqs.length; }
+    body.innerHTML = reqs.map(req => `
+        <div class="mapping-row" style="padding:6px 0;border-bottom:1px solid #f0f0f0">
+            <strong>${escHtml(req.remoteDomain)}</strong> wants to map
+            <span class="badge badge-fed">${escHtml(req.remoteRoomJid)}</span> onto your
+            <span class="badge badge-fed">${escHtml(req.localJid)}</span>
+            <button class="btn-small btn-primary" onclick="mappingAction('accept-mapping','${escHtml(req.localJid)}','${escHtml(req.remoteDomain)}')">Accept</button>
+            <button class="btn-small btn-warn" onclick="mappingAction('reject-mapping','${escHtml(req.localJid)}','${escHtml(req.remoteDomain)}')">Reject</button>
+        </div>`).join('');
 }
 
 // ── Per-room visibility ACL editor ─────────────────────────────────────────────

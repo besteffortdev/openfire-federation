@@ -197,11 +197,52 @@ public final class FederationStanzaFactory {
      */
     public static IQ roomUnmapping(String nextHop, String destination, String originDomain,
                                    String localJid, String remoteJid) {
+        return roomUnmapping(nextHop, destination, originDomain, localJid, remoteJid, null);
+    }
+
+    public static IQ roomUnmapping(String nextHop, String destination, String originDomain,
+                                   String localJid, String remoteJid, String token) {
+        return mappingLifecycle("room-unmap", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+    }
+
+    // ── room-mapping lifecycle (consent handshake) ─────────────────────────────
+
+    /** Accept a mapping request — carries the minted consent {@code token}. */
+    public static IQ roomMappingAccept(String nextHop, String destination, String originDomain,
+                                       String localJid, String remoteJid, String token) {
+        return mappingLifecycle("room-mapping-accept", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+    }
+
+    /** Reject a mapping request (optional {@code reason}). */
+    public static IQ roomMappingReject(String nextHop, String destination, String originDomain,
+                                       String localJid, String remoteJid, String reason) {
+        return mappingLifecycle("room-mapping-reject", nextHop, destination, originDomain, localJid, remoteJid, null, reason);
+    }
+
+    /** Disable an active mapping — the peer will show "disabled by peer". Carries the {@code token}. */
+    public static IQ roomMappingDisable(String nextHop, String destination, String originDomain,
+                                        String localJid, String remoteJid, String token) {
+        return mappingLifecycle("room-mapping-disable", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+    }
+
+    /** Re-enable a disabled mapping. Carries the {@code token}. */
+    public static IQ roomMappingEnable(String nextHop, String destination, String originDomain,
+                                       String localJid, String remoteJid, String token) {
+        return mappingLifecycle("room-mapping-enable", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+    }
+
+    /** Shared builder for the hop-by-hop mapping lifecycle IQs (same shape as room-mapping). Also
+     *  used by relays to re-emit an unchanged lifecycle IQ toward the next hop. */
+    public static IQ mappingLifecycle(String element, String nextHop, String destination,
+                                      String originDomain, String localJid, String remoteJid,
+                                      String token, String reason) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
-        Element mapping = fed.addElement("room-unmap");
+        Element mapping = fed.addElement(element);
         mapping.addAttribute("destination", destination);
         mapping.addAttribute("origin",      originDomain);
+        if (token  != null && !token.isEmpty())  mapping.addAttribute("token",  token);
+        if (reason != null && !reason.isEmpty()) mapping.addAttribute("reason", reason);
         Element map = mapping.addElement("map");
         map.addAttribute("local",  localJid);
         map.addAttribute("remote", remoteJid);

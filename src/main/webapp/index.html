@@ -179,7 +179,7 @@
     <div class="fed-tabs">
         <button class="fed-tab active" data-tab="peers">Peer Servers</button>
         <button class="fed-tab"        data-tab="routing">Routing Table</button>
-        <button class="fed-tab"        data-tab="rooms">Rooms</button>
+        <button class="fed-tab"        data-tab="rooms">Rooms <span id="rooms-tab-badge" class="badge badge-untrusted" style="display:none"></span></button>
     </div>
 
     <!-- ── Peers panel ──────────────────────────────────────────────────────── -->
@@ -365,6 +365,12 @@
 
     <!-- ── Rooms panel ──────────────────────────────────────────────────────── -->
     <div id="panel-rooms" class="fed-panel">
+
+        <div class="section-box" id="pending-requests-box" style="display:none">
+            <div class="section-box-header">Pending mapping requests</div>
+            <div class="section-box-body" id="pending-requests">
+            </div>
+        </div>
 
         <div class="section-box">
             <div class="section-box-header">Local rooms — enable federation per room</div>

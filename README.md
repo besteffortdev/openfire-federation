@@ -162,6 +162,14 @@ The federation trust boundary is enforced at several points:
   off‑path servers never learn it exists. The ACL is persisted and **survives a listed server being offline**.
   (Enforcement assumes on‑path servers run this plugin version or newer. Rooms that were already federated when you
   upgraded are migrated to *visible to all* so existing federation keeps working.)
+- **Mapping consent.** Mapping onto a remote room now sends a **request** the other admin must **Accept** (shown in
+  a *Pending mapping requests* panel and inline on the room) before any traffic flows; **Reject** declines it. On
+  accept, a per‑mapping **token** is shared and re‑checked on every later lifecycle message, so a third party can't
+  forge one and a remove+re‑add forces a fresh acceptance. A mapping can be **Disabled** instead of removed — the
+  peer shows *"disabled by peer"* and it can be re‑enabled later. A per‑room **Auto‑accept** toggle makes a room
+  free to join — incoming requests are accepted automatically (still subject to the federation/untrusted/visibility
+  gates). **On upgrade, existing mappings drop to pending and must be re‑accepted** (the lower‑domain side
+  auto‑re‑requests on reconnect; the other side just accepts).
 - **Admin API CSRF.** The Federation tab's API uses a double‑submit token (a `fed-csrf` cookie echoed back as a
   request parameter), so a forged request from another site cannot trigger peer/room changes in a logged‑in
   admin's browser. After upgrading, reload an already‑open Federation tab once so its scripts pick up the token.
