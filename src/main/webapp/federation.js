@@ -583,10 +583,12 @@ function renderLocalRooms(rooms) {
         // Per-room visibility control (only meaningful while the room is federated).
         const visList = r.visibleTo || [];
         const visExpanded = expandedRoomVis.has(r.jid);
+        const visLabel = visList.includes('*') ? 'all'
+                       : (visList.length ? visList.length + ' server(s)' : 'none');
         const visCtl = r.federated
             ? `<div style="margin-top:6px">
                    <button class="btn-small" style="background:#e2e3e5;color:#383d41"
-                           onclick="toggleRoomVis('${escHtml(r.jid)}')">Visible: ${visList.length ? visList.length + ' server(s)' : 'all'} ${visExpanded ? '▾' : '▸'}</button>
+                           onclick="toggleRoomVis('${escHtml(r.jid)}')">Visible: ${visLabel} ${visExpanded ? '▾' : '▸'}</button>
                </div>`
             : '';
         const visible = r.jid.toLowerCase().includes(roomFilter) ? '' : 'display:none';
@@ -618,40 +620,69 @@ function setRoomFederated(jid, federated) {
 
 function renderRoomVisEditor(r) {
     const id = jidToElemId(r.jid);
-    const checkedSet = editedRoomVis[r.jid] || new Set(r.visibleTo || []);
-    // Candidate servers = routable destinations ∪ whatever is already in the ACL (so an offline /
-    // manually pre-provisioned server still shows and stays selectable).
-    const candidates = new Set(lastData.routableServers || []);
-    (r.visibleTo || []).forEach(s => candidates.add(s));
-    const rows = Array.from(candidates).sort().map(s => {
-        const checked = checkedSet.has(s) ? 'checked' : '';
-        const routable = (lastData.routableServers || []).includes(s);
-        const tag = routable ? '' : '<span class="badge badge-out" title="no current route — pending">pending</span>';
-        return `
-        <label class="exposed-room">
-            <input type="checkbox" class="roomvis-cb" data-jid="${escHtml(r.jid)}" value="${escHtml(s)}" ${checked}
-                   onchange="captureRoomVisEdits('${escHtml(r.jid)}')">
-            <span>${escHtml(s)}</span> ${tag}
-        </label>`;
-    }).join('') || '<p class="empty" style="margin:4px 0">No routable servers yet — add one below.</p>';
+    const curSet = editedRoomVis[r.jid] || new Set(r.visibleTo || []);
+    const allOn = curSet.has('*');
 
-    return `
-    <tr class="exposed-editor-row">
-        <td colspan="5">
-            <div class="exposed-col-h">Servers allowed to see <strong>${escHtml(r.name || r.jid)}</strong>
-                <span class="exposed-col-sub">leave all unchecked = visible to every peer; a checked server with no route yet is pending until one appears</span>
-            </div>
-            ${rows}
+    let body;
+    if (allOn) {
+        body = '<p class="empty" style="margin:6px 0">Visible to every peer.</p>';
+    } else {
+        // Candidates = routable destinations ∪ ACL ∪ in-flight checked (so a just-added or offline
+        // server shows immediately). The "all" sentinel is never listed as a server.
+        const candidates = new Set(lastData.routableServers || []);
+        (r.visibleTo || []).forEach(s => { if (s !== '*') candidates.add(s); });
+        curSet.forEach(s => { if (s !== '*') candidates.add(s); });
+        const rows = Array.from(candidates).sort().map(s => {
+            const checked = curSet.has(s) ? 'checked' : '';
+            const routable = (lastData.routableServers || []).includes(s);
+            const tag = routable ? '' : '<span class="badge badge-out" title="no current route — pending">pending</span>';
+            return `
+            <label class="exposed-room">
+                <input type="checkbox" class="roomvis-cb" data-jid="${escHtml(r.jid)}" value="${escHtml(s)}" ${checked}
+                       onchange="captureRoomVisEdits('${escHtml(r.jid)}')">
+                <span>${escHtml(s)}</span> ${tag}
+            </label>`;
+        }).join('') || '<p class="empty" style="margin:4px 0">No servers selected — this room is visible to nobody.</p>';
+        body = `${rows}
             <div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                 <input type="text" id="roomvis-add-${id}" placeholder="add a server not listed yet"
                        style="padding:4px 6px;font-size:12px;min-width:220px"
                        onkeydown="if(event.key==='Enter'){addRoomVisServer('${escHtml(r.jid)}');event.preventDefault();}">
                 <button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="addRoomVisServer('${escHtml(r.jid)}')">Add</button>
+            </div>`;
+    }
+
+    return `
+    <tr class="exposed-editor-row">
+        <td colspan="5">
+            <div class="exposed-col-h">Servers allowed to see <strong>${escHtml(r.name || r.jid)}</strong>
+                <span class="exposed-col-sub">none selected = visible to nobody; tick “all peers” to share with everyone; a checked server with no route yet is pending</span>
+            </div>
+            <label class="exposed-room" style="font-weight:600">
+                <input type="checkbox" ${allOn ? 'checked' : ''} onchange="setRoomVisAll('${escHtml(r.jid)}', this.checked)">
+                <span>Visible to all peers</span>
+            </label>
+            ${body}
+            <div style="margin-top:8px">
                 <button class="btn-small btn-primary" onclick="saveRoomVis('${escHtml(r.jid)}')">Save</button>
-                <span id="roomvis-saved-${id}" style="display:none;color:#28a745;font-size:12px">Saved ✓</span>
+                <span id="roomvis-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:6px">Saved ✓</span>
             </div>
         </td>
     </tr>`;
+}
+
+function roomVisibleToSet(jid) {
+    if (editedRoomVis[jid]) return editedRoomVis[jid];
+    const room = (lastData.localRooms || []).find(x => x.jid === jid) || {};
+    return new Set(room.visibleTo || []);
+}
+
+function setRoomVisAll(jid, checked) {
+    captureRoomVisEdits(jid);
+    const set = roomVisibleToSet(jid);
+    if (checked) { set.clear(); set.add('*'); } else { set.delete('*'); }
+    editedRoomVis[jid] = set;
+    renderLocalRooms(lastData.localRooms || []);
 }
 
 function captureRoomVisEdits(jid) {
@@ -675,14 +706,17 @@ function addRoomVisServer(jid) {
     const srv = input.value.trim().toLowerCase();
     if (!srv) return;
     captureRoomVisEdits(jid);
-    (editedRoomVis[jid] = editedRoomVis[jid] || new Set()).add(srv);
+    const set = roomVisibleToSet(jid);
+    set.delete('*');   // adding a specific server means we're no longer in "all" mode
+    set.add(srv);
+    editedRoomVis[jid] = set;
     input.value = '';
     renderLocalRooms(lastData.localRooms || []);
 }
 
 function saveRoomVis(jid) {
     captureRoomVisEdits(jid);
-    const set = editedRoomVis[jid] || new Set();
+    const set = roomVisibleToSet(jid);
     post({ action: 'set-room-visibility', jid, servers: Array.from(set).join(',') })
         .then(result => {
             if (result && result.ok) {

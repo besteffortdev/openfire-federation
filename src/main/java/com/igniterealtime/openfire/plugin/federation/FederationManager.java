@@ -765,13 +765,20 @@ public class FederationManager {
     }
 
     /**
-     * Per-room visibility ACL check for one outbound hop. A room is sent/relayed to {@code peerDomain}
-     * when its ACL is empty (visible to all), names the peer directly, or the peer is the next hop
-     * toward some allowed destination — so the ad both reaches multi-hop destinations and stays on the
-     * route toward them. An allowed destination with no current route is simply pending until one appears.
+     * Per-room visibility ACL check for one outbound hop. The ACL semantics are:
+     * <ul>
+     *   <li>empty → visible to <b>nobody</b> (the default for a newly-federated room);</li>
+     *   <li>contains the {@code "*"} sentinel → visible to <b>all</b> peers;</li>
+     *   <li>otherwise → visible to the named servers and the path toward them.</li>
+     * </ul>
+     * For the named-servers case a room is sent/relayed to {@code peerDomain} when the ACL names the
+     * peer directly, or the peer is the next hop toward some allowed destination — so the ad both
+     * reaches multi-hop destinations and stays on the route toward them. An allowed destination with
+     * no current route is simply pending until one appears.
      */
     private boolean roomVisibleAtHop(Set<String> visibleTo, String peerDomain) {
-        if (visibleTo == null || visibleTo.isEmpty()) return true;
+        if (visibleTo == null || visibleTo.isEmpty()) return false;                 // none
+        if (visibleTo.contains(FederatedRoomManager.VISIBLE_ALL)) return true;      // all
         if (visibleTo.contains(peerDomain)) return true;
         for (String member : visibleTo) {
             if (routingTable.findNextHop(member).map(h -> h.equals(peerDomain)).orElse(false)) return true;

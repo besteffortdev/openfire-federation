@@ -33,6 +33,9 @@ public class FederatedRoomManager {
     private static final String PROP_ROOMS_INDEX = "federation.rooms.index";
     private static final String PROP_ROOM_PREFIX = "federation.room.federated.";
     private static final String PROP_ROOM_VISIBLE = "federation.room.visibleto."; // + roomJid → csv of server domains
+    private static final String PROP_VIS_MIGRATED = "federation.room.visibility.migrated"; // one-time legacy→all flag
+    /** Sentinel in a room's visibility ACL meaning "visible to all peers". Empty ACL = visible to none. */
+    public static final String VISIBLE_ALL = "*";
     private static final String PROP_MAP_INDEX   = "federation.rooms.mappings.index";
     private static final String PROP_MAP_COUNT   = "federation.rooms.mapping.%s.count";
     private static final String PROP_MAP_REMOTE  = "federation.rooms.mapping.%s.%d.remote";
@@ -93,18 +96,32 @@ public class FederatedRoomManager {
     public void load() {
         // Load federated room tags
         String index = JiveGlobals.getProperty(PROP_ROOMS_INDEX, "").strip();
+        // One-time migration: before this build an empty ACL meant "visible to all". Now empty means
+        // "visible to none". Preserve existing rooms' behaviour by pinning any legacy room with no ACL
+        // property to the explicit "all" sentinel; rooms federated after this run get the new none default.
+        boolean migrated = JiveGlobals.getBooleanProperty(PROP_VIS_MIGRATED, false);
         if (!index.isEmpty()) {
             for (String jid : index.split(",")) {
                 jid = jid.strip();
                 if (!jid.isEmpty() && JiveGlobals.getBooleanProperty(PROP_ROOM_PREFIX + jid, false)) {
                     localFederatedRooms.add(jid);
-                    Set<String> vis = parseCsvSet(JiveGlobals.getProperty(PROP_ROOM_VISIBLE + jid, ""));
+                    String raw = JiveGlobals.getProperty(PROP_ROOM_VISIBLE + jid, null);
+                    Set<String> vis;
+                    if (raw != null && !raw.isBlank()) {
+                        vis = parseCsvSet(raw);
+                    } else if (!migrated) {
+                        vis = new LinkedHashSet<>(java.util.List.of(VISIBLE_ALL));   // legacy = all
+                        JiveGlobals.setProperty(PROP_ROOM_VISIBLE + jid, VISIBLE_ALL);
+                    } else {
+                        vis = Collections.emptySet();                                // explicit none
+                    }
                     if (!vis.isEmpty()) roomVisibility.put(jid, vis);
-                    Log.info("Loaded federated room: {}{}", jid,
-                             vis.isEmpty() ? "" : " (visible to " + vis.size() + " server(s))");
+                    Log.info("Loaded federated room: {} (visible to {})", jid,
+                             vis.isEmpty() ? "none" : (vis.contains(VISIBLE_ALL) ? "all" : vis.size() + " server(s)"));
                 }
             }
         }
+        if (!migrated) JiveGlobals.setProperty(PROP_VIS_MIGRATED, "true");
 
         // Load room mappings — supports new count-indexed format and migrates legacy single-mapping format.
         String mapIndex = JiveGlobals.getProperty(PROP_MAP_INDEX, "").strip();

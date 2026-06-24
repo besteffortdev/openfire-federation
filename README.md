@@ -156,10 +156,12 @@ The federation trust boundary is enforced at several points:
   certificate, so nothing is pinned).
 - **Per‑room visibility.** Each federated room has a **Visible** control (next to its toggle) listing the servers
   allowed to see it — chosen from the routable peers, plus servers you can **add manually before they're reachable**
-  (the room advertises to them automatically once a route appears). Leaving it empty keeps the default (visible to
-  all peers). The visibility set travels with the advertisement, so every relay confines the room to the path toward
-  its allowed destinations — off‑path servers never learn it exists. The ACL is persisted and **survives a listed
-  server being offline**. (Enforcement assumes on‑path servers run this plugin version or newer.)
+  (the room advertises to them automatically once a route appears). A newly‑federated room defaults to **visible to
+  no one** — pick specific servers, or tick **Visible to all peers** to share with everyone. The visibility set
+  travels with the advertisement, so every relay confines the room to the path toward its allowed destinations —
+  off‑path servers never learn it exists. The ACL is persisted and **survives a listed server being offline**.
+  (Enforcement assumes on‑path servers run this plugin version or newer. Rooms that were already federated when you
+  upgraded are migrated to *visible to all* so existing federation keeps working.)
 - **Admin API CSRF.** The Federation tab's API uses a double‑submit token (a `fed-csrf` cookie echoed back as a
   request parameter), so a forged request from another site cannot trigger peer/room changes in a logged‑in
   admin's browser. After upgrading, reload an already‑open Federation tab once so its scripts pick up the token.
