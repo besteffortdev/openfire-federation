@@ -625,7 +625,9 @@ function renderMappingRow(localJid, m) {
     switch (m.state) {
         case 'ACTIVE':
             badge = (m.connected === false)
-                ? `<span class="mapping-state mapping-disconnected" title="Route to ${dom} is down">⚠ disconnected</span>`
+                ? (m.routeMissing
+                    ? `<span class="mapping-state mapping-disconnected" title="No route to ${dom} — an intermediate peer is not advertising it">⚠ route missing</span>`
+                    : `<span class="mapping-state mapping-disconnected" title="Route to ${dom} is down">⚠ disconnected</span>`)
                 : `<span class="mapping-state mapping-connected">● active</span>`;
             buttons = `<button class="btn-small btn-warn" onclick="mappingAction('disable-mapping','${lj}','${dom}')">Disable</button> ${unmap}`;
             break;
@@ -664,7 +666,8 @@ function mappingAction(action, localJid, remoteDomain, reRequest) {
         const room = (lastData.localRooms || []).find(x => x.jid === localJid);
         const m = room && (room.mappings || []).find(x => x.remoteDomain === remoteDomain);
         if (!m) return;
-        post({ action: 'map-room', localJid, remoteJid: m.remoteRoomJid, remoteDomain }).then(refresh);
+        post({ action: 'map-room', localJid, remoteJid: m.remoteRoomJid, remoteDomain })
+            .then(d => { if (d && d.error) alert(d.error); refresh(); });
         return;
     }
     post({ action, localJid, remoteDomain }).then(refresh);
@@ -923,7 +926,8 @@ function mapRoom(remoteJid, remoteDomain, selId) {
         alert('Please select a local room to map to.');
         return;
     }
-    post({ action: 'map-room', localJid: sel.value, remoteJid, remoteDomain }).then(refresh);
+    post({ action: 'map-room', localJid: sel.value, remoteJid, remoteDomain })
+        .then(d => { if (d && d.error) alert(d.error); refresh(); });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

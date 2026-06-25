@@ -143,11 +143,14 @@ public class FederationApiServlet extends HttpServlet {
                 if (!fm) sb.append(",");
                 fm = false;
                 boolean connected = mgr.getRoutingTable().isReachable(m.get("remoteDomain"));
+                boolean routeMissing = !connected
+                        && mgr.getPeerRegistry().getPeer(m.get("remoteDomain")).isEmpty();
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
                   .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\",")
                   .append("\"state\":\"").append(esc(m.get("state"))).append("\",")
-                  .append("\"connected\":").append(connected)
+                  .append("\"connected\":").append(connected).append(",")
+                  .append("\"routeMissing\":").append(routeMissing)
                   .append("}");
             }
             sb.append("]}");
@@ -204,10 +207,13 @@ public class FederationApiServlet extends HttpServlet {
                 if (!fm) sb.append(",");
                 fm = false;
                 boolean connected = mgr.getRoutingTable().isReachable(m.remoteDomain());
+                boolean routeMissing = !connected
+                        && mgr.getPeerRegistry().getPeer(m.remoteDomain()).isEmpty();
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
                   .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\",")
-                  .append("\"connected\":").append(connected)
+                  .append("\"connected\":").append(connected).append(",")
+                  .append("\"routeMissing\":").append(routeMissing)
                   .append("}");
             }
             sb.append("]");
@@ -332,7 +338,16 @@ public class FederationApiServlet extends HttpServlet {
                     out.print("{\"error\":\"localJid, remoteJid, remoteDomain required\"}");
                     return;
                 }
-                mgr.requestMapping(localJid.strip(), remoteJid.strip(), remoteDomain.strip());
+                String mlj = localJid.strip(), mrj = remoteJid.strip(), mrd = remoteDomain.strip().toLowerCase();
+                // Reciprocity: you may only map your room to a peer's room if you've shared THAT room
+                // with the peer (federation enabled + the peer is in the room's visibility ACL).
+                if (!mgr.roomSharedWith(mlj, mrd)) {
+                    out.print("{\"error\":\"You must share this room with " + esc(mrd)
+                            + " before mapping it to a room there. Enable federation on the room and add "
+                            + esc(mrd) + " to its visibility.\"}");
+                    return;
+                }
+                mgr.requestMapping(mlj, mrj, mrd);
                 out.print("{\"ok\":true}");
                 return;
             }

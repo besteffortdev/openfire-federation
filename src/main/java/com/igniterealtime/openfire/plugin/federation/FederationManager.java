@@ -357,7 +357,7 @@ public class FederationManager {
         if (m == null) return;
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.DISABLED_LOCAL, m.token());
         pushVirtualPresences(localJid, remoteDomain, m.remoteRoomJid(), true);
-        evictVirtualOccupants(localJid, remoteDomain);
+        evictForInactiveMapping(localJid, remoteDomain);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
         route(FederationStanzaFactory.roomMappingDisable(nextHop, remoteDomain, localDomain,
@@ -399,7 +399,7 @@ public class FederationManager {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.DISABLED_REMOTE,
                                     m != null ? m.token() : "");
-        if (m != null) evictVirtualOccupants(localJid, remoteDomain);
+        if (m != null) evictForInactiveMapping(localJid, remoteDomain);
         Log.info("Mapping {} ({}) disabled by peer", localJid, remoteDomain);
     }
 
@@ -450,14 +450,10 @@ public class FederationManager {
         if (m == null) return;
         pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         roomManager.removeMapping(localJid, remoteDomain);
-        // If this was the room's last mapping, every virtual occupant is now unreachable —
-        // evict them all (covers hub-relayed users tracked under a relay domain). Otherwise
-        // fall back to evicting the ones from this specific remote.
-        if (roomManager.getAllMappingsForLocal(localJid).isEmpty()) {
-            evictAllVirtualOccupantsInRoom(localJid);
-        } else {
-            evictVirtualOccupants(localJid, remoteDomain);
-        }
+        // If this was the room's last active mapping, every virtual occupant is now unreachable
+        // (covers hub-relayed cross-spoke users); otherwise drop this remote's users by origin
+        // and propagate their leaves to the still-active spokes. Same path as mapping disable.
+        evictForInactiveMapping(localJid, remoteDomain);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
         try {
@@ -496,6 +492,39 @@ public class FederationManager {
      */
     public void evictVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
         sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByOrigin(localRoomJid, originDomain));
+    }
+
+    /**
+     * Cleans up virtual occupants after a mapping toward {@code remoteDomain} goes inactive
+     * (disabled by either end).  Two cases, mirroring {@link #unmapRoom}:
+     *
+     * <ul>
+     *   <li><b>No ACTIVE mapping still feeds the room</b> — every virtual occupant is now
+     *       unreachable (including hub-relayed cross-spoke users whose HOME is some other
+     *       server but who only reached us through this mapping), so drop them all.  This is
+     *       the spoke side of a hub disable: the spoke's single mapping is gone, so the hub's
+     *       own users <i>and</i> the other spokes' relayed users must all leave.</li>
+     *   <li><b>Other mappings remain</b> (the hub disabling one of several spokes) — drop just
+     *       the users whose HOME domain is the now-disabled {@code remoteDomain} (origin-keyed,
+     *       so multi-hop spokes are matched even though they arrived via a relay), then
+     *       propagate those leaves to the still-active spokes so they stop seeing them too.</li>
+     * </ul>
+     *
+     * <p>Using {@code remoteDomain} as an ORIGIN key (not as an {@code arrivedVia} neighbour)
+     * is the fix for multi-hop disables: a mapping's {@code remoteDomain} is the FAR mapped
+     * server, which is the home/origin of its users — never the immediate S2S neighbour the
+     * old arrivedVia-keyed eviction looked for, so on a relayed path it matched nothing.
+     */
+    public void evictForInactiveMapping(String localRoomJid, String remoteDomain) {
+        if (roomManager.getMappingsForLocal(localRoomJid).isEmpty()) {
+            evictAllVirtualOccupantsInRoom(localRoomJid);
+            return;
+        }
+        Set<String> gone = roomManager.clearVirtualOccupantsByOrigin(localRoomJid, remoteDomain);
+        sendVirtualLeaves(localRoomJid, gone);
+        for (String nick : gone) {
+            forwardVirtualLeave(localRoomJid, nick, remoteDomain, java.util.Set.of(remoteDomain));
+        }
     }
 
     /**
@@ -847,10 +876,16 @@ public class FederationManager {
             if (peer.getDomain().equals(excludeDomain)) continue;
             if (via != null && via.contains(peer.getDomain())) continue;
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
-                // Untrusted-peer exposure + per-room visibility: relay only the allowed subset; skip if
-                // none remain (but still relay a genuinely empty list, which is a withdrawal).
+                // Untrusted-peer exposure + per-room visibility: relay only the allowed subset.
+                // Always send the filtered list, EVEN WHEN EMPTY: a peer that was previously on the
+                // path for this origin but is now excluded (e.g. dropped from a room's visibility
+                // ACL) must receive the empty list so it withdraws the origin's rooms. Safe because
+                // updateRemoteRooms REPLACES the origin's room set per receiver and an empty list
+                // clears only THIS origin's rooms, so an off-path peer drops exactly them and relays
+                // the withdrawal onward. (The old "skip empty unless the origin's list is empty"
+                // guard never delivered the withdrawal to multi-hop excluded peers — the ACL-removal
+                // bug where unchecking one server left it still seeing the room.)
                 List<FederatedRoom> toSend = filterRoomsForHop(peer.getDomain(), rooms);
-                if (toSend.isEmpty() && !rooms.isEmpty()) continue;
                 try {
                     XMPPServer.getInstance().getPacketRouter()
                               .route(FederationStanzaFactory.roomAdvertisement(
@@ -911,6 +946,20 @@ public class FederationManager {
         return filterRoomsForPeer(toDomain, rooms).stream()
                 .filter(r -> roomVisibleAtHop(r.visibleTo(), toDomain))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Reciprocity gate for mapping: true iff our local room {@code localJid} is federation-enabled
+     * AND its visibility ACL shares it with {@code destDomain}. A server may map one of its rooms to
+     * a peer's room only when it has first exposed THAT room to the peer — you cannot consume a
+     * peer's room without offering your own room to it in return.
+     */
+    public boolean roomSharedWith(String localJid, String destDomain) {
+        if (destDomain == null || !roomManager.isFederated(localJid)) return false;
+        Set<String> vis = roomManager.getRoomVisibility(localJid);
+        if (vis == null || vis.isEmpty()) return false;
+        return vis.contains(FederatedRoomManager.VISIBLE_ALL)
+            || vis.contains(destDomain.toLowerCase());
     }
 
     /** Distinct routing-table destinations — the candidate servers for a room's visibility ACL. */

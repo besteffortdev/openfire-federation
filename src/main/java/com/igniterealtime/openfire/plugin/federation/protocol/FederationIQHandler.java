@@ -500,6 +500,10 @@ public class FederationIQHandler extends IQHandler {
 
         // Relay if we are not the final destination (multi-hop topology).
         if (destination != null && !localDomain.equals(destination)) {
+            // Carry the consent token across the relay — without it the final destination's
+            // tokenOk() check fails (non-empty stored vs empty relayed) and it drops the unmap,
+            // leaving hub-relayed cross-spoke occupants behind as ghosts.
+            String relayToken = el.attributeValue("token", "");
             manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
                 nextHop -> {
                     for (Element map : el.elements("map")) {
@@ -509,7 +513,7 @@ public class FederationIQHandler extends IQHandler {
                             try {
                                 XMPPServer.getInstance().getPacketRouter()
                                           .route(FederationStanzaFactory.roomUnmapping(
-                                              nextHop, destination, origin, theirLocal, theirRemote));
+                                              nextHop, destination, origin, theirLocal, theirRemote, relayToken));
                             } catch (Exception e) {
                                 Log.warn("Could not relay room-unmap toward {}: {}", destination, e.getMessage());
                             }
@@ -533,16 +537,11 @@ public class FederationIQHandler extends IQHandler {
                 }
                 // Only remove the mapping for this specific originator — other spokes stay connected.
                 manager.getRoomManager().removeMapping(theirRemote, actualOrigin);
-                // Drop the virtual occupants that came in through this mapping so local clients
-                // see them leave. If no mapping remains for the room, every virtual occupant is
-                // now unreachable — evict them ALL. This is essential for multi-hop spokes:
-                // hub-relayed users (from other servers) are tracked under the relay domain, not
-                // the origin, so a per-origin evict would miss them and leave ghosts.
-                if (manager.getRoomManager().getAllMappingsForLocal(theirRemote).isEmpty()) {
-                    manager.evictAllVirtualOccupantsInRoom(theirRemote);
-                } else {
-                    manager.evictVirtualOccupants(theirRemote, actualOrigin);
-                }
+                // Drop the virtual occupants reached through this mapping (and, if it was the
+                // last active mapping, every virtual occupant in the room — catching hub-relayed
+                // cross-spoke users that origin/arrivedVia keying would miss on a multi-hop path).
+                // Same teardown path used by mapping disable.
+                manager.evictForInactiveMapping(theirRemote, actualOrigin);
                 Log.info("Room mapping removed by remote {}: local={}", actualOrigin, theirRemote);
             }
         }
