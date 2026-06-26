@@ -231,16 +231,16 @@ public class FederationManager {
         return null;
     }
 
-    /** Builds a directed presence from→to copying type/show/status of a source presence. */
+    /**
+     * Builds a directed presence from→to.  Copies the source presence WHOLE (not just show/status)
+     * so extension elements survive — the avatar hash {@code vcard-temp:x:update} (XEP-0153), entity
+     * caps {@code <c/>} (XEP-0115) and priority — then overwrites from/to.  Without this a contact's
+     * client never learns there is an avatar to fetch or what the contact supports.
+     */
     private Presence directedPresence(JID from, JID to, Presence src) {
-        Presence p = new Presence();
+        Presence p = (src != null) ? new Presence(src.getElement().createCopy()) : new Presence();
         p.setFrom(src != null && src.getFrom() != null ? src.getFrom() : from);
         p.setTo(to);
-        if (src != null) {
-            if (src.getType()   != null) p.setType(src.getType());      // unavailable
-            if (src.getShow()   != null) p.setShow(src.getShow());      // away / xa / dnd / chat
-            if (src.getStatus() != null) p.setStatus(src.getStatus());
-        }
         return p;
     }
 
@@ -1206,6 +1206,29 @@ public class FederationManager {
             return true;
         } catch (Exception e) {
             Log.warn("Failed to forward 1:1 presence to {}: {}", destDomain, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Relays a user-addressed IQ (vCard/disco/caps/version/ping/PEP) toward its destination domain
+     * over the overlay.  Counterpart of {@link #forwardDirectMessage}; lets profile/avatar/discovery
+     * round-trips cross multi-hop links.  Returns true if handed to a next hop (caller suppresses
+     * native S2S), false if no route.
+     */
+    public boolean forwardDirectIq(IQ iq) {
+        String destDomain  = iq.getTo().getDomain();
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
+        if (nextHop == null) return false;
+        try {
+            IQ copy = new IQ(iq.getElement().createCopy());
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.iqForward(nextHop, destDomain, localDomain, copy));
+            Log.debug("iq-forward: 1:1 {} {} -> {} via {}", iq.getType(), iq.getFrom(), iq.getTo(), nextHop);
+            return true;
+        } catch (Exception e) {
+            Log.warn("Failed to forward 1:1 IQ to {}: {}", destDomain, e.getMessage());
             return false;
         }
     }

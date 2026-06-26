@@ -10,6 +10,7 @@ import org.jivesoftware.openfire.interceptor.PacketRejectedException;
 import org.jivesoftware.openfire.session.Session;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xmpp.packet.IQ;
 import org.xmpp.packet.Message;
 import org.xmpp.packet.Packet;
 import org.xmpp.packet.Presence;
@@ -64,6 +65,10 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // 1:1 presence: relay an outbound directed presence / subscription stanza to a
         // multi-hop peer user so contacts + live presence work across the overlay.
         relayDirectPresence(packet, session);
+
+        // 1:1 IQ: relay a user-addressed IQ (vCard, disco, caps, version, ping, PEP) to a
+        // multi-hop peer user so profile/avatar/discovery work across the overlay.
+        relayDirectIq(packet, session);
 
         if (packet instanceof Message msg && incoming && processed) {
             handleMessage(msg);
@@ -216,6 +221,31 @@ public class FederationPacketInterceptor implements PacketInterceptor {
                 manager.removeRemoteSubscriber(pres.getFrom(), to);
             }
             throw new PacketRejectedException("Relayed presence over federation overlay to " + toDomain);
+        }
+    }
+
+    /**
+     * Relays a locally-originated user-addressed IQ (vCard, disco#info, entity-caps, version, ping,
+     * PEP …) to a multi-hop peer user, then rejects it to suppress native S2S.  Covers get/set/result/
+     * error uniformly, so a reply (an outbound IQ from the answering server to the remote requester)
+     * relays back the same way, correlated by id.  Untouched: server-addressed IQs (no node), MUC
+     * service IQs, local delivery, and direct peers (native S2S).
+     */
+    private void relayDirectIq(Packet packet, Session session) throws PacketRejectedException {
+        if (!(packet instanceof IQ iq)) return;
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+
+        JID to = iq.getTo();
+        if (to == null || to.getNode() == null) return;                 // user-addressed IQ only
+        String toDomain = to.getDomain();
+        if (isConferenceDomain(toDomain)) return;                       // MUC service IQ, not a user
+        if (XMPPServer.getInstance().isLocal(to)) return;               // local delivery — not ours
+        if (!isMultiHopPeer(toDomain)) return;                          // direct peers use native S2S
+
+        stampFrom(iq, session);
+        if (manager.forwardDirectIq(iq)) {
+            Log.info("Relayed 1:1 IQ {} {} -> {} over overlay (multi-hop)", iq.getType(), iq.getFrom(), to);
+            throw new PacketRejectedException("Relayed IQ over federation overlay to " + toDomain);
         }
     }
 

@@ -329,6 +329,22 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    /**
+     * Wraps a user-addressed IQ (vCard, disco, entity-caps, version, ping, PEP …) for relay toward
+     * {@code finalDestination}.  Same envelope as {@link #directForward}; the embedded IQ keeps its
+     * real {@code id}/{@code from}/{@code to} so the destination server answers it (or delivers it to
+     * the target session) and the result relays back the same way, correlated by id.
+     */
+    public static IQ iqForward(String nextHop, String finalDestination, String viaTrail, IQ payload) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element fwd = fed.addElement("iq-forward");
+        fwd.addAttribute("destination", finalDestination);
+        fwd.addAttribute("via",         viaTrail);
+        fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
     // ── user-directory (opt-in online-user gossip) ──────────────────────────────
 
     /**

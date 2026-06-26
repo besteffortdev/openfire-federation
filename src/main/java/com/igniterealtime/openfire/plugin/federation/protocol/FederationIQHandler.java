@@ -106,6 +106,7 @@ public class FederationIQHandler extends IQHandler {
             case "muc-forward"         -> handleMucForward(fromDomain, child);
             case "direct-forward"      -> handleDirectForward(fromDomain, child);
             case "presence-forward"    -> handlePresenceForward(fromDomain, child);
+            case "iq-forward"          -> handleIqForward(fromDomain, child);
             case "user-directory"      -> handleUserDirectory(fromDomain, child);
             default -> Log.warn("Unknown federation action '{}' from {}", child.getName(), fromDomain);
         }
@@ -741,6 +742,55 @@ public class FederationIQHandler extends IQHandler {
                     }
                 },
                 () -> Log.warn("presence-forward: no route to {}, dropping", finalDest)
+            );
+        }
+    }
+
+    // ── iq-forward (vCard / disco / caps / version / ping / PEP) ───────────────
+
+    /**
+     * Relays or delivers a user-addressed IQ carried over the overlay.  Same relay shape as
+     * {@link #handleDirectForward}; at the destination the unwrapped IQ is routed through the normal
+     * packet router so Openfire's own handlers answer it (vCard, disco, PEP) or deliver it to the
+     * target session.  No {@code fed-origin} marker — it would corrupt single-child IQ payloads (e.g.
+     * {@code <vCard>}); loop-safety comes from addressing (every delivered IQ targets a local JID at
+     * its hop, so the interceptor's multi-hop check never re-relays it). id/from/to are preserved, so
+     * the result relays back the same way and correlates.
+     */
+    private void handleIqForward(String fromDomain, Element el) {
+        String finalDest   = el.attributeValue("destination");
+        String via         = el.attributeValue("via", "");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        if (via.contains(localDomain)) {
+            Log.warn("iq-forward loop detected (via={}), dropping", via);
+            return;
+        }
+
+        Element payloadEl = el.element("iq");
+        if (payloadEl == null) {
+            Log.warn("iq-forward from {} has no iq payload", fromDomain);
+            return;
+        }
+
+        if (finalDest == null || localDomain.equals(finalDest)) {
+            IQ iq = new IQ(payloadEl.createCopy());
+            XMPPServer.getInstance().getPacketRouter().route(iq);    // let Openfire answer / deliver it
+            Log.info("iq-forward: delivered 1:1 {} {} -> {} (from {})",
+                     iq.getType(), iq.getFrom(), iq.getTo(), fromDomain);
+        } else {
+            String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+            manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
+                nextHop -> {
+                    try {
+                        IQ embedded = new IQ(payloadEl.createCopy());
+                        XMPPServer.getInstance().getPacketRouter()
+                                  .route(FederationStanzaFactory.iqForward(nextHop, finalDest, newVia, embedded));
+                    } catch (Exception e) {
+                        Log.warn("Could not relay iq-forward toward {}: {}", finalDest, e.getMessage());
+                    }
+                },
+                () -> Log.warn("iq-forward: no route to {}, dropping", finalDest)
             );
         }
     }
