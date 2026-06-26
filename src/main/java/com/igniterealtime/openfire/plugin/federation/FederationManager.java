@@ -81,9 +81,9 @@ public class FederationManager {
         // Republish our directory live as local users come/go/change presence (only when publishing
         // is enabled; the S2S poll tick remains a backstop).
         presenceListener = new PresenceEventListener() {
-            @Override public void availableSession(ClientSession s, Presence p)   { onLocalPresenceChange(); }
-            @Override public void unavailableSession(ClientSession s, Presence p) { onLocalPresenceChange(); }
-            @Override public void presenceChanged(ClientSession s, Presence p)    { onLocalPresenceChange(); }
+            @Override public void availableSession(ClientSession s, Presence p)   { onLocalPresenceEvent(s, p); }
+            @Override public void unavailableSession(ClientSession s, Presence p) { onLocalPresenceEvent(s, p); }
+            @Override public void presenceChanged(ClientSession s, Presence p)    { onLocalPresenceEvent(s, p); }
             @Override public void subscribedToPresence(JID a, JID b)   { }
             @Override public void unsubscribedToPresence(JID a, JID b) { }
         };
@@ -92,9 +92,20 @@ public class FederationManager {
         Log.info("Federation plugin started — {} peer(s) configured", peerRegistry.getPeers().size());
     }
 
-    /** Local presence event: refresh the published directory if publishing is on. */
-    private void onLocalPresenceChange() {
+    /**
+     * A local user's presence changed. Two effects: (1) refresh the published directory if publishing
+     * is on; (2) forward the user's new presence to mapped peers for any federated room they occupy so
+     * an in-room status change propagates live (a broadcast presence never reaches the interceptor).
+     */
+    private void onLocalPresenceEvent(ClientSession session, Presence presence) {
         if (FederationProperties.DIRECTORY_PUBLISH.getValue()) publishDirectory();
+        try {
+            if (session != null && session.getAddress() != null) {
+                forwardLocalOccupantPresence(session.getAddress(), presence);
+            }
+        } catch (Exception e) {
+            Log.debug("forwardLocalOccupantPresence failed: {}", e.getMessage());
+        }
     }
 
     public void stop() {
@@ -1097,6 +1108,60 @@ public class FederationManager {
             out.add(m);
         }
         return out;
+    }
+
+    /**
+     * Forwards a local user's updated presence (availability/show/status change) to the peers mapped
+     * to each federated room the user occupies.  Needed because a client changes status by sending a
+     * BROADCAST presence (no {@code to}); Openfire updates MUC occupancy internally and never emits a
+     * directed room/nick stanza, so the packet interceptor (which only forwards directed join/leave
+     * presence) never sees the change.  Without this, an in-room status change only propagates on a
+     * full roster re-sync (mapping/peer disable-enable).  Driven by the {@link PresenceEventListener}.
+     */
+    public void forwardLocalOccupantPresence(JID user, Presence presence) {
+        if (user == null || user.getNode() == null) return;
+        JID bareUser = user.asBareJID();
+        for (String localRoomJid : roomManager.getLocalMappings().keySet()) {
+            List<RoomMapping> mappings = roomManager.getMappingsForLocal(localRoomJid);   // ACTIVE only
+            if (mappings.isEmpty()) continue;
+            MUCRoom room = findLocalMucRoom(localRoomJid);
+            if (room == null) continue;
+            boolean present = room.getOccupants().stream().anyMatch(o ->
+                    o.getUserAddress() != null && bareUser.equals(o.getUserAddress().asBareJID()));
+            if (!present) continue;
+
+            // Build the room presence the interceptor would have forwarded for a directed change.
+            // injectPresence derives the remote nick from this 'from' (user@home), so a bare JID
+            // updates the same virtual occupant created at join time.
+            JID roomJid = new JID(localRoomJid);
+            Presence fwd = new Presence();
+            fwd.setFrom(bareUser);
+            fwd.setTo(new JID(roomJid.getNode(), roomJid.getDomain(), bareUser.toString()));
+            if (presence != null && presence.getType() == Presence.Type.unavailable) {
+                fwd.setType(Presence.Type.unavailable);
+            } else if (presence != null) {
+                if (presence.getShow()   != null) fwd.setShow(presence.getShow());
+                if (presence.getStatus() != null) fwd.setStatus(presence.getStatus());
+            }
+            for (RoomMapping m : mappings) {
+                forwardMucPresence(fwd, m);
+            }
+        }
+    }
+
+    /** Wraps a room presence in a muc-forward toward a mapped peer (same path as the interceptor). */
+    private void forwardMucPresence(Presence pres, RoomMapping mapping) {
+        String localDomain  = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String remoteDomain = mapping.remoteDomain();
+        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
+        try {
+            Presence copy = new Presence(pres.getElement().createCopy());
+            XMPPServer.getInstance().getPacketRouter().route(
+                FederationStanzaFactory.mucForward(
+                    nextHop, remoteDomain, mapping.remoteRoomJid(), localDomain, localDomain, copy));
+        } catch (Exception e) {
+            Log.warn("Failed to forward occupant presence to {}: {}", remoteDomain, e.getMessage());
+        }
     }
 
     // ── Untrusted-peer exposure filtering ──────────────────────────────────────
