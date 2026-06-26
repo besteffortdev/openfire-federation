@@ -716,6 +716,14 @@ public class FederationIQHandler extends IQHandler {
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             Presence pres = new Presence(payloadEl.createCopy());
+            // A probe for a local user: Openfire's own answer would be routed past the interceptor and
+            // never cross the overlay, so answer explicitly with the user's current presence.
+            if (pres.getType() == Presence.Type.probe) {
+                manager.answerPresenceProbe(pres.getFrom(), pres.getTo());
+                Log.info("presence-forward: answered probe {} -> {} (from {})",
+                         pres.getFrom(), pres.getTo(), fromDomain);
+                return;
+            }
             FederationStanzaFactory.markAsForwarded(pres);
             XMPPServer.getInstance().getPacketRouter().route(pres);   // let Openfire's roster engine handle it
             Log.info("presence-forward: delivered 1:1 {} {} -> {} (from {})",

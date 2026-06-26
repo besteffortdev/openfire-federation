@@ -206,6 +206,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (manager.forwardDirectPresence(pres)) {
             Log.info("Relayed 1:1 presence {} {} -> {} over overlay (multi-hop)",
                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), to);
+            // We just approved a remote contact — Openfire's own presence push to that new subscriber
+            // is routed past this interceptor, so send our user's presence explicitly over the overlay.
+            if (pres.getType() == Presence.Type.subscribed) {
+                manager.pushUserPresenceTo(to, pres.getFrom());
+            }
             throw new PacketRejectedException("Relayed presence over federation overlay to " + toDomain);
         }
     }

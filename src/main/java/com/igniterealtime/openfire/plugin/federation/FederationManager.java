@@ -83,13 +83,15 @@ public class FederationManager {
         // Republish our directory live as local users come/go/change presence (only when publishing
         // is enabled; the S2S poll tick remains a backstop).
         presenceListener = new PresenceEventListener() {
-            @Override public void availableSession(ClientSession s, Presence p)   { onLocalPresenceEvent(s, p); }
+            @Override public void availableSession(ClientSession s, Presence p) {
+                onLocalPresenceEvent(s, p);
+                // On login, probe our multi-hop contacts to pull their current presence.
+                try { if (s != null && s.getAddress() != null) probeRemoteContacts(s.getAddress()); }
+                catch (Exception e) { Log.debug("probeRemoteContacts failed: {}", e.getMessage()); }
+            }
             @Override public void unavailableSession(ClientSession s, Presence p) { onLocalPresenceEvent(s, p); }
             @Override public void presenceChanged(ClientSession s, Presence p)    { onLocalPresenceEvent(s, p); }
-            @Override public void subscribedToPresence(JID subscriberJID, JID userJID) {
-                try { pushPresenceToNewSubscriber(subscriberJID, userJID); }
-                catch (Exception e) { Log.debug("pushPresenceToNewSubscriber failed: {}", e.getMessage()); }
-            }
+            @Override public void subscribedToPresence(JID subscriberJID, JID userJID)   { }
             @Override public void unsubscribedToPresence(JID a, JID b) { }
         };
         PresenceEventDispatcher.addListener(presenceListener);
@@ -144,18 +146,51 @@ public class FederationManager {
     }
 
     /**
-     * Pushes a local user's current presence to a freshly-subscribed contact on a multi-hop peer
-     * (RFC 6121 "send current presence on subscription approval") — covers the case where the user
-     * was already online before the subscription, so no presence-change event would fire.
+     * Pushes a local user's current presence to a remote (multi-hop) target.  Used both when we have
+     * just approved a subscription (the relayed {@code subscribed}) and when answering a presence
+     * probe — in both cases Openfire's own presence delivery to the remote peer would be routed past
+     * the packet interceptor, so we send it explicitly over the overlay.
      */
-    public void pushPresenceToNewSubscriber(JID subscriberJID, JID userJID) {
+    public void pushUserPresenceTo(JID target, JID localUser) {
         if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
-        if (userJID == null || !XMPPServer.getInstance().isLocal(userJID)) return;
-        if (subscriberJID == null || subscriberJID.getNode() == null) return;
-        if (!isMultiHopPeer(subscriberJID.getDomain())) return;
-        Presence cur = currentPresenceOf(userJID);
+        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
+        if (target == null || target.getNode() == null) return;
+        if (!isMultiHopPeer(target.getDomain())) return;
+        Presence cur = currentPresenceOf(localUser);
         if (cur == null) return;   // user offline — nothing to advertise
-        forwardDirectPresence(directedPresence(userJID, subscriberJID, cur));
+        forwardDirectPresence(directedPresence(localUser, target, cur));
+    }
+
+    /** Answer a relayed presence probe for a local user by sending that user's presence to the prober. */
+    public void answerPresenceProbe(JID prober, JID localUser) { pushUserPresenceTo(prober, localUser); }
+
+    /**
+     * On a local user's login, probe their multi-hop roster contacts so we pull each contact's current
+     * presence (Openfire's own probe is routed past the interceptor and never crosses the overlay).
+     * The far server answers via {@link #answerPresenceProbe}.
+     */
+    public void probeRemoteContacts(JID user) {
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+        if (user == null || user.getNode() == null || !XMPPServer.getInstance().isLocal(user)) return;
+        Roster roster;
+        try {
+            roster = XMPPServer.getInstance().getRosterManager().getRoster(user.getNode());
+        } catch (Exception e) {
+            return;
+        }
+        if (roster == null) return;
+        for (RosterItem item : roster.getRosterItems()) {
+            JID contact = item.getJid();
+            if (contact == null || contact.getNode() == null) continue;
+            if (!isMultiHopPeer(contact.getDomain())) continue;
+            RosterItem.SubType sub = item.getSubStatus();
+            if (sub != RosterItem.SUB_TO && sub != RosterItem.SUB_BOTH) continue;   // we subscribe to them
+            Presence probe = new Presence();
+            probe.setType(Presence.Type.probe);
+            probe.setFrom(user.asBareJID());
+            probe.setTo(contact);
+            forwardDirectPresence(probe);
+        }
     }
 
     /** The highest-priority available presence of a local user's sessions, or null if offline. */
