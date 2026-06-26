@@ -128,20 +128,49 @@ public class FederationManager {
         if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
         if (user == null || user.getNode() == null) return;
         if (!XMPPServer.getInstance().isLocal(user)) return;
-        Roster roster;
+
+        // Targets = anyone subscribed to this user's presence. We union two sources:
+        //  (1) subscribers we tracked from the `subscribed` stanzas we relayed — authoritative and
+        //      robust even when Openfire's cross-server roster state lands incomplete; and
+        //  (2) roster items marked FROM/BOTH (covers restart, where the tracked map is empty).
+        Set<String> targets = new LinkedHashSet<>(
+                remoteSubscribers.getOrDefault(user.toBareJID(), Collections.emptySet()));
         try {
-            roster = XMPPServer.getInstance().getRosterManager().getRoster(user.getNode());
-        } catch (Exception e) {
-            return;
-        }
-        if (roster == null) return;
-        for (RosterItem item : roster.getRosterItems()) {
-            JID contact = item.getJid();
-            if (contact == null || contact.getNode() == null) continue;
+            Roster roster = XMPPServer.getInstance().getRosterManager().getRoster(user.getNode());
+            if (roster != null) {
+                for (RosterItem item : roster.getRosterItems()) {
+                    JID c = item.getJid();
+                    if (c == null || c.getNode() == null) continue;
+                    RosterItem.SubType sub = item.getSubStatus();
+                    if (sub == RosterItem.SUB_FROM || sub == RosterItem.SUB_BOTH) targets.add(c.toBareJID());
+                }
+            }
+        } catch (Exception ignored) { }
+
+        for (String bare : targets) {
+            JID contact = new JID(bare);
             if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
-            RosterItem.SubType sub = item.getSubStatus();                // must be subscribed TO us
-            if (sub != RosterItem.SUB_FROM && sub != RosterItem.SUB_BOTH) continue;
             forwardDirectPresence(directedPresence(user, contact, presence));
+        }
+    }
+
+    /** Subscribers (remote bare JIDs) of each local user's presence, tracked from relayed `subscribed`. */
+    private final Map<String, Set<String>> remoteSubscribers = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Record that {@code subscriber} is now subscribed to local {@code localUser}'s presence. */
+    public void addRemoteSubscriber(JID localUser, JID subscriber) {
+        if (localUser == null || subscriber == null || subscriber.getNode() == null) return;
+        remoteSubscribers.computeIfAbsent(localUser.toBareJID(),
+                k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(subscriber.toBareJID());
+    }
+
+    /** Forget a subscriber (relayed `unsubscribed`). */
+    public void removeRemoteSubscriber(JID localUser, JID subscriber) {
+        if (localUser == null || subscriber == null) return;
+        Set<String> subs = remoteSubscribers.get(localUser.toBareJID());
+        if (subs != null) {
+            subs.remove(subscriber.toBareJID());
+            if (subs.isEmpty()) remoteSubscribers.remove(localUser.toBareJID());
         }
     }
 
