@@ -56,14 +56,14 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // remote join never takes effect.
         enforceFederationOnly(packet);
 
-        // 1:1 private messaging: relay an outbound message bound for an overlay-reachable
-        // peer user through the federation overlay (and suppress native S2S). Runs before
-        // the MUC forwarding branches below since it targets user JIDs, not rooms.
-        relayDirectMessage(packet);
+        // 1:1 private messaging: relay an outbound message bound for a MULTI-HOP peer user
+        // through the federation overlay (and suppress native S2S). Runs before the MUC
+        // forwarding branches below since it targets user JIDs, not rooms.
+        relayDirectMessage(packet, session);
 
-        // 1:1 presence: relay an outbound directed presence / subscription stanza to an
-        // overlay-reachable peer user so contacts + live presence work across the overlay.
-        relayDirectPresence(packet);
+        // 1:1 presence: relay an outbound directed presence / subscription stanza to a
+        // multi-hop peer user so contacts + live presence work across the overlay.
+        relayDirectPresence(packet, session);
 
         if (packet instanceof Message msg && incoming && processed) {
             handleMessage(msg);
@@ -161,7 +161,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
      * user (local user, MUC service, or a domain not in our routing table), or for groupchat /
      * error stanzas.  Replies are handled symmetrically by the destination server's interceptor.
      */
-    private void relayDirectMessage(Packet packet) throws PacketRejectedException {
+    private void relayDirectMessage(Packet packet, Session session) throws PacketRejectedException {
         if (!(packet instanceof Message msg)) return;
         if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
 
@@ -175,11 +175,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         String toDomain = to.getDomain();
         if (isConferenceDomain(toDomain)) return;                       // MUC service, not a user
         if (XMPPServer.getInstance().isLocal(to)) return;               // local delivery — not ours
+        if (!isMultiHopPeer(toDomain)) return;                          // direct peers use native S2S
 
-        // Only overlay-reachable peer domains are relayed; ordinary external S2S is untouched.
-        if (!manager.getRoutingTable().isReachable(toDomain)) return;
-
+        stampFrom(msg, session);
         if (manager.forwardDirectMessage(msg)) {
+            Log.info("Relayed 1:1 message {} -> {} over overlay (multi-hop)", msg.getFrom(), to);
             throw new PacketRejectedException("Relayed over federation overlay to " + toDomain);
         }
     }
@@ -191,7 +191,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
      * live presence for on-demand federated contacts.  Untouched: MUC presence (conference domain),
      * broadcast presence (no addressed user), local delivery, and non-overlay domains.
      */
-    private void relayDirectPresence(Packet packet) throws PacketRejectedException {
+    private void relayDirectPresence(Packet packet, Session session) throws PacketRejectedException {
         if (!(packet instanceof Presence pres)) return;
         if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
 
@@ -200,10 +200,32 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         String toDomain = to.getDomain();
         if (isConferenceDomain(toDomain)) return;                       // MUC join/leave, handled below
         if (XMPPServer.getInstance().isLocal(to)) return;               // local delivery — not ours
-        if (!manager.getRoutingTable().isReachable(toDomain)) return;   // only overlay peers
+        if (!isMultiHopPeer(toDomain)) return;                          // direct peers use native S2S
 
+        stampFrom(pres, session);
         if (manager.forwardDirectPresence(pres)) {
+            Log.info("Relayed 1:1 presence {} {} -> {} over overlay (multi-hop)",
+                     pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), to);
             throw new PacketRejectedException("Relayed presence over federation overlay to " + toDomain);
+        }
+    }
+
+    /**
+     * True when {@code toDomain} is reachable over the federation overlay but NOT a directly-connected
+     * peer — i.e. its route's next hop is some intermediate server.  Direct peers have a working
+     * native S2S link that already handles 1:1 messages, presence and subscriptions correctly, so we
+     * leave those alone and only relay where there is no direct link (the overlay's reason to exist).
+     */
+    private boolean isMultiHopPeer(String toDomain) {
+        return manager.getRoutingTable().findNextHop(toDomain)
+                      .map(nextHop -> !nextHop.equals(toDomain))
+                      .orElse(false);
+    }
+
+    /** Ensures a relayed stanza carries a {@code from} (clients often omit it; the recipient needs it). */
+    private void stampFrom(Packet packet, Session session) {
+        if (packet.getFrom() == null && session != null && session.getAddress() != null) {
+            packet.setFrom(session.getAddress());
         }
     }
 

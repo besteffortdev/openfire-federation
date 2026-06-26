@@ -670,7 +670,7 @@ public class FederationIQHandler extends IQHandler {
             Message msg = new Message(payloadEl.createCopy());
             FederationStanzaFactory.markAsForwarded(msg);
             FederationStanzaFactory.directDeliver(msg);
-            Log.debug("direct-forward: delivered 1:1 {} -> {}", msg.getFrom(), msg.getTo());
+            Log.info("direct-forward: delivered 1:1 {} -> {} (from {})", msg.getFrom(), msg.getTo(), fromDomain);
         } else {
             // Intermediate hop — forward toward the destination, appending ourselves to the trail.
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
@@ -718,8 +718,8 @@ public class FederationIQHandler extends IQHandler {
             Presence pres = new Presence(payloadEl.createCopy());
             FederationStanzaFactory.markAsForwarded(pres);
             XMPPServer.getInstance().getPacketRouter().route(pres);   // let Openfire's roster engine handle it
-            Log.debug("presence-forward: routed 1:1 {} {} -> {}",
-                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo());
+            Log.info("presence-forward: delivered 1:1 {} {} -> {} (from {})",
+                     pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), fromDomain);
         } else {
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
             manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
