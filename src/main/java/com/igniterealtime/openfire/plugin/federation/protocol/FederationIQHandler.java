@@ -1,6 +1,7 @@
 package com.igniterealtime.openfire.plugin.federation.protocol;
 
 import com.igniterealtime.openfire.plugin.federation.FederationManager;
+import com.igniterealtime.openfire.plugin.federation.UserDirectory;
 import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
@@ -104,6 +105,7 @@ public class FederationIQHandler extends IQHandler {
             case "room-unmap"          -> handleRoomUnmap(fromDomain, child);
             case "muc-forward"         -> handleMucForward(fromDomain, child);
             case "direct-forward"      -> handleDirectForward(fromDomain, child);
+            case "presence-forward"    -> handlePresenceForward(fromDomain, child);
             case "user-directory"      -> handleUserDirectory(fromDomain, child);
             default -> Log.warn("Unknown federation action '{}' from {}", child.getName(), fromDomain);
         }
@@ -687,6 +689,54 @@ public class FederationIQHandler extends IQHandler {
         }
     }
 
+    // ── presence-forward (1:1 subscription + presence) ─────────────────────────
+
+    /**
+     * Relays or delivers a 1:1 presence carried over the overlay.  Same relay shape as
+     * {@link #handleDirectForward}, but at the destination the presence is routed through the normal
+     * packet router (NOT directDeliver) so Openfire's roster/subscription/presence engine processes
+     * it — recording subscriptions and broadcasting presence as if it had arrived via S2S.  Marked
+     * forwarded first so our own interceptor doesn't re-relay it.
+     */
+    private void handlePresenceForward(String fromDomain, Element el) {
+        String finalDest   = el.attributeValue("destination");
+        String via         = el.attributeValue("via", "");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        if (via.contains(localDomain)) {
+            Log.warn("presence-forward loop detected (via={}), dropping", via);
+            return;
+        }
+
+        Element payloadEl = el.element("presence");
+        if (payloadEl == null) {
+            Log.warn("presence-forward from {} has no presence payload", fromDomain);
+            return;
+        }
+
+        if (finalDest == null || localDomain.equals(finalDest)) {
+            Presence pres = new Presence(payloadEl.createCopy());
+            FederationStanzaFactory.markAsForwarded(pres);
+            XMPPServer.getInstance().getPacketRouter().route(pres);   // let Openfire's roster engine handle it
+            Log.debug("presence-forward: routed 1:1 {} {} -> {}",
+                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo());
+        } else {
+            String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+            manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
+                nextHop -> {
+                    try {
+                        Presence embedded = new Presence(payloadEl.createCopy());
+                        XMPPServer.getInstance().getPacketRouter()
+                                  .route(FederationStanzaFactory.presenceForward(nextHop, finalDest, newVia, embedded));
+                    } catch (Exception e) {
+                        Log.warn("Could not relay presence-forward toward {}: {}", finalDest, e.getMessage());
+                    }
+                },
+                () -> Log.warn("presence-forward: no route to {}, dropping", finalDest)
+            );
+        }
+    }
+
     // ── user-directory (opt-in online-user gossip) ─────────────────────────────
 
     /** Caches an inbound user-directory and relays it onward (loop-guarded). */
@@ -706,10 +756,15 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
 
-        List<String> users = new ArrayList<>();
+        List<UserDirectory.UserPresence> users = new ArrayList<>();
         for (Element u : el.elements("user")) {
             String jid = u.attributeValue("jid");
-            if (jid != null && !jid.isBlank()) users.add(jid.strip());
+            if (jid != null && !jid.isBlank()) {
+                users.add(new UserDirectory.UserPresence(
+                        jid.strip(),
+                        u.attributeValue("show",   ""),
+                        u.attributeValue("status", "")));
+            }
         }
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
         manager.handleUserDirectory(fromDomain, sourceDomain, users, newVia);
@@ -869,6 +924,17 @@ public class FederationIQHandler extends IQHandler {
 
         JID targetJID      = new JID(targetRoom);
         JID virtualFromJID = new JID(targetJID.getNode(), targetJID.getDomain(), senderNick);
+
+        // Track this virtual occupant's live presence for the admin "who's here" view.
+        if (leaving) {
+            manager.getRoomManager().clearVirtualOccupantPresence(targetRoom, senderNick);
+        } else {
+            Element showEl0   = presEl.element("show");
+            Element statusEl0 = presEl.element("status");
+            manager.getRoomManager().setVirtualOccupantPresence(targetRoom, senderNick,
+                    showEl0   != null ? showEl0.getText()   : "",
+                    statusEl0 != null ? statusEl0.getText() : "");
+        }
 
         for (MUCOccupant occupant : occupants) {
             Presence delivery = new Presence();

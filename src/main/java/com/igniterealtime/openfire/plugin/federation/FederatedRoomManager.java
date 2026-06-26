@@ -96,6 +96,37 @@ public class FederatedRoomManager {
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, VirtualOccupant>> virtualOccupants
         = new ConcurrentHashMap<>();
 
+    /**
+     * Transient live presence of remote (virtual) occupants for the admin "who's here" view:
+     * localRoomJid → nick → "show|status" (empty show = plain available). NOT persisted — presence
+     * is ephemeral and rebuilt from the muc-forward presence stream; keeps {@link VirtualOccupant}
+     * and its on-disk format unchanged.
+     */
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, String>> virtualOccupantPresence
+        = new ConcurrentHashMap<>();
+
+    /** Records/updates a virtual occupant's presence (called from injectPresence on join/update). */
+    public void setVirtualOccupantPresence(String localRoomJid, String nick, String show, String status) {
+        virtualOccupantPresence
+            .computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>())
+            .put(nick, (show == null ? "" : show) + "|" + (status == null ? "" : status));
+    }
+
+    /** Forgets a virtual occupant's presence (called on leave/eviction). */
+    public void clearVirtualOccupantPresence(String localRoomJid, String nick) {
+        ConcurrentHashMap<String, String> byNick = virtualOccupantPresence.get(localRoomJid);
+        if (byNick != null) {
+            byNick.remove(nick);
+            if (byNick.isEmpty()) virtualOccupantPresence.remove(localRoomJid);
+        }
+    }
+
+    /** nick → "show|status" for a room's virtual occupants (empty map if none). */
+    public Map<String, String> getVirtualOccupantPresence(String localRoomJid) {
+        ConcurrentHashMap<String, String> byNick = virtualOccupantPresence.get(localRoomJid);
+        return byNick == null ? java.util.Collections.emptyMap() : new java.util.LinkedHashMap<>(byNick);
+    }
+
     public void load() {
         // Load federated room tags
         String index = JiveGlobals.getProperty(PROP_ROOMS_INDEX, "").strip();

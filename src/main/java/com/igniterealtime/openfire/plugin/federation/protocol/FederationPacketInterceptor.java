@@ -61,6 +61,10 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // the MUC forwarding branches below since it targets user JIDs, not rooms.
         relayDirectMessage(packet);
 
+        // 1:1 presence: relay an outbound directed presence / subscription stanza to an
+        // overlay-reachable peer user so contacts + live presence work across the overlay.
+        relayDirectPresence(packet);
+
         if (packet instanceof Message msg && incoming && processed) {
             handleMessage(msg);
         } else if (packet instanceof Presence pres && incoming && processed) {
@@ -177,6 +181,29 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         if (manager.forwardDirectMessage(msg)) {
             throw new PacketRejectedException("Relayed over federation overlay to " + toDomain);
+        }
+    }
+
+    /**
+     * Relays a locally-originated directed presence (subscribe/subscribed/unsubscribe/unsubscribed/
+     * probe/available/unavailable addressed to a specific user) to an overlay-reachable peer user,
+     * then rejects it to suppress native S2S.  This is what carries the subscription handshake and
+     * live presence for on-demand federated contacts.  Untouched: MUC presence (conference domain),
+     * broadcast presence (no addressed user), local delivery, and non-overlay domains.
+     */
+    private void relayDirectPresence(Packet packet) throws PacketRejectedException {
+        if (!(packet instanceof Presence pres)) return;
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+
+        JID to = pres.getTo();
+        if (to == null || to.getNode() == null) return;                 // directed presence to a user
+        String toDomain = to.getDomain();
+        if (isConferenceDomain(toDomain)) return;                       // MUC join/leave, handled below
+        if (XMPPServer.getInstance().isLocal(to)) return;               // local delivery — not ours
+        if (!manager.getRoutingTable().isReachable(toDomain)) return;   // only overlay peers
+
+        if (manager.forwardDirectPresence(pres)) {
+            throw new PacketRejectedException("Relayed presence over federation overlay to " + toDomain);
         }
     }
 

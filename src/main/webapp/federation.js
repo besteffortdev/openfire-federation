@@ -625,7 +625,10 @@ function renderRouting(entries, directory) {
         const detail = (count > 0 && expanded) ? `
             <tr class="route-detail"><td colspan="5" style="background:#fafafa;padding:8px 24px">
                 <div style="font-size:12px;color:#555;margin-bottom:4px">Users published by ${escHtml(r.destination)} — private-message any of them from a normal chat client:</div>
-                ${users.map(u => `<span style="display:inline-block;margin:2px 10px 2px 0;font-family:monospace;font-size:12px">${escHtml(u)}</span>`).join('')}
+                ${users.map(u => {
+                    const st = u.status ? ` <span style="color:#888">(${escHtml(u.status)})</span>` : '';
+                    return `<span style="display:inline-block;margin:2px 12px 2px 0;font-family:monospace;font-size:12px">${presenceDot(u.show)}${escHtml(u.jid)}${st}</span>`;
+                }).join('')}
             </td></tr>` : '';
         return `
         <tr ${click}>
@@ -642,6 +645,17 @@ function toggleRouteUsers(dest) {
     if (expandedRoutes.has(dest)) expandedRoutes.delete(dest);
     else expandedRoutes.add(dest);
     refresh();
+}
+
+// A small colored presence dot. show: '' (available), away/xa, dnd, chat; 'offline' = grey.
+function presenceDot(show) {
+    let color = '#28a745';                                   // available / chat
+    if (show === 'away' || show === 'xa') color = '#f0ad4e'; // away
+    else if (show === 'dnd')              color = '#dc3545'; // do not disturb
+    else if (show === 'offline')          color = '#adb5bd'; // offline
+    const title = show ? show : 'available';
+    return `<span title="${title}" style="display:inline-block;width:8px;height:8px;border-radius:50%;`
+         + `background:${color};margin-right:5px;vertical-align:middle"></span>`;
 }
 
 // ── Room search ───────────────────────────────────────────────────────────────
@@ -685,11 +699,17 @@ function renderLocalRooms(rooms) {
                </div>`
             : '';
         const visible = r.jid.toLowerCase().includes(roomFilter) ? '' : 'display:none';
+        // Occupant roster expander (local + remote virtual occupants, with live presence).
+        const occList = r.occupantList || [];
+        const occExpanded = expandedRoomOccupants.has(r.jid);
+        const occCell = occList.length > 0
+            ? `<span style="cursor:pointer" title="show occupants" onclick="toggleRoomOccupants('${escHtml(r.jid)}')">${occList.length} ${occExpanded ? '▾' : '▸'}</span>`
+            : `${r.occupants}`;
         let row = `
         <tr data-jid="${escHtml(r.jid)}" style="${visible}">
             <td><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small></td>
             <td>${escHtml(r.description || '—')}</td>
-            <td>${r.occupants}</td>
+            <td>${occCell}</td>
             <td>
                 <label class="toggle">
                     <input type="checkbox" ${r.federated ? 'checked' : ''}
@@ -705,8 +725,33 @@ function renderLocalRooms(rooms) {
             <td>${mappedCell}</td>
         </tr>`;
         if (r.federated && visExpanded) row += renderRoomVisEditor(r);
+        if (occExpanded && occList.length > 0) row += renderRoomOccupants(r);
         return row;
     }).join('');
+}
+
+let expandedRoomOccupants = new Set();
+
+function toggleRoomOccupants(jid) {
+    if (expandedRoomOccupants.has(jid)) expandedRoomOccupants.delete(jid);
+    else expandedRoomOccupants.add(jid);
+    refresh();
+}
+
+function renderRoomOccupants(r) {
+    const occ = r.occupantList || [];
+    const items = occ.map(o => {
+        const kind = o.kind === 'remote'
+            ? '<span style="color:#0d6efd;font-size:10px;margin-left:4px">remote</span>'
+            : '<span style="color:#6c757d;font-size:10px;margin-left:4px">local</span>';
+        const st = o.status ? ` <span style="color:#888">(${escHtml(o.status)})</span>` : '';
+        return `<span style="display:inline-block;margin:2px 14px 2px 0;font-family:monospace;font-size:12px">`
+             + `${presenceDot(o.show)}${escHtml(o.name)}${kind}${st}</span>`;
+    }).join('') || '<span style="color:#999">no occupants</span>';
+    return `<tr class="route-detail"><td colspan="5" style="background:#fafafa;padding:8px 24px">
+        <div style="font-size:12px;color:#555;margin-bottom:4px">Occupants in ${escHtml(r.name || r.jid)} (local + federated):</div>
+        ${items}
+    </td></tr>`;
 }
 
 function setRoomFederated(jid, federated) {

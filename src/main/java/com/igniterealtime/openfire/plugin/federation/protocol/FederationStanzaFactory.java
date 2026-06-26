@@ -6,10 +6,12 @@ import org.dom4j.Element;
 import org.jivesoftware.openfire.RoutingTable;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.session.ClientSession;
+import com.igniterealtime.openfire.plugin.federation.UserDirectory;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Message;
 import org.xmpp.packet.Packet;
+import org.xmpp.packet.Presence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -310,6 +312,23 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    /**
+     * Wraps a 1:1 presence stanza (subscribe/subscribed/probe/directed available/unavailable) for
+     * relay toward {@code finalDestination}.  Same envelope as {@link #directForward}; the embedded
+     * presence keeps its real {@code from}/{@code to} so the destination can route it through its own
+     * roster/subscription engine.
+     */
+    public static IQ presenceForward(String nextHop, String finalDestination,
+                                     String viaTrail, Presence payload) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element fwd = fed.addElement("presence-forward");
+        fwd.addAttribute("destination", finalDestination);
+        fwd.addAttribute("via",         viaTrail);
+        fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
     // ── user-directory (opt-in online-user gossip) ──────────────────────────────
 
     /**
@@ -317,15 +336,18 @@ public final class FederationStanzaFactory {
      * like a room-advertisement: an {@code origin} attribute and a {@code via} trail let it
      * relay multi-hop without looping; an empty list is a withdrawal (clear this origin).
      */
-    public static IQ userDirectory(String toDomain, Collection<String> userJids,
+    public static IQ userDirectory(String toDomain, Collection<UserDirectory.UserPresence> users,
                                    String originDomain, String via) {
         IQ iq = base(toDomain);
         Element fed = iq.setChildElement("federation", NS);
         Element dir = fed.addElement("user-directory");
         if (originDomain != null)              dir.addAttribute("origin", originDomain);
         if (via != null && !via.isEmpty())     dir.addAttribute("via", via);
-        for (String jid : userJids) {
-            dir.addElement("user").addAttribute("jid", jid);
+        for (UserDirectory.UserPresence u : users) {
+            Element e = dir.addElement("user");
+            e.addAttribute("jid", u.jid());
+            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show",   u.show());
+            if (u.status() != null && !u.status().isEmpty()) e.addAttribute("status", u.status());
         }
         return iq;
     }

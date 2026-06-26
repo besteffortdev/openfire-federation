@@ -14,9 +14,12 @@ import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.session.ClientSession;
 import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.openfire.session.IncomingServerSession;
 import org.jivesoftware.openfire.session.OutgoingServerSession;
+import org.jivesoftware.openfire.user.PresenceEventDispatcher;
+import org.jivesoftware.openfire.user.PresenceEventListener;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,6 +60,7 @@ public class FederationManager {
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
     private       FederationPacketInterceptor interceptor;
+    private       PresenceEventListener  presenceListener;
 
     public void start() {
         Log.info("Federation plugin starting…");
@@ -74,13 +78,32 @@ public class FederationManager {
         s2sMonitor = new S2SMonitor(peerRegistry, routingTable, roomManager, this);
         s2sMonitor.start();
 
+        // Republish our directory live as local users come/go/change presence (only when publishing
+        // is enabled; the S2S poll tick remains a backstop).
+        presenceListener = new PresenceEventListener() {
+            @Override public void availableSession(ClientSession s, Presence p)   { onLocalPresenceChange(); }
+            @Override public void unavailableSession(ClientSession s, Presence p) { onLocalPresenceChange(); }
+            @Override public void presenceChanged(ClientSession s, Presence p)    { onLocalPresenceChange(); }
+            @Override public void subscribedToPresence(JID a, JID b)   { }
+            @Override public void unsubscribedToPresence(JID a, JID b) { }
+        };
+        PresenceEventDispatcher.addListener(presenceListener);
+
         Log.info("Federation plugin started — {} peer(s) configured", peerRegistry.getPeers().size());
+    }
+
+    /** Local presence event: refresh the published directory if publishing is on. */
+    private void onLocalPresenceChange() {
+        if (FederationProperties.DIRECTORY_PUBLISH.getValue()) publishDirectory();
     }
 
     public void stop() {
         Log.info("Federation plugin stopping…");
 
         if (s2sMonitor != null) s2sMonitor.stop();
+
+        if (presenceListener != null)
+            PresenceEventDispatcher.removeListener(presenceListener);
 
         if (iqHandler != null)
             XMPPServer.getInstance().getIQRouter().removeHandler(iqHandler);
@@ -951,7 +974,8 @@ public class FederationManager {
     public void publishDirectory() {
         boolean publish = FederationProperties.DIRECTORY_PUBLISH.getValue();
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        Collection<String> users = publish ? userDirectory.localOnlineUsers() : Collections.emptyList();
+        Collection<UserDirectory.UserPresence> users =
+                publish ? userDirectory.localOnlineUsers() : Collections.emptyList();
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
             if (isUntrusted(peer.getDomain())) continue;   // never expose our user list to an untrusted edge
@@ -971,7 +995,7 @@ public class FederationManager {
      * {@link #relayRoomAdvertisement}). An empty list clears the origin's cached users.
      */
     public void handleUserDirectory(String fromDomain, String originDomain,
-                                    Collection<String> users, String via) {
+                                    Collection<UserDirectory.UserPresence> users, String via) {
         userDirectory.setUsersForOrigin(originDomain, users);
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getDomain().equals(fromDomain)) continue;
@@ -1009,6 +1033,70 @@ public class FederationManager {
             Log.warn("Failed to forward 1:1 message to {}: {}", destDomain, e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Relays an outbound 1:1 presence stanza (subscribe/subscribed/probe/directed presence) toward
+     * its destination domain over the overlay.  Counterpart of {@link #forwardDirectMessage}; lets a
+     * remote contact's subscription handshake and presence cross the overlay (incl. untrusted edges).
+     * Returns true if handed to a next hop (caller suppresses native S2S), false if no route.
+     */
+    public boolean forwardDirectPresence(Presence pres) {
+        String destDomain  = pres.getTo().getDomain();
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
+        if (nextHop == null) return false;
+        try {
+            Presence copy = new Presence(pres.getElement().createCopy());
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.presenceForward(nextHop, destDomain, localDomain, copy));
+            Log.debug("presence-forward: 1:1 {} {} -> {} via {}",
+                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), nextHop);
+            return true;
+        } catch (Exception e) {
+            Log.warn("Failed to forward 1:1 presence to {}: {}", destDomain, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Occupant roster of a local room for the admin "who's here" tracking view: real local occupants
+     * (live presence from {@link MUCOccupant#getPresence()}) plus remote virtual occupants (cached
+     * presence). Each entry: name, jid, kind (local|remote), show, status.
+     */
+    public List<Map<String, String>> getRoomOccupants(String localRoomJid) {
+        List<Map<String, String>> out = new ArrayList<>();
+        MUCRoom room = findLocalMucRoom(localRoomJid);
+        if (room != null) {
+            for (MUCOccupant occ : room.getOccupants()) {
+                String show = "", status = "";
+                Presence p = occ.getPresence();
+                if (p != null) {
+                    Element s  = p.getElement().element("show");
+                    Element st = p.getElement().element("status");
+                    if (s  != null) show   = s.getText();
+                    if (st != null) status = st.getText();
+                }
+                Map<String, String> m = new LinkedHashMap<>();
+                m.put("name", occ.getNickname());
+                m.put("jid", occ.getUserAddress() != null ? occ.getUserAddress().toBareJID() : "");
+                m.put("kind", "local");
+                m.put("show", show);
+                m.put("status", status);
+                out.add(m);
+            }
+        }
+        for (Map.Entry<String, String> e : roomManager.getVirtualOccupantPresence(localRoomJid).entrySet()) {
+            String[] ps = e.getValue().split("\\|", 2);
+            Map<String, String> m = new LinkedHashMap<>();
+            m.put("name", e.getKey());                 // MUC nick "user@home"
+            m.put("jid", e.getKey());
+            m.put("kind", "remote");
+            m.put("show",   ps.length > 0 ? ps[0] : "");
+            m.put("status", ps.length > 1 ? ps[1] : "");
+            out.add(m);
+        }
+        return out;
     }
 
     // ── Untrusted-peer exposure filtering ──────────────────────────────────────

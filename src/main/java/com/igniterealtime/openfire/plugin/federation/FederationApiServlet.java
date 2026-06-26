@@ -135,8 +135,22 @@ public class FederationApiServlet extends HttpServlet {
             List<String> visTo = (List<String>) room.getOrDefault("visibleTo", java.util.Collections.emptyList());
             boolean fv = true;
             for (String s : visTo) { if (!fv) sb.append(","); fv = false; sb.append("\"").append(esc(s)).append("\""); }
-            sb.append("],")
-              .append("\"mappings\":[");
+            sb.append("],");
+
+            // Occupant roster (local + remote virtual) with live presence for the tracking view.
+            sb.append("\"occupantList\":[");
+            boolean fo = true;
+            for (Map<String, String> occ : mgr.getRoomOccupants(str(room.get("jid")))) {
+                if (!fo) sb.append(","); fo = false;
+                sb.append("{\"name\":\"").append(esc(occ.get("name")))
+                  .append("\",\"jid\":\"").append(esc(occ.get("jid")))
+                  .append("\",\"kind\":\"").append(esc(occ.get("kind")))
+                  .append("\",\"show\":\"").append(esc(occ.get("show")))
+                  .append("\",\"status\":\"").append(esc(occ.get("status"))).append("\"}");
+            }
+            sb.append("],");
+
+            sb.append("\"mappings\":[");
 
             boolean fm = true;
             for (Map<String, String> m : roomMappings) {
@@ -245,17 +259,20 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
         sb.append("\"directoryPublish\":").append(FederationProperties.DIRECTORY_PUBLISH.getValue()).append(",");
 
-        // ── user directory (origin server domain → [user JIDs]) ────────────────
+        // ── user directory (origin server domain → [{jid,show,status}]) ────────
         sb.append("\"directory\":{");
         first = true;
-        for (java.util.Map.Entry<String, java.util.Set<String>> e : mgr.getUserDirectory().getRemoteUsers().entrySet()) {
+        for (java.util.Map.Entry<String, java.util.List<com.igniterealtime.openfire.plugin.federation.UserDirectory.UserPresence>> e
+                : mgr.getUserDirectory().getRemoteUsers().entrySet()) {
             if (!first) sb.append(",");
             first = false;
             sb.append("\"").append(esc(e.getKey())).append("\":[");
             boolean fu = true;
-            for (String u : e.getValue()) {
+            for (com.igniterealtime.openfire.plugin.federation.UserDirectory.UserPresence u : e.getValue()) {
                 if (!fu) sb.append(","); fu = false;
-                sb.append("\"").append(esc(u)).append("\"");
+                sb.append("{\"jid\":\"").append(esc(u.jid()))
+                  .append("\",\"show\":\"").append(esc(u.show()))
+                  .append("\",\"status\":\"").append(esc(u.status())).append("\"}");
             }
             sb.append("]");
         }
