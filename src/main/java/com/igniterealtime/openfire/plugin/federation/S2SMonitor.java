@@ -309,6 +309,12 @@ public class S2SMonitor {
         // Adapt the keepalive cadence if the admin changed the S2S idle timeout at runtime.
         // (Idempotent and cheap — early-returns when the effective interval is unchanged.)
         rescheduleKeepalive();
+
+        // Refresh the published user directory so login/logout churn propagates (only when the
+        // admin has enabled publishing — otherwise we'd resend empty lists every poll).
+        if (FederationProperties.DIRECTORY_PUBLISH.getValue()) {
+            federationManager.publishDirectory();
+        }
     }
 
     private void sendKeepalives() {
@@ -371,6 +377,8 @@ public class S2SMonitor {
         // Revive any pending mapping requests toward this peer (e.g. legacy mappings awaiting
         // re-acceptance, or requests queued while it was down).
         federationManager.resendPendingRequests(domain);
+        // Publish our online-user directory to the freshly-reachable peer (no-op unless enabled).
+        federationManager.publishDirectory();
     }
 
     private void onPeerDown(String domain) {

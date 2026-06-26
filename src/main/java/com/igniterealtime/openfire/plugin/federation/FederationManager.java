@@ -22,6 +22,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
 import org.xmpp.packet.Presence;
 
 import java.util.ArrayList;
@@ -52,6 +53,7 @@ public class FederationManager {
     private final PeerRegistry           peerRegistry    = new PeerRegistry();
     private final FederationRoutingTable routingTable    = new FederationRoutingTable();
     private final FederatedRoomManager   roomManager     = new FederatedRoomManager();
+    private final UserDirectory          userDirectory   = new UserDirectory();
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
     private       FederationPacketInterceptor interceptor;
@@ -759,6 +761,7 @@ public class FederationManager {
             evictAllVirtualOccupantsFromDomain(dest);       // by ORIGIN home domain
             evictOccupantsForLostHub(dest);                 // by mapped hub (catches un-routed origins)
             roomManager.clearRemoteRooms(dest);
+            userDirectory.clearUsersForOrigin(dest);        // drop the gone server's published users
         }
     }
 
@@ -934,6 +937,77 @@ public class FederationManager {
                     Log.warn("Failed to relay room-advertisement to {}: {}", peer.getDomain(), e.getMessage());
                 }
             }
+        }
+    }
+
+    // ── User directory + 1:1 message relay ─────────────────────────────────────
+
+    /**
+     * Publishes our online-user directory to every trusted, reachable peer when publishing is
+     * enabled (default OFF). When publishing is disabled we send an EMPTY list once so peers that
+     * previously cached our users withdraw them. Untrusted peers never receive the directory.
+     * Cheap and idempotent — safe to call from the S2S poll tick and on peer-up.
+     */
+    public void publishDirectory() {
+        boolean publish = FederationProperties.DIRECTORY_PUBLISH.getValue();
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        Collection<String> users = publish ? userDirectory.localOnlineUsers() : Collections.emptyList();
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
+            if (isUntrusted(peer.getDomain())) continue;   // never expose our user list to an untrusted edge
+            try {
+                XMPPServer.getInstance().getPacketRouter()
+                          .route(FederationStanzaFactory.userDirectory(
+                              peer.getDomain(), users, localDomain, null));
+            } catch (Exception e) {
+                Log.warn("Failed to send user-directory to {}: {}", peer.getDomain(), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Records an inbound user-directory for {@code originDomain} and gossips it onward to other
+     * trusted peers not already on the {@code via} trail (multi-hop, loop-guarded — mirrors
+     * {@link #relayRoomAdvertisement}). An empty list clears the origin's cached users.
+     */
+    public void handleUserDirectory(String fromDomain, String originDomain,
+                                    Collection<String> users, String via) {
+        userDirectory.setUsersForOrigin(originDomain, users);
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getDomain().equals(fromDomain)) continue;
+            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
+            if (isUntrusted(peer.getDomain())) continue;
+            if (via != null && via.contains(peer.getDomain())) continue;
+            try {
+                XMPPServer.getInstance().getPacketRouter()
+                          .route(FederationStanzaFactory.userDirectory(
+                              peer.getDomain(), users, originDomain, via));
+            } catch (Exception e) {
+                Log.warn("Failed to relay user-directory to {}: {}", peer.getDomain(), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Relays an outbound 1:1 message toward its destination domain over the overlay.  Called by the
+     * packet interceptor once it has decided the message targets an overlay-reachable peer user.
+     * Returns true if the message was handed to a next hop (the caller then suppresses native S2S),
+     * false if there is no route (the caller leaves Openfire to handle it normally).
+     */
+    public boolean forwardDirectMessage(Message msg) {
+        String destDomain  = msg.getTo().getDomain();
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
+        if (nextHop == null) return false;
+        try {
+            Message copy = new Message(msg.getElement().createCopy());
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.directForward(nextHop, destDomain, localDomain, copy));
+            Log.debug("direct-forward: 1:1 {} -> {} via {}", msg.getFrom(), msg.getTo(), nextHop);
+            return true;
+        } catch (Exception e) {
+            Log.warn("Failed to forward 1:1 message to {}: {}", destDomain, e.getMessage());
+            return false;
         }
     }
 
@@ -1299,4 +1373,5 @@ public class FederationManager {
     public PeerRegistry           getPeerRegistry()  { return peerRegistry;  }
     public FederationRoutingTable getRoutingTable()  { return routingTable;  }
     public FederatedRoomManager   getRoomManager()   { return roomManager;   }
+    public UserDirectory          getUserDirectory() { return userDirectory; }
 }

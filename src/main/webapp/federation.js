@@ -58,7 +58,7 @@ function refresh() {
             const localRooms = data.localRooms  || [];
             renderPeers(data.peers || []);
             renderS2SSessions(data.s2sSessions || []);
-            renderRouting(data.routing || []);
+            renderRouting(data.routing || [], data.directory || {});
             renderPendingRequests(data.pendingRequests || []);
             renderLocalRooms(localRooms);
             renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
@@ -67,6 +67,8 @@ function refresh() {
             updateReconnectInput(data.reconnectSeconds);
             updateAllowlistToggle(data.peerAllowlist);
             updateBlockDirectToggle(data.blockDirectMuc);
+            updateDirectRelayToggle(data.directMsgRelay);
+            updateDirectoryPublishToggle(data.directoryPublish);
         })
         .catch(err => console.error('Federation API error:', err));
 }
@@ -534,6 +536,58 @@ function saveBlockDirect() {
         });
 }
 
+// ── Security: 1:1 message relay toggle ──────────────────────────────────────────
+
+function updateDirectRelayToggle(enabled) {
+    const cb = document.getElementById('directrelay-toggle');
+    const lbl = document.getElementById('directrelay-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Relayed over federation' : 'Native S2S';
+}
+
+function saveDirectRelay() {
+    const cb = document.getElementById('directrelay-toggle');
+    if (!cb) return;
+    const enabled = cb.checked;
+    post({ action: 'set-direct-relay', enabled })
+        .then(result => {
+            if (result && result.ok) {
+                const badge = document.getElementById('directrelay-saved');
+                if (badge) {
+                    badge.style.display = 'inline';
+                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
+                }
+                refresh();
+            }
+        });
+}
+
+// ── Security: publish user directory toggle ─────────────────────────────────────
+
+function updateDirectoryPublishToggle(enabled) {
+    const cb = document.getElementById('dirpublish-toggle');
+    const lbl = document.getElementById('dirpublish-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Published to peers' : 'Not published';
+}
+
+function saveDirectoryPublish() {
+    const cb = document.getElementById('dirpublish-toggle');
+    if (!cb) return;
+    const enabled = cb.checked;
+    post({ action: 'set-directory-publish', enabled })
+        .then(result => {
+            if (result && result.ok) {
+                const badge = document.getElementById('dirpublish-saved');
+                if (badge) {
+                    badge.style.display = 'inline';
+                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
+                }
+                refresh();
+            }
+        });
+}
+
 function removePeer(domain) {
     if (!confirm('Remove peer ' + domain + '?')) return;
     post({ action: 'remove-peer', domain }).then(refresh);
@@ -550,21 +604,44 @@ function statusClass(s) {
 
 // ── Routing table tab ─────────────────────────────────────────────────────────
 
-function renderRouting(entries) {
+let expandedRoutes = new Set();
+
+function renderRouting(entries, directory) {
     const tbody = document.getElementById('routing-tbody');
     if (entries.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
         return;
     }
+    directory = directory || {};
     entries.sort((a, b) => a.hops - b.hops);
-    tbody.innerHTML = entries.map(r => `
-        <tr>
-            <td>${escHtml(r.destination)}</td>
+    tbody.innerHTML = entries.map(r => {
+        const users    = directory[r.destination] || [];
+        const count    = users.length;
+        const expanded = expandedRoutes.has(r.destination);
+        const caret    = count > 0 ? (expanded ? '▾ ' : '▸ ') : '';
+        const userCell = count > 0 ? `${count} online` : '<span style="color:#999">—</span>';
+        const click    = count > 0
+            ? `style="cursor:pointer" onclick="toggleRouteUsers('${r.destination}')"` : '';
+        const detail = (count > 0 && expanded) ? `
+            <tr class="route-detail"><td colspan="5" style="background:#fafafa;padding:8px 24px">
+                <div style="font-size:12px;color:#555;margin-bottom:4px">Users published by ${escHtml(r.destination)} — private-message any of them from a normal chat client:</div>
+                ${users.map(u => `<span style="display:inline-block;margin:2px 10px 2px 0;font-family:monospace;font-size:12px">${escHtml(u)}</span>`).join('')}
+            </td></tr>` : '';
+        return `
+        <tr ${click}>
+            <td>${caret}${escHtml(r.destination)}</td>
             <td>${escHtml(r.nextHop)}</td>
             <td>${r.hops}</td>
+            <td>${userCell}</td>
             <td class="ts">${new Date(r.updatedAt).toLocaleTimeString()}</td>
-        </tr>
-    `).join('');
+        </tr>${detail}`;
+    }).join('');
+}
+
+function toggleRouteUsers(dest) {
+    if (expandedRoutes.has(dest)) expandedRoutes.delete(dest);
+    else expandedRoutes.add(dest);
+    refresh();
 }
 
 // ── Room search ───────────────────────────────────────────────────────────────

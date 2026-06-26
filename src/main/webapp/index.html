@@ -356,6 +356,52 @@
                             </span>
                         </td>
                     </tr>
+                    <tr>
+                        <td>
+                            <label for="directrelay-toggle" style="font-weight:600;font-size:13px">
+                                Relay 1:1 messages over federation
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When enabled, a private message a local user sends to a user on an
+                                overlay-reachable peer is relayed hop-by-hop through federation (so it
+                                works even across untrusted edges with no direct S2S). Replies route
+                                back the same way. Disable to use Openfire's native S2S for 1:1 chat.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="directrelay-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveDirectRelay()">
+                            <span id="directrelay-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="directrelay-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <label for="dirpublish-toggle" style="font-weight:600;font-size:13px">
+                                Publish my user directory to peers
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When enabled, this server gossips its list of currently-online users so
+                                peers can see who is reachable here (expand a row in the Routing Table).
+                                Off by default for privacy; untrusted peers never receive it. Messaging
+                                by typed JID still works when this is off.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="dirpublish-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveDirectoryPublish()">
+                            <span id="dirpublish-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="dirpublish-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
                 </table>
             </div>
         </div>
@@ -371,11 +417,12 @@
                         <th>Destination</th>
                         <th>Next hop</th>
                         <th>Hops</th>
+                        <th>Users</th>
                         <th>Last updated</th>
                     </tr>
                 </thead>
                 <tbody id="routing-tbody">
-                    <tr><td colspan="4" class="empty">Loading…</td></tr>
+                    <tr><td colspan="5" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -383,6 +430,8 @@
             A hop count of 1 means directly connected via S2S.
             Routes are learned automatically through gossip when peers connect.
             Stale routes are removed when a peer goes offline.
+            Click a destination to see the users it has published — a local user can private-message
+            any of them from their normal chat client (they must have "Relay 1:1 messages" enabled).
         </p>
     </div>
 

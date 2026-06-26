@@ -8,6 +8,7 @@ import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.session.ClientSession;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
 import org.xmpp.packet.Packet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -282,6 +283,50 @@ public final class FederationStanzaFactory {
         fwd.addAttribute("via",         viaTrail);
         if (srcMapped != null) fwd.addAttribute("src", srcMapped);
         fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
+    // ── direct-forward (1:1 private messaging over the overlay) ─────────────────
+
+    /**
+     * Wraps a 1:1 chat message for relay to the next hop toward {@code finalDestination}.
+     * Shaped like {@link #mucForward} but without room/occupant addressing — the embedded
+     * message keeps its real {@code from}/{@code to} so the recipient can simply reply
+     * (the reply is caught by that server's interceptor and relayed back the same way).
+     *
+     * @param nextHop          directly-connected peer we're sending to now
+     * @param finalDestination the domain that ultimately receives this message
+     * @param viaTrail         comma-separated list of servers already visited (loop guard)
+     * @param payload          the original 1:1 message
+     */
+    public static IQ directForward(String nextHop, String finalDestination,
+                                   String viaTrail, Message payload) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element fwd = fed.addElement("direct-forward");
+        fwd.addAttribute("destination", finalDestination);
+        fwd.addAttribute("via",         viaTrail);
+        fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
+    // ── user-directory (opt-in online-user gossip) ──────────────────────────────
+
+    /**
+     * Advertises a list of user JIDs reachable on {@code originDomain}.  Gossiped exactly
+     * like a room-advertisement: an {@code origin} attribute and a {@code via} trail let it
+     * relay multi-hop without looping; an empty list is a withdrawal (clear this origin).
+     */
+    public static IQ userDirectory(String toDomain, Collection<String> userJids,
+                                   String originDomain, String via) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        Element dir = fed.addElement("user-directory");
+        if (originDomain != null)              dir.addAttribute("origin", originDomain);
+        if (via != null && !via.isEmpty())     dir.addAttribute("via", via);
+        for (String jid : userJids) {
+            dir.addElement("user").addAttribute("jid", jid);
+        }
         return iq;
     }
 

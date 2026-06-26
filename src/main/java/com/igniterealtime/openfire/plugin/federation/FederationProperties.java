@@ -44,6 +44,32 @@ public final class FederationProperties {
         .setDynamic(true)
         .build();
 
+    /**
+     * 1:1 federation relay (on by default). When true, an outbound 1:1 message addressed to a user on
+     * an overlay-reachable peer domain is relayed hop-by-hop through the federation overlay (and native
+     * S2S delivery is suppressed) instead of requiring a direct S2S link. Replies route back the same
+     * way. Set false to fall back to Openfire's native S2S behaviour for 1:1 messages.
+     */
+    public static final SystemProperty<Boolean> DIRECT_MSG_RELAY = SystemProperty.Builder.ofType(Boolean.class)
+        .setKey("plugin.federation.directMessageRelay")
+        .setPlugin(PLUGIN)
+        .setDefaultValue(true)
+        .setDynamic(true)
+        .build();
+
+    /**
+     * Publish this server's online-user directory to federation peers (OFF by default — privacy).
+     * When true, the set of currently-logged-in users is gossiped across the overlay so peers can
+     * show who is reachable here in their Routing Table view. Untrusted peers never receive it.
+     * Servers that leave this off can still send and receive 1:1 federated messages by typed JID.
+     */
+    public static final SystemProperty<Boolean> DIRECTORY_PUBLISH = SystemProperty.Builder.ofType(Boolean.class)
+        .setKey("plugin.federation.directoryPublish")
+        .setPlugin(PLUGIN)
+        .setDefaultValue(false)
+        .setDynamic(true)
+        .build();
+
     /** Disable Openfire's server-wide S2S idle reaper on startup (applied at start; needs restart). */
     public static final SystemProperty<Boolean> DISABLE_S2S_IDLE = SystemProperty.Builder.ofType(Boolean.class)
         .setKey("plugin.federation.disableS2SIdle")

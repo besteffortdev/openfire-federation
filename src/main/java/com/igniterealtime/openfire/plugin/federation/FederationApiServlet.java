@@ -241,7 +241,25 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
         sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds()).append(",");
         sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue()).append(",");
-        sb.append("\"blockDirectMuc\":").append(FederationProperties.BLOCK_DIRECT_MUC.getValue());
+        sb.append("\"blockDirectMuc\":").append(FederationProperties.BLOCK_DIRECT_MUC.getValue()).append(",");
+        sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
+        sb.append("\"directoryPublish\":").append(FederationProperties.DIRECTORY_PUBLISH.getValue()).append(",");
+
+        // ── user directory (origin server domain → [user JIDs]) ────────────────
+        sb.append("\"directory\":{");
+        first = true;
+        for (java.util.Map.Entry<String, java.util.Set<String>> e : mgr.getUserDirectory().getRemoteUsers().entrySet()) {
+            if (!first) sb.append(",");
+            first = false;
+            sb.append("\"").append(esc(e.getKey())).append("\":[");
+            boolean fu = true;
+            for (String u : e.getValue()) {
+                if (!fu) sb.append(","); fu = false;
+                sb.append("\"").append(esc(u)).append("\"");
+            }
+            sb.append("]");
+        }
+        sb.append("}");
 
         sb.append("}");
         out.print(sb.toString());
@@ -491,6 +509,28 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 FederationProperties.BLOCK_DIRECT_MUC.setValue(Boolean.parseBoolean(enabled.strip()));
                 out.print("{\"ok\":true,\"blockDirectMuc\":" + FederationProperties.BLOCK_DIRECT_MUC.getValue() + "}");
+                return;
+            }
+            case "set-direct-relay": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.DIRECT_MSG_RELAY.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"directMsgRelay\":" + FederationProperties.DIRECT_MSG_RELAY.getValue() + "}");
+                return;
+            }
+            case "set-directory-publish": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.DIRECTORY_PUBLISH.setValue(Boolean.parseBoolean(enabled.strip()));
+                // Push (or, when turning off, withdraw with an empty list) to peers immediately.
+                mgr.publishDirectory();
+                out.print("{\"ok\":true,\"directoryPublish\":" + FederationProperties.DIRECTORY_PUBLISH.getValue() + "}");
                 return;
             }
             case "set-untrusted": {

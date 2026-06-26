@@ -103,6 +103,8 @@ public class FederationIQHandler extends IQHandler {
             case "room-mapping-enable" -> handleMappingEnable(fromDomain, child);
             case "room-unmap"          -> handleRoomUnmap(fromDomain, child);
             case "muc-forward"         -> handleMucForward(fromDomain, child);
+            case "direct-forward"      -> handleDirectForward(fromDomain, child);
+            case "user-directory"      -> handleUserDirectory(fromDomain, child);
             default -> Log.warn("Unknown federation action '{}' from {}", child.getName(), fromDomain);
         }
 
@@ -630,6 +632,88 @@ public class FederationIQHandler extends IQHandler {
                 () -> Log.warn("muc-forward: no route to {}, dropping", finalDest)
             );
         }
+    }
+
+    // ── direct-forward (1:1 private messaging) ─────────────────────────────────
+
+    /**
+     * Relays or delivers a 1:1 message carried over the overlay.  Mirrors {@link #handleMucForward}
+     * but for user-addressed messages: no room, no fan-out.  At the final destination the embedded
+     * message is delivered straight to the recipient (online session or offline storage) via
+     * {@code directDeliver}; an intermediate hop forwards it on toward the destination.
+     *
+     * <p>No untrusted-peer gate here on purpose: 1:1 messaging must be able to cross an untrusted
+     * edge (that is the whole point of the overlay), and reachability is already constrained by the
+     * routing table.  The embedded {@code from} is trusted to the same degree as any S2S sender.
+     */
+    private void handleDirectForward(String fromDomain, Element el) {
+        String finalDest   = el.attributeValue("destination");
+        String via         = el.attributeValue("via", "");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        if (via.contains(localDomain)) {
+            Log.warn("direct-forward loop detected (via={}), dropping", via);
+            return;
+        }
+
+        Element payloadEl = el.element("message");
+        if (payloadEl == null) {
+            Log.warn("direct-forward from {} has no message payload", fromDomain);
+            return;
+        }
+
+        if (finalDest == null || localDomain.equals(finalDest)) {
+            // We are the destination — deliver to the local recipient (bypasses interceptors, so the
+            // recipient's reply is a fresh outbound message caught and relayed back symmetrically).
+            Message msg = new Message(payloadEl.createCopy());
+            FederationStanzaFactory.markAsForwarded(msg);
+            FederationStanzaFactory.directDeliver(msg);
+            Log.debug("direct-forward: delivered 1:1 {} -> {}", msg.getFrom(), msg.getTo());
+        } else {
+            // Intermediate hop — forward toward the destination, appending ourselves to the trail.
+            String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+            manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
+                nextHop -> {
+                    try {
+                        Message embedded = new Message(payloadEl.createCopy());
+                        XMPPServer.getInstance().getPacketRouter()
+                                  .route(FederationStanzaFactory.directForward(nextHop, finalDest, newVia, embedded));
+                    } catch (Exception e) {
+                        Log.warn("Could not relay direct-forward toward {}: {}", finalDest, e.getMessage());
+                    }
+                },
+                () -> Log.warn("direct-forward: no route to {}, dropping", finalDest)
+            );
+        }
+    }
+
+    // ── user-directory (opt-in online-user gossip) ─────────────────────────────
+
+    /** Caches an inbound user-directory and relays it onward (loop-guarded). */
+    private void handleUserDirectory(String fromDomain, Element el) {
+        String origin      = el.attributeValue("origin");
+        String via         = el.attributeValue("via", "");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        if (via.contains(localDomain)) {
+            Log.debug("user-directory loop detected (via={}), dropping", via);
+            return;
+        }
+
+        String sourceDomain = (origin != null) ? origin : fromDomain;
+        if (localDomain.equals(sourceDomain)) {
+            Log.debug("user-directory origin is our own domain, ignoring");
+            return;
+        }
+
+        List<String> users = new ArrayList<>();
+        for (Element u : el.elements("user")) {
+            String jid = u.attributeValue("jid");
+            if (jid != null && !jid.isBlank()) users.add(jid.strip());
+        }
+        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+        manager.handleUserDirectory(fromDomain, sourceDomain, users, newVia);
+        Log.debug("user-directory from {} (source={}) — {} user(s)", fromDomain, sourceDomain, users.size());
     }
 
     private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {

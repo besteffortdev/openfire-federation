@@ -56,6 +56,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // remote join never takes effect.
         enforceFederationOnly(packet);
 
+        // 1:1 private messaging: relay an outbound message bound for an overlay-reachable
+        // peer user through the federation overlay (and suppress native S2S). Runs before
+        // the MUC forwarding branches below since it targets user JIDs, not rooms.
+        relayDirectMessage(packet);
+
         if (packet instanceof Message msg && incoming && processed) {
             handleMessage(msg);
         } else if (packet instanceof Presence pres && incoming && processed) {
@@ -141,6 +146,38 @@ public class FederationPacketInterceptor implements PacketInterceptor {
                  from, packet.getTo());
         throw new PacketRejectedException(
                 "Direct cross-server access to this room is disabled; use federation.");
+    }
+
+    // ── 1:1 private-message relay ──────────────────────────────────────────────
+
+    /**
+     * Relays a locally-originated 1:1 message to a user on an overlay-reachable peer domain
+     * through the federation overlay, then rejects it so Openfire does not also attempt native
+     * S2S delivery.  A no-op when the feature is disabled, when the target is not a remote peer
+     * user (local user, MUC service, or a domain not in our routing table), or for groupchat /
+     * error stanzas.  Replies are handled symmetrically by the destination server's interceptor.
+     */
+    private void relayDirectMessage(Packet packet) throws PacketRejectedException {
+        if (!(packet instanceof Message msg)) return;
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+
+        // Only genuine 1:1 chat. groupchat is MUC (handled below); error/result are left alone so
+        // we never bounce-loop a delivery failure.
+        Message.Type type = msg.getType();
+        if (type == Message.Type.groupchat || type == Message.Type.error) return;
+
+        JID to = msg.getTo();
+        if (to == null || to.getNode() == null) return;                 // must address a real user
+        String toDomain = to.getDomain();
+        if (isConferenceDomain(toDomain)) return;                       // MUC service, not a user
+        if (XMPPServer.getInstance().isLocal(to)) return;               // local delivery — not ours
+
+        // Only overlay-reachable peer domains are relayed; ordinary external S2S is untouched.
+        if (!manager.getRoutingTable().isReachable(toDomain)) return;
+
+        if (manager.forwardDirectMessage(msg)) {
+            throw new PacketRejectedException("Relayed over federation overlay to " + toDomain);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
