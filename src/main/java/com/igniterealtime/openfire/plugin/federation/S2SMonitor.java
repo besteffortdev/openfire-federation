@@ -30,7 +30,14 @@ import java.util.concurrent.TimeUnit;
 public class S2SMonitor {
 
     private static final Logger Log = LoggerFactory.getLogger(S2SMonitor.class);
-    private static final int    POLL_SECONDS           = 30;
+    // Liveness detection cadence: how quickly a peer flips to UNREACHABLE after its S2S
+    // route drops. Kept short because the check is just in-memory routing-table/session
+    // lookups; the heavier per-peer work (cert TOFU, keepalive reschedule) is throttled
+    // to CERT_SWEEP_SECONDS so it does not run at this fast cadence.
+    private static final int    POLL_SECONDS           = 10;
+    // How often to re-observe each live peer's S2S certificate (TOFU pin + change detection).
+    // A freshly-up link is always checked immediately on its REACHABLE transition.
+    private static final int    CERT_SWEEP_SECONDS     = 30;
     static final         String KEEPALIVE_JIVE_KEY     = "plugin.federation.keepaliveSeconds";
     static final         int    KEEPALIVE_DEFAULT       = 240;
     static final         int    KEEPALIVE_MINIMUM       = 30;
@@ -60,6 +67,8 @@ public class S2SMonitor {
     private ScheduledFuture<?>       reconnectFuture;
     /** The interval the keepalive task is currently scheduled at (effective, post-clamp). */
     private volatile int            scheduledKeepaliveSeconds = -1;
+    /** Epoch-ms of the last periodic certificate sweep, throttling cert checks to CERT_SWEEP_SECONDS. */
+    private volatile long           lastCertSweepMs = 0L;
 
     /** How many reconnect attempts have been made per peer since it last went UNREACHABLE. */
     private final ConcurrentHashMap<String, Integer> peerRetryCount  = new ConcurrentHashMap<>();
@@ -247,6 +256,12 @@ public class S2SMonitor {
         SessionManager sm             = XMPPServer.getInstance().getSessionManager();
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
+        // Cert TOFU is expensive relative to the liveness check, so only sweep live peers
+        // every CERT_SWEEP_SECONDS rather than on every (now fast) liveness poll. A link that
+        // just came up is still checked immediately below, on its REACHABLE transition.
+        long now = System.currentTimeMillis();
+        boolean certSweep = (now - lastCertSweepMs) >= CERT_SWEEP_SECONDS * 1000L;
+
         for (PeerServer peer : peerRegistry.getPeers()) {
             // WITHDRAWN peers intentionally disconnected — skip until admin reconnects.
             // DISABLED / REMOTE_DISABLED are administrative blocks — never auto-poll them.
@@ -268,14 +283,15 @@ public class S2SMonitor {
                 s2sUp = false;
             }
 
-            // Trust-on-first-use cert check on every live link (catches startup pin + any
-            // post-reconnect change), independent of the status transition below.
-            if (s2sUp) {
-                federationManager.observePeerCertificate(domain);
-            }
-
             PeerServer.Status prev = peer.getStatus();
             PeerServer.Status next = s2sUp ? PeerServer.Status.REACHABLE : PeerServer.Status.UNREACHABLE;
+
+            // Trust-on-first-use cert check: immediately when a link comes up (so a new/changed
+            // cert is pinned at once), and periodically thereafter (catches a cert swapped under
+            // a steady link). Skipped on the fast liveness ticks in between.
+            if (s2sUp && (prev != PeerServer.Status.REACHABLE || certSweep)) {
+                federationManager.observePeerCertificate(domain);
+            }
 
             if (prev == next) continue;   // no transition — nothing to do
 
@@ -288,7 +304,10 @@ public class S2SMonitor {
             }
         }
 
+        if (certSweep) lastCertSweepMs = now;
+
         // Adapt the keepalive cadence if the admin changed the S2S idle timeout at runtime.
+        // (Idempotent and cheap — early-returns when the effective interval is unchanged.)
         rescheduleKeepalive();
     }
 
