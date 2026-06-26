@@ -240,7 +240,8 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds()).append(",");
         sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
         sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds()).append(",");
-        sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue());
+        sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue()).append(",");
+        sb.append("\"blockDirectMuc\":").append(FederationProperties.BLOCK_DIRECT_MUC.getValue());
 
         sb.append("}");
         out.print(sb.toString());
@@ -480,6 +481,16 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 FederationProperties.PEER_ALLOWLIST.setValue(Boolean.parseBoolean(enabled.strip()));
                 out.print("{\"ok\":true,\"peerAllowlist\":" + FederationProperties.PEER_ALLOWLIST.getValue() + "}");
+                return;
+            }
+            case "set-block-direct-muc": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.BLOCK_DIRECT_MUC.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"blockDirectMuc\":" + FederationProperties.BLOCK_DIRECT_MUC.getValue() + "}");
                 return;
             }
             case "set-untrusted": {

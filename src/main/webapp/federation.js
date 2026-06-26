@@ -66,6 +66,7 @@ function refresh() {
             updateKeepaliveInput(data.keepaliveSeconds);
             updateReconnectInput(data.reconnectSeconds);
             updateAllowlistToggle(data.peerAllowlist);
+            updateBlockDirectToggle(data.blockDirectMuc);
         })
         .catch(err => console.error('Federation API error:', err));
 }
@@ -498,6 +499,32 @@ function saveAllowlist() {
         .then(result => {
             if (result && result.ok) {
                 const badge = document.getElementById('allowlist-saved');
+                if (badge) {
+                    badge.style.display = 'inline';
+                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
+                }
+                refresh();
+            }
+        });
+}
+
+// ── Security: force-federation (block direct S2S room access) toggle ────────────
+
+function updateBlockDirectToggle(enabled) {
+    const cb = document.getElementById('blockdirect-toggle');
+    const lbl = document.getElementById('blockdirect-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Federation required' : 'Direct S2S allowed';
+}
+
+function saveBlockDirect() {
+    const cb = document.getElementById('blockdirect-toggle');
+    if (!cb) return;
+    const enabled = cb.checked;
+    post({ action: 'set-block-direct-muc', enabled })
+        .then(result => {
+            if (result && result.ok) {
+                const badge = document.getElementById('blockdirect-saved');
                 if (badge) {
                     badge.style.display = 'inline';
                     setTimeout(() => { badge.style.display = 'none'; }, 2500);

@@ -1,8 +1,10 @@
 package com.igniterealtime.openfire.plugin.federation.protocol;
 
 import com.igniterealtime.openfire.plugin.federation.FederationManager;
+import com.igniterealtime.openfire.plugin.federation.FederationProperties;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import org.jivesoftware.openfire.XMPPServer;
+import org.xmpp.packet.JID;
 import org.jivesoftware.openfire.interceptor.PacketInterceptor;
 import org.jivesoftware.openfire.interceptor.PacketRejectedException;
 import org.jivesoftware.openfire.session.Session;
@@ -27,6 +29,14 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
     private static final Logger Log = LoggerFactory.getLogger(FederationPacketInterceptor.class);
 
+    /**
+     * When true (default), a remote user cannot join or address a local MUC room
+     * directly over a raw S2S connection — they must go through a federation room
+     * mapping. Federation's own traffic is unaffected: virtual occupants are injected
+     * via {@code directDeliver} (and are marked-forwarded), never as real S2S presence,
+     * so this gate only catches genuine direct cross-server room access.
+     * Toggle via the Federation admin console, or {@link FederationProperties#BLOCK_DIRECT_MUC}.
+     */
     private final FederationManager manager;
 
     public FederationPacketInterceptor(FederationManager manager) {
@@ -40,6 +50,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         if (packet.getTo() == null) return;
         if (FederationStanzaFactory.isMarkedAsForwarded(packet)) return;
+
+        // Force federation: reject any direct remote-origin packet aimed at a local
+        // MUC room. Done as early as possible (before the room processes it) so a
+        // remote join never takes effect.
+        enforceFederationOnly(packet);
 
         if (packet instanceof Message msg && incoming && processed) {
             handleMessage(msg);
@@ -102,6 +117,30 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         } catch (Exception e) {
             Log.warn("Failed to forward to {}: {}", remoteDomain, e.getMessage());
         }
+    }
+
+    // ── Force-federation gate ──────────────────────────────────────────────────
+
+    /**
+     * Rejects a packet that originates on a remote server and targets a local MUC
+     * room, so the only way for a remote user to participate is through a federation
+     * room mapping. A no-op when the feature is disabled, when the target is not a
+     * local conference domain, or when the sender is local.
+     */
+    private void enforceFederationOnly(Packet packet) throws PacketRejectedException {
+        if (!FederationProperties.BLOCK_DIRECT_MUC.getValue()) return;
+
+        String toDomain = packet.getTo().getDomain();
+        if (!isConferenceDomain(toDomain)) return;
+
+        JID from = packet.getFrom();
+        if (from == null) return;
+        if (!XMPPServer.getInstance().isRemote(from)) return;  // local users are allowed
+
+        Log.info("Blocking direct S2S MUC access from {} to {} — federation required",
+                 from, packet.getTo());
+        throw new PacketRejectedException(
+                "Direct cross-server access to this room is disabled; use federation.");
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

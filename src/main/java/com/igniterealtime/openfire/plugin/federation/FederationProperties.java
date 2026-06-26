@@ -31,6 +31,19 @@ public final class FederationProperties {
         .setDynamic(true)
         .build();
 
+    /**
+     * Force-federation gate (on by default). When true, a remote user cannot join or address a
+     * local MUC room directly over a raw S2S connection — they must go through a federation room
+     * mapping. Federation's own virtual occupants are injected locally (never as real S2S presence)
+     * and are unaffected. Set false to allow direct cross-server room access alongside federation.
+     */
+    public static final SystemProperty<Boolean> BLOCK_DIRECT_MUC = SystemProperty.Builder.ofType(Boolean.class)
+        .setKey("plugin.federation.directRemoteMucBlocked")
+        .setPlugin(PLUGIN)
+        .setDefaultValue(true)
+        .setDynamic(true)
+        .build();
+
     /** Disable Openfire's server-wide S2S idle reaper on startup (applied at start; needs restart). */
     public static final SystemProperty<Boolean> DISABLE_S2S_IDLE = SystemProperty.Builder.ofType(Boolean.class)
         .setKey("plugin.federation.disableS2SIdle")

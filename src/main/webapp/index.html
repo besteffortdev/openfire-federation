@@ -333,6 +333,29 @@
                             </span>
                         </td>
                     </tr>
+                    <tr>
+                        <td>
+                            <label for="blockdirect-toggle" style="font-weight:600;font-size:13px">
+                                Force federation for remote room access
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When enabled, a user on another server cannot join or post to a local
+                                MUC room directly over S2S — the room is only reachable through a
+                                federation mapping. Federation's own traffic is unaffected. Disable to
+                                also allow direct cross-server room access.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="blockdirect-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveBlockDirect()">
+                            <span id="blockdirect-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="blockdirect-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
                 </table>
             </div>
         </div>
