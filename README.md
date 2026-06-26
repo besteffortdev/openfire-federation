@@ -193,10 +193,22 @@ The plugin exchanges control messages with peers using IQ stanzas in the `urn:xm
 | `room-advertisement` | Announce a federated local room (relayed multi‑hop). |
 | `room-mapping` / `room-unmap` | Link / unlink a local room to a remote room (relayed multi‑hop). |
 | `muc-forward` | Carries the actual MUC presence/message traffic between mapped rooms. |
+| `direct-forward` | Carries 1:1 chat messages to a multi‑hop contact (and message‑embedded XEPs: typing, receipts, reactions, OOB/upload links). |
+| `presence-forward` | Carries 1:1 presence and subscription stanzas to a multi‑hop contact. |
+| `iq-forward` | Carries user‑addressed IQs to a multi‑hop contact — **vCard/avatar (XEP‑0054/0153/0084), service discovery (0030), entity caps (0115), version/time/ping/last‑activity**. The reply relays back the same way, correlated by `id`. |
+| `user-directory` | Opt‑in gossip of online users reachable on a domain. |
 
 Remote users appear in local rooms as **virtual occupants**, tracked by their home origin (for reachability
 cleanup) and by the neighbour they arrived through (for per‑mapping teardown). Loop prevention uses a
 `fed-origin` marker so forwarded traffic doesn't bounce.
+
+**vCard, avatar, disco and caps over the overlay (1.6.0).** For multi‑hop contacts (no direct S2S link),
+the plugin relays user‑addressed IQs so a contact's avatar and profile load, service discovery resolves,
+and entity capabilities are learned. Forwarded presence now carries its full extension set — the avatar
+hash (`vcard-temp:x:update`) and entity‑caps `<c/>` — so clients know there is an avatar to fetch and what
+the contact supports. Adjacent (directly‑linked) peers continue to use native S2S for all of this.
+**Jingle audio/video and file transfer (0166/0167/0176/0234) remain out of scope** — they need a separate
+media/TURN path.
 
 ---
 

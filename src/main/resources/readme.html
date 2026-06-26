@@ -93,6 +93,22 @@
     chained layout. Presence, typing, and message history forwarding all follow the mappings.
 </div>
 
+<h2>Direct (1:1) federation</h2>
+<p>
+    Beyond rooms, the overlay relays one‑to‑one traffic to contacts on servers you can only reach through
+    a hop. 1:1 chat, presence (online/away/dnd) and subscriptions all traverse multi‑hop links. As of
+    <strong>1.6.0</strong> this extends to <strong>profile and capability data</strong>: a contact's
+    <strong>vCard and avatar</strong> (XEP‑0054/0153/0084), <strong>service discovery</strong> (0030),
+    <strong>entity capabilities</strong> (0115), and version/time/ping/last‑activity now load across the
+    overlay. Forwarded presence carries the avatar hash and caps node, so clients know there is an avatar
+    to fetch and what the contact supports.
+</p>
+<div class="note">
+    Directly‑linked (adjacent) peers keep using native server‑to‑server for all of the above — relay only
+    kicks in where there is no direct link. <strong>Jingle audio/video and file transfer are not
+    relayed</strong>; they need a separate media path and are out of scope.
+</div>
+
 <h2>Connection settings</h2>
 <p>On the <strong>Peer Servers</strong> tab, the <em>Connection settings</em> box exposes:</p>
 <table>
