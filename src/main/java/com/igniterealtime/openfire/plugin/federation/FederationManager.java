@@ -18,6 +18,8 @@ import org.jivesoftware.openfire.session.ClientSession;
 import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.openfire.session.IncomingServerSession;
 import org.jivesoftware.openfire.session.OutgoingServerSession;
+import org.jivesoftware.openfire.roster.Roster;
+import org.jivesoftware.openfire.roster.RosterItem;
 import org.jivesoftware.openfire.user.PresenceEventDispatcher;
 import org.jivesoftware.openfire.user.PresenceEventListener;
 import org.jivesoftware.util.JiveGlobals;
@@ -84,7 +86,10 @@ public class FederationManager {
             @Override public void availableSession(ClientSession s, Presence p)   { onLocalPresenceEvent(s, p); }
             @Override public void unavailableSession(ClientSession s, Presence p) { onLocalPresenceEvent(s, p); }
             @Override public void presenceChanged(ClientSession s, Presence p)    { onLocalPresenceEvent(s, p); }
-            @Override public void subscribedToPresence(JID a, JID b)   { }
+            @Override public void subscribedToPresence(JID subscriberJID, JID userJID) {
+                try { pushPresenceToNewSubscriber(subscriberJID, userJID); }
+                catch (Exception e) { Log.debug("pushPresenceToNewSubscriber failed: {}", e.getMessage()); }
+            }
             @Override public void unsubscribedToPresence(JID a, JID b) { }
         };
         PresenceEventDispatcher.addListener(presenceListener);
@@ -101,11 +106,82 @@ public class FederationManager {
         if (FederationProperties.DIRECTORY_PUBLISH.getValue()) publishDirectory();
         try {
             if (session != null && session.getAddress() != null) {
-                forwardLocalOccupantPresence(session.getAddress(), presence);
+                forwardLocalOccupantPresence(session.getAddress(), presence);        // MUC occupants
+                forwardPresenceToRemoteSubscribers(session.getAddress(), presence);  // 1:1 roster contacts
             }
         } catch (Exception e) {
-            Log.debug("forwardLocalOccupantPresence failed: {}", e.getMessage());
+            Log.debug("presence-event forward failed: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Forwards a local user's presence to their roster subscribers living on MULTI-HOP peers.
+     * Needed because a user's availability is a BROADCAST presence (no {@code to}); Openfire's
+     * server-generated directed copies to remote subscribers (and probe answers) bypass the packet
+     * interceptor, so without this a federated contact never sees the user go online/away/offline.
+     * Mirrors the MUC fix in {@link #forwardLocalOccupantPresence}. Direct peers are left to native
+     * S2S, which delivers subscriber presence correctly on its own.
+     */
+    public void forwardPresenceToRemoteSubscribers(JID user, Presence presence) {
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+        if (user == null || user.getNode() == null) return;
+        if (!XMPPServer.getInstance().isLocal(user)) return;
+        Roster roster;
+        try {
+            roster = XMPPServer.getInstance().getRosterManager().getRoster(user.getNode());
+        } catch (Exception e) {
+            return;
+        }
+        if (roster == null) return;
+        for (RosterItem item : roster.getRosterItems()) {
+            JID contact = item.getJid();
+            if (contact == null || contact.getNode() == null) continue;
+            if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
+            RosterItem.SubType sub = item.getSubStatus();                // must be subscribed TO us
+            if (sub != RosterItem.SUB_FROM && sub != RosterItem.SUB_BOTH) continue;
+            forwardDirectPresence(directedPresence(user, contact, presence));
+        }
+    }
+
+    /**
+     * Pushes a local user's current presence to a freshly-subscribed contact on a multi-hop peer
+     * (RFC 6121 "send current presence on subscription approval") — covers the case where the user
+     * was already online before the subscription, so no presence-change event would fire.
+     */
+    public void pushPresenceToNewSubscriber(JID subscriberJID, JID userJID) {
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+        if (userJID == null || !XMPPServer.getInstance().isLocal(userJID)) return;
+        if (subscriberJID == null || subscriberJID.getNode() == null) return;
+        if (!isMultiHopPeer(subscriberJID.getDomain())) return;
+        Presence cur = currentPresenceOf(userJID);
+        if (cur == null) return;   // user offline — nothing to advertise
+        forwardDirectPresence(directedPresence(userJID, subscriberJID, cur));
+    }
+
+    /** The highest-priority available presence of a local user's sessions, or null if offline. */
+    private Presence currentPresenceOf(JID user) {
+        for (ClientSession s : XMPPServer.getInstance().getSessionManager().getSessions(user.getNode())) {
+            Presence p = s.getPresence();
+            if (p != null && p.isAvailable()) return p;
+        }
+        return null;
+    }
+
+    /** Builds a directed presence from→to copying type/show/status of a source presence. */
+    private Presence directedPresence(JID from, JID to, Presence src) {
+        Presence p = new Presence();
+        p.setFrom(src != null && src.getFrom() != null ? src.getFrom() : from);
+        p.setTo(to);
+        if (src != null) {
+            if (src.getType()   != null) p.setType(src.getType());      // unavailable
+            if (src.getShow()   != null) p.setShow(src.getShow());      // away / xa / dnd / chat
+            if (src.getStatus() != null) p.setStatus(src.getStatus());
+        }
+        return p;
+    }
+
+    private boolean isMultiHopPeer(String domain) {
+        return routingTable.findNextHop(domain).map(nh -> !nh.equals(domain)).orElse(false);
     }
 
     public void stop() {
