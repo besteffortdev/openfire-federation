@@ -749,9 +749,35 @@ public class FederationManager {
     public void handleUnreachableDestinations(Collection<String> destinations) {
         for (String dest : destinations) {
             if (routingTable.isReachable(dest)) continue;   // still reachable another way
+            evictOccupantsArrivedViaLostServer(dest);       // by ARRIVED-VIA mapping (catches relayed cross-spoke)
             evictAllVirtualOccupantsFromDomain(dest);       // by ORIGIN home domain
             evictOccupantsForLostHub(dest);                 // by mapped hub (catches un-routed origins)
             roomManager.clearRemoteRooms(dest);
+        }
+    }
+
+    /**
+     * A mapped server (a peer or hub) just became unreachable: across every local room, drop the
+     * virtual occupants that ARRIVED VIA it and propagate those leaves to the room's other spokes
+     * so they stop seeing them too.  This is the route-loss analogue of
+     * {@link #evictForInactiveMapping}, and the reason it is needed alongside the by-origin pass:
+     * a user RELAYED in through this server (e.g. a cross-spoke occupant that reached us through a
+     * hub) has its own HOME domain — which may still be perfectly routable — so by-origin eviction
+     * keeps it as a ghost even though the only path it actually used is now gone.  Keying on
+     * arrivedVia (the mapped server traversed, recorded at injection) drops exactly those, while
+     * occupants still reachable through another mapping keep that path and stay.
+     */
+    public void evictOccupantsArrivedViaLostServer(String lostDomain) {
+        for (String localJid : roomManager.getRoomsWithAnyVirtualOccupants()) {
+            List<FederatedRoomManager.VirtualOccupant> gone =
+                    roomManager.removeVirtualOccupantsArrivedVia(localJid, lostDomain);
+            if (gone.isEmpty()) continue;
+            sendVirtualLeaves(localJid,
+                    gone.stream().map(FederatedRoomManager.VirtualOccupant::nick)
+                        .collect(java.util.stream.Collectors.toSet()));
+            for (FederatedRoomManager.VirtualOccupant vo : gone) {
+                forwardVirtualLeave(localJid, vo.nick(), vo.origin(), java.util.Set.of(lostDomain));
+            }
         }
     }
 
