@@ -625,6 +625,29 @@ public class FederatedRoomManager {
         return removeMatching(localRoomJid, vo -> true);
     }
 
+    /**
+     * Removes the {@code arrivedViaDomain} path from every occupant in the room and returns the
+     * FULL {@link VirtualOccupant} objects that thereby became unreachable (their LAST path was
+     * this domain).  Like {@link #clearVirtualOccupantsByArrivedVia} but returns objects, not
+     * just nicks, so the caller can propagate each leave with the occupant's real origin.  Used
+     * by mapping-disable eviction: arrivedVia is the MAPPED server an occupant entered through,
+     * so this drops exactly the occupants the disabled mapping brought in — including hub-relayed
+     * cross-spoke users — while occupants still reachable via another mapping keep that path.
+     */
+    public List<VirtualOccupant> removeVirtualOccupantsArrivedVia(String localRoomJid, String arrivedViaDomain) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return Collections.emptyList();
+        List<VirtualOccupant> removed = new ArrayList<>();
+        boolean changed = false;
+        for (VirtualOccupant vo : new ArrayList<>(byNick.values())) {
+            if (!vo.arrivedVia().remove(arrivedViaDomain)) continue;   // didn't arrive via this mapping
+            changed = true;
+            if (vo.arrivedVia().isEmpty() && byNick.remove(vo.nick(), vo)) removed.add(vo);
+        }
+        if (changed) afterRemoval(localRoomJid, byNick);
+        return removed;
+    }
+
     /** Removes occupants matching {@code pred}; returns their nicks and rewrites persistence. */
     private Set<String> removeMatching(String localRoomJid, java.util.function.Predicate<VirtualOccupant> pred) {
         ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);

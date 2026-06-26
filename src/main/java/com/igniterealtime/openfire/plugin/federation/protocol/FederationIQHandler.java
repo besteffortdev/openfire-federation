@@ -553,6 +553,10 @@ public class FederationIQHandler extends IQHandler {
         String finalDest   = el.attributeValue("destination");
         String targetRoom  = el.attributeValue("targetRoom");
         String via         = el.attributeValue("via", "");
+        // The mapped server this traffic enters us through (far end of our mapping / a hub).
+        // Used as the occupant's arrivedVia so a mapping-disable evicts exactly its arrivals.
+        // Older peers omit it — fall back to the immediate sender so behaviour degrades safely.
+        String src         = el.attributeValue("src", fromDomain);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         if (via.contains(localDomain)) {
@@ -593,7 +597,7 @@ public class FederationIQHandler extends IQHandler {
                        payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
                 return;
             }
-            injectLocally(payloadEl, via, targetRoom, fromDomain);
+            injectLocally(payloadEl, via, targetRoom, fromDomain, src);
             // Hub behavior: fan out to all other mapped spokes.
             fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via);
         } else {
@@ -606,7 +610,7 @@ public class FederationIQHandler extends IQHandler {
             if (targetRoom != null) {
                 RoomMapping ownMapping = manager.getRoomManager().getMappingForRemote(targetRoom);
                 if (ownMapping != null && isFederatedLocalRoom(ownMapping.localRoomJid())) {
-                    injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain);
+                    injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain, src);
                 }
             }
 
@@ -614,9 +618,11 @@ public class FederationIQHandler extends IQHandler {
                 nextHop -> {
                     try {
                         Packet embedded = parsePacket(payloadEl);
+                        // Pure relay — preserve src so the destination still sees the original
+                        // mapped server this traffic enters through, not us (a mid-path relay).
                         XMPPServer.getInstance().getPacketRouter()
                                   .route(FederationStanzaFactory.mucForward(
-                                      nextHop, finalDest, targetRoom, newVia, embedded));
+                                      nextHop, finalDest, targetRoom, newVia, src, embedded));
                     } catch (Exception e) {
                         Log.warn("Could not relay muc-forward toward {}: {}", finalDest, e.getMessage());
                     }
@@ -626,11 +632,11 @@ public class FederationIQHandler extends IQHandler {
         }
     }
 
-    private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain) {
+    private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {
         try {
             switch (payloadEl.getName()) {
                 case "message"  -> injectMessage(payloadEl, targetRoom);
-                case "presence" -> injectPresence(payloadEl, targetRoom, fromDomain);
+                case "presence" -> injectPresence(payloadEl, targetRoom, fromDomain, src);
                 default -> Log.warn("injectLocally: unexpected payload type '{}'", payloadEl.getName());
             }
         } catch (Exception e) {
@@ -692,9 +698,11 @@ public class FederationIQHandler extends IQHandler {
                                     .orElse(m.remoteDomain());
             try {
                 Packet embedded = parsePacket(payloadEl);
+                // We are the mapped server (hub) for this spoke, so the occupant enters the
+                // spoke through US — stamp src with our own domain, not the original source.
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.mucForward(
-                              nextHop, m.remoteDomain(), m.remoteRoomJid(), newVia, embedded));
+                              nextHop, m.remoteDomain(), m.remoteRoomJid(), newVia, localDomain, embedded));
                 Log.debug("fanOut: relayed from {} to {} via {}",
                           fromDomain, m.remoteDomain(), nextHop);
             } catch (Exception e) {
@@ -746,7 +754,7 @@ public class FederationIQHandler extends IQHandler {
      * of the target room.  On join, also triggers a sync of local occupants back
      * to the sender so the joining user immediately sees who is already in the room.
      */
-    private void injectPresence(Element presEl, String targetRoom, String fromDomain) {
+    private void injectPresence(Element presEl, String targetRoom, String fromDomain, String src) {
         MUCRoom room = findLocalRoom(targetRoom);
         if (room == null) {
             Log.warn("injectPresence: room {} not found locally", targetRoom);
@@ -813,13 +821,13 @@ public class FederationIQHandler extends IQHandler {
         if (leaving) {
             // Capture the occupant's split-horizon metadata BEFORE untracking so the leave
             // can be propagated the same way joins are (forwardVirtualOccupants). Fall back to
-            // the immediate sender if we somehow weren't tracking it.
+            // the mapped server it entered through (src) if we somehow weren't tracking it.
             String leaveOrigin = originOf(senderNick, fromDomain);
             Set<String> leaveArrivedVia = manager.getRoomManager().getVirtualOccupants(targetRoom).stream()
                     .filter(vo -> vo.nick().equals(senderNick))
                     .findFirst()
                     .map(vo -> new HashSet<>(vo.arrivedVia()))
-                    .orElseGet(() -> new HashSet<>(Collections.singletonList(fromDomain)));
+                    .orElseGet(() -> new HashSet<>(Collections.singletonList(src)));
 
             // Propagate the leave to other mappings ONLY on the first removal — a duplicate
             // leave (arriving via both the fan-out and this state-based forward) removes
@@ -828,8 +836,11 @@ public class FederationIQHandler extends IQHandler {
                 manager.forwardVirtualLeave(targetRoom, senderNick, leaveOrigin, leaveArrivedVia);
             }
         } else {
+            // arrivedVia = the MAPPED server we entered through (src), NOT the relay neighbour,
+            // so a mapping-disable can evict exactly the occupants that came through that mapping
+            // — including hub-relayed cross-spoke users, whose src is the hub, not their home.
             manager.getRoomManager().trackVirtualOccupant(targetRoom, originOf(senderNick, fromDomain),
-                                                           fromDomain, senderNick);
+                                                           src, senderNick);
         }
 
         // On join: push our local occupants back to the joiner so they immediately
@@ -897,7 +908,7 @@ public class FederationIQHandler extends IQHandler {
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(
                         FederationStanzaFactory.mucForward(
-                            nextHop, remoteDomain, remoteRoomJid, localDomain, sync));
+                            nextHop, remoteDomain, remoteRoomJid, localDomain, localDomain, sync));
                 } catch (Exception e) {
                     Log.warn("syncLocalOccupantsToRemote: failed to push {}: {}",
                              occupant.getUserAddress(), e.getMessage());

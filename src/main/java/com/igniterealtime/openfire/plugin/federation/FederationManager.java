@@ -504,26 +504,34 @@ public class FederationManager {
      *       server but who only reached us through this mapping), so drop them all.  This is
      *       the spoke side of a hub disable: the spoke's single mapping is gone, so the hub's
      *       own users <i>and</i> the other spokes' relayed users must all leave.</li>
-     *   <li><b>Other mappings remain</b> (the hub disabling one of several spokes) — drop just
-     *       the users whose HOME domain is the now-disabled {@code remoteDomain} (origin-keyed,
-     *       so multi-hop spokes are matched even though they arrived via a relay), then
-     *       propagate those leaves to the still-active spokes so they stop seeing them too.</li>
+     *   <li><b>Other mappings remain</b> — drop only the virtual occupants that ARRIVED VIA the
+     *       now-inactive mapping (keyed on {@code arrivedVia == remoteDomain}, where arrivedVia
+     *       is the MAPPED server an occupant entered through).  This drops the disabled remote's
+     *       own users AND the cross-spoke users it relayed in (their arrivedVia is this mapping's
+     *       far server / hub, even though their HOME is elsewhere), while occupants reachable
+     *       through a <i>surviving</i> mapping keep that path and stay.  Each resulting leave is
+     *       propagated to the still-active spokes with the occupant's real origin so they stop
+     *       seeing those users too.</li>
      * </ul>
      *
-     * <p>Using {@code remoteDomain} as an ORIGIN key (not as an {@code arrivedVia} neighbour)
-     * is the fix for multi-hop disables: a mapping's {@code remoteDomain} is the FAR mapped
-     * server, which is the home/origin of its users — never the immediate S2S neighbour the
-     * old arrivedVia-keyed eviction looked for, so on a relayed path it matched nothing.
+     * <p>Keying on arrivedVia (the mapping traversed) rather than on the user's HOME is what
+     * makes this correct for BOTH duals of a multi-mapping room: disabling the mapping a relayed
+     * user came through evicts it; disabling an UNRELATED mapping leaves it alone — a HOME-based
+     * key cannot tell those apart because the user's home is the same in both.
      */
     public void evictForInactiveMapping(String localRoomJid, String remoteDomain) {
         if (roomManager.getMappingsForLocal(localRoomJid).isEmpty()) {
             evictAllVirtualOccupantsInRoom(localRoomJid);
             return;
         }
-        Set<String> gone = roomManager.clearVirtualOccupantsByOrigin(localRoomJid, remoteDomain);
-        sendVirtualLeaves(localRoomJid, gone);
-        for (String nick : gone) {
-            forwardVirtualLeave(localRoomJid, nick, remoteDomain, java.util.Set.of(remoteDomain));
+        List<FederatedRoomManager.VirtualOccupant> gone =
+                roomManager.removeVirtualOccupantsArrivedVia(localRoomJid, remoteDomain);
+        if (gone.isEmpty()) return;
+        sendVirtualLeaves(localRoomJid,
+                gone.stream().map(FederatedRoomManager.VirtualOccupant::nick)
+                    .collect(java.util.stream.Collectors.toSet()));
+        for (FederatedRoomManager.VirtualOccupant vo : gone) {
+            forwardVirtualLeave(localRoomJid, vo.nick(), vo.origin(), java.util.Set.of(remoteDomain));
         }
     }
 
@@ -623,7 +631,7 @@ public class FederationManager {
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(
                         FederationStanzaFactory.mucForward(
-                            nextHop, remoteDomain, remoteRoomJid, localDomain, p));
+                            nextHop, remoteDomain, remoteRoomJid, localDomain, localDomain, p));
                 } catch (Exception ex) {
                     Log.warn("pushOccupants: failed to push {} for {}: {}",
                              leaving ? "leave" : "join", occupant.getUserAddress(), ex.getMessage());
@@ -674,7 +682,7 @@ public class FederationManager {
                 vsync.setFrom(new JID(vo.nick()));
                 FederationStanzaFactory.markAsForwarded(vsync);
                 XMPPServer.getInstance().getPacketRouter().route(
-                    FederationStanzaFactory.mucForward(nextHop, toDomain, remoteRoomJid, localDomain, vsync));
+                    FederationStanzaFactory.mucForward(nextHop, toDomain, remoteRoomJid, localDomain, localDomain, vsync));
             } catch (Exception e) {
                 Log.warn("forwardVirtualOccupants: failed for {}: {}", vo.nick(), e.getMessage());
             }
@@ -707,7 +715,7 @@ public class FederationManager {
                 vleave.setType(Presence.Type.unavailable);
                 FederationStanzaFactory.markAsForwarded(vleave);
                 XMPPServer.getInstance().getPacketRouter().route(
-                    FederationStanzaFactory.mucForward(nextHop, toDomain, m.remoteRoomJid(), localDomain, vleave));
+                    FederationStanzaFactory.mucForward(nextHop, toDomain, m.remoteRoomJid(), localDomain, localDomain, vleave));
             } catch (Exception e) {
                 Log.warn("forwardVirtualLeave: failed for {}: {}", leavingNick, e.getMessage());
             }

@@ -259,12 +259,20 @@ public final class FederationStanzaFactory {
      * @param targetRoom       the room JID on finalDestination to inject into
      *                         (null = use the payload's existing to-address)
      * @param viaTrail         comma-separated list of servers already visited
+     * @param srcMapped        the MAPPED server this roster traffic enters the destination
+     *                         through — i.e. the far end of the destination's mapping (a peer
+     *                         or a hub re-originating a fan-out), NOT the relay neighbour and
+     *                         NOT the user's home.  Recorded as the occupant's arrivedVia so a
+     *                         mapping-disable can evict exactly the occupants that came through
+     *                         that mapping (including hub-relayed cross-spoke users).  Preserved
+     *                         unchanged across pure relay hops.
      * @param payload          the original MUC packet (message or presence)
      */
     public static IQ mucForward(String nextHop,
                                 String finalDestination,
                                 String targetRoom,
                                 String viaTrail,
+                                String srcMapped,
                                 Packet payload) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
@@ -272,6 +280,7 @@ public final class FederationStanzaFactory {
         fwd.addAttribute("destination", finalDestination);
         if (targetRoom != null) fwd.addAttribute("targetRoom", targetRoom);
         fwd.addAttribute("via",         viaTrail);
+        if (srcMapped != null) fwd.addAttribute("src", srcMapped);
         fwd.add(payload.getElement().createCopy());
         return iq;
     }

@@ -95,7 +95,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             Packet copy = copyPacket(packet);
             XMPPServer.getInstance().getPacketRouter().route(
                 FederationStanzaFactory.mucForward(
-                    nextHop, remoteDomain, mapping.remoteRoomJid(), localDomain, copy)
+                    nextHop, remoteDomain, mapping.remoteRoomJid(), localDomain, localDomain, copy)
             );
             Log.debug("Forwarded {} to {} via {}",
                       packet.getClass().getSimpleName(), mapping.remoteRoomJid(), nextHop);
