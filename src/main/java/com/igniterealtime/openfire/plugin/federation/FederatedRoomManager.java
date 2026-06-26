@@ -634,6 +634,24 @@ public class FederatedRoomManager {
      * so this drops exactly the occupants the disabled mapping brought in — including hub-relayed
      * cross-spoke users — while occupants still reachable via another mapping keep that path.
      */
+    /**
+     * Removes and returns the FULL {@link VirtualOccupant} objects in a room whose ORIGIN (home)
+     * domain is {@code originDomain}.  Object-returning sibling of {@link #clearVirtualOccupantsByOrigin}
+     * so a route-loss eviction can propagate each leave to the occupant's other spokes (its real
+     * arrivedVia is preserved on the returned object, since this removes wholesale).
+     */
+    public List<VirtualOccupant> removeVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return Collections.emptyList();
+        List<VirtualOccupant> removed = new ArrayList<>();
+        for (VirtualOccupant vo : new ArrayList<>(byNick.values())) {
+            if (originDomain.equals(vo.origin()) && byNick.remove(vo.nick(), vo)) removed.add(vo);
+        }
+        if (removed.isEmpty()) return Collections.emptyList();
+        afterRemoval(localRoomJid, byNick);
+        return removed;
+    }
+
     public List<VirtualOccupant> removeVirtualOccupantsArrivedVia(String localRoomJid, String arrivedViaDomain) {
         ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
         if (byNick == null) return Collections.emptyList();

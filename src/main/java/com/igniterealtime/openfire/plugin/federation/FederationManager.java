@@ -470,10 +470,24 @@ public class FederationManager {
      * when the route to remoteDomain is lost.  Eviction is keyed on the virtual nick's
      * HOME domain rather than the domain it was tracked under, so multi-hop occupants
      * (tracked under a relay) are also dropped when the far server becomes unreachable.
+     *
+     * <p>Like the arrivedVia pass, each leave is PROPAGATED to the occupant's other spokes.
+     * Without this, a spoke that learned the occupant through us (and so cannot evict it on its
+     * own route loss) keeps it as a ghost — and worse, racing this local eviction against an
+     * inbound propagated leave can untrack the occupant first, so the inbound leave then finds
+     * nothing to re-forward and the spoke is never told.
      */
     public void evictAllVirtualOccupantsFromDomain(String remoteDomain) {
         for (String localJid : roomManager.getRoomsWithAnyVirtualOccupants()) {
-            evictVirtualOccupantsByOrigin(localJid, remoteDomain);
+            List<FederatedRoomManager.VirtualOccupant> gone =
+                    roomManager.removeVirtualOccupantsByOrigin(localJid, remoteDomain);
+            if (gone.isEmpty()) continue;
+            sendVirtualLeaves(localJid,
+                    gone.stream().map(FederatedRoomManager.VirtualOccupant::nick)
+                        .collect(java.util.stream.Collectors.toSet()));
+            for (FederatedRoomManager.VirtualOccupant vo : gone) {
+                forwardVirtualLeave(localJid, vo.nick(), vo.origin(), vo.arrivedVia());
+            }
         }
     }
 
@@ -484,14 +498,6 @@ public class FederationManager {
      */
     public void evictVirtualOccupants(String localRoomJid, String remoteDomain) {
         sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByArrivedVia(localRoomJid, remoteDomain));
-    }
-
-    /**
-     * Like {@link #evictVirtualOccupants} but matches virtual nicks by their HOME domain
-     * (user@home), so it drops a server's clients even when they reached us via a relay.
-     */
-    public void evictVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
-        sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByOrigin(localRoomJid, originDomain));
     }
 
     /**
