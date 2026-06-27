@@ -394,6 +394,29 @@
                     </tr>
                     <tr>
                         <td>
+                            <label for="probesub-toggle" style="font-weight:600;font-size:13px">
+                                Probe federated contacts on subscription
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When a local user adds a contact on a multi-hop peer, Openfire's own
+                                presence probe leaks to native S2S and fails (no direct link), so the
+                                contact never shows online. With this on, the probe is re-issued over the
+                                federation overlay so the contact's presence is pulled. Recommended on.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="probesub-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveProbeOnSubscribe()">
+                            <span id="probesub-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="probesub-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
                             <label for="dirpublish-toggle" style="font-weight:600;font-size:13px">
                                 Publish my user directory to peers
                             </label>

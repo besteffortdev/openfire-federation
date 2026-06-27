@@ -69,6 +69,7 @@ function refresh() {
             updateAllowlistToggle(data.peerAllowlist);
             updateBlockDirectToggle(data.blockDirectMuc);
             updateDirectRelayToggle(data.directMsgRelay);
+            updateProbeOnSubscribeToggle(data.probeOnSubscribe);
             updateDirectoryPublishToggle(data.directoryPublish);
             updateBookmarkPushToggle(data.bookmarkPush);
         })
@@ -533,6 +534,28 @@ function saveDirectRelay() {
     if (!cb) return;
     const enabled = cb.checked;
     post({ action: 'set-direct-relay', enabled })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+// ── Presence: probe federated contacts on subscription ──────────────────────────
+
+function updateProbeOnSubscribeToggle(enabled) {
+    const cb = document.getElementById('probesub-toggle');
+    const lbl = document.getElementById('probesub-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Probed over federation' : 'Native S2S';
+}
+
+function saveProbeOnSubscribe() {
+    const cb = document.getElementById('probesub-toggle');
+    if (!cb) return;
+    const enabled = cb.checked;
+    post({ action: 'set-probe-on-subscribe', enabled })
         .then(result => {
             if (result && result.ok) {
                 flashSaved('Saved ✓');

@@ -259,6 +259,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
         sb.append("\"directoryPublish\":").append(FederationProperties.DIRECTORY_PUBLISH.getValue()).append(",");
         sb.append("\"bookmarkPush\":").append(FederationProperties.BOOKMARK_PUSH.getValue()).append(",");
+        sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
 
         // ── this server's connected clients (local online users) ───────────────
         sb.append("\"localUsers\":[");
@@ -567,6 +568,16 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 FederationProperties.DIRECT_MSG_RELAY.setValue(Boolean.parseBoolean(enabled.strip()));
                 out.print("{\"ok\":true,\"directMsgRelay\":" + FederationProperties.DIRECT_MSG_RELAY.getValue() + "}");
+                return;
+            }
+            case "set-probe-on-subscribe": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.PROBE_ON_SUBSCRIBE.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"probeOnSubscribe\":" + FederationProperties.PROBE_ON_SUBSCRIBE.getValue() + "}");
                 return;
             }
             case "set-directory-publish": {

@@ -92,7 +92,13 @@ public class FederationManager {
             }
             @Override public void unavailableSession(ClientSession s, Presence p) { onLocalPresenceEvent(s, p); }
             @Override public void presenceChanged(ClientSession s, Presence p)    { onLocalPresenceEvent(s, p); }
-            @Override public void subscribedToPresence(JID subscriberJID, JID userJID)   { }
+            @Override public void subscribedToPresence(JID subscriberJID, JID userJID) {
+                // A local user just became subscribed to a contact's presence. If that contact lives on
+                // a multi-hop peer, Openfire's own probe leaks to native S2S and fails — re-issue it over
+                // the overlay so the contact's presence is actually pulled (and the entry stays visible).
+                try { probeRemoteContact(subscriberJID, userJID); }
+                catch (Exception e) { Log.debug("probeRemoteContact failed: {}", e.getMessage()); }
+            }
             @Override public void unsubscribedToPresence(JID a, JID b) { }
         };
         PresenceEventDispatcher.addListener(presenceListener);
@@ -107,7 +113,6 @@ public class FederationManager {
      */
     private void onLocalPresenceEvent(ClientSession session, Presence presence) {
         if (FederationProperties.DIRECTORY_PUBLISH.getValue()) publishDirectory();
-        if (FederationProperties.BOOKMARK_PUSH.getValue())     pushBookmarks();
         if (FederationProperties.BOOKMARK_PUSH.getValue())     pushBookmarks();
         try {
             if (session != null && session.getAddress() != null) {
@@ -223,6 +228,28 @@ public class FederationManager {
             probe.setTo(contact);
             forwardDirectPresence(probe);
         }
+    }
+
+    /**
+     * Probe a single multi-hop contact's presence over the overlay on behalf of a local user — used when
+     * the user becomes subscribed to that contact mid-session ({@code subscribedToPresence}). Openfire's
+     * own auto-probe at that moment is routed straight to native S2S and, for a multi-hop peer with no
+     * direct link, hangs and fails; this re-issues the same probe over the overlay so the contact's
+     * presence is pulled. Gated by {@link FederationProperties#PROBE_ON_SUBSCRIBE} (and the relay master
+     * switch). A no-op unless {@code localUser} is local and {@code contact} is a multi-hop peer user.
+     */
+    public void probeRemoteContact(JID localUser, JID contact) {
+        if (!FederationProperties.PROBE_ON_SUBSCRIBE.getValue()) return;
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+        if (localUser == null || localUser.getNode() == null || !XMPPServer.getInstance().isLocal(localUser)) return;
+        if (contact == null || contact.getNode() == null) return;
+        if (!isMultiHopPeer(contact.getDomain())) return;
+        Presence probe = new Presence();
+        probe.setType(Presence.Type.probe);
+        probe.setFrom(localUser.asBareJID());
+        probe.setTo(contact.asBareJID());
+        forwardDirectPresence(probe);
+        Log.info("subscription-probe: probing multi-hop contact {} for {} over overlay", contact.asBareJID(), localUser.asBareJID());
     }
 
     /** The highest-priority available presence of a local user's sessions, or null if offline. */

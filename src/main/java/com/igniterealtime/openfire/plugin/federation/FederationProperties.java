@@ -83,6 +83,20 @@ public final class FederationProperties {
         .setDynamic(true)
         .build();
 
+    /**
+     * Probe a multi-hop contact's presence over the overlay when a local user subscribes to them
+     * mid-session (ON by default). Openfire auto-probes a freshly-approved contact via native S2S,
+     * which leaks past the federation interceptor and fails for a multi-hop peer (no direct link),
+     * so the contact's presence is never pulled. With this on, we re-issue that probe over the
+     * overlay (mirroring the login-time probe). Set false to fall back to Openfire's native probe.
+     */
+    public static final SystemProperty<Boolean> PROBE_ON_SUBSCRIBE = SystemProperty.Builder.ofType(Boolean.class)
+        .setKey("plugin.federation.probeOnSubscribe")
+        .setPlugin(PLUGIN)
+        .setDefaultValue(true)
+        .setDynamic(true)
+        .build();
+
     /** Disable Openfire's server-wide S2S idle reaper on startup (applied at start; needs restart). */
     public static final SystemProperty<Boolean> DISABLE_S2S_IDLE = SystemProperty.Builder.ofType(Boolean.class)
         .setKey("plugin.federation.disableS2SIdle")
