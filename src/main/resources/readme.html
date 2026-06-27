@@ -97,11 +97,12 @@
 <p>
     Beyond rooms, the overlay relays one‑to‑one traffic to contacts on servers you can only reach through
     a hop. 1:1 chat, presence (online/away/dnd) and subscriptions all traverse multi‑hop links. As of
-    <strong>1.6.0</strong> this extends to <strong>profile and capability data</strong>: a contact's
-    <strong>vCard and avatar</strong> (XEP‑0054/0153/0084), <strong>service discovery</strong> (0030),
-    <strong>entity capabilities</strong> (0115), and version/time/ping/last‑activity now load across the
-    overlay. Forwarded presence carries the avatar hash and caps node, so clients know there is an avatar
-    to fetch and what the contact supports.
+    <strong>1.6.0</strong> this extends to <strong>profile data</strong>: a contact's <strong>vCard and
+    avatar</strong> (XEP‑0054/0153) now load across the overlay. The vCard reply is built at the contact's
+    home server and relayed back to the requester. Forwarded presence carries the avatar hash and entity‑
+    caps node, so clients know there is an avatar to fetch and what the contact supports. IQs answered by
+    the contact's <em>client</em> (e.g. disco/version to a specific resource) also round‑trip; server‑
+    answered non‑vCard IQs are best‑effort.
 </p>
 <div class="note">
     Directly‑linked (adjacent) peers keep using native server‑to‑server for all of the above — relay only

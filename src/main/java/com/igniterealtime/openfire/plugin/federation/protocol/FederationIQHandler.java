@@ -11,6 +11,7 @@ import org.jivesoftware.openfire.IQHandlerInfo;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.auth.UnauthorizedException;
 import org.jivesoftware.openfire.handler.IQHandler;
+import org.jivesoftware.openfire.vcard.VCardManager;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
@@ -775,9 +776,25 @@ public class FederationIQHandler extends IQHandler {
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             IQ iq = new IQ(payloadEl.createCopy());
-            XMPPServer.getInstance().getPacketRouter().route(iq);    // let Openfire answer / deliver it
-            Log.info("iq-forward: delivered 1:1 {} {} -> {} (from {})",
-                     iq.getType(), iq.getFrom(), iq.getTo(), fromDomain);
+            IQ.Type type = iq.getType();
+            if (type == IQ.Type.get || type == IQ.Type.set) {
+                // A REQUEST landed here.  Openfire's own handlers (vCard etc.) deliver their reply via
+                // the internal deliverer — NOT through the PacketInterceptor — so a reply to a multi-hop
+                // requester is handed to (non-existent) native S2S and lost.  We can't rely on Openfire
+                // routing the reply back, so we build the reply ourselves and relay it over the overlay.
+                if (!answerVCardLocally(iq, fromDomain)) {
+                    // Not a vCard request: best-effort local delivery (Openfire may answer it, but its
+                    // reply does not yet relay back over multi-hop — see iq-forward reply limitation).
+                    XMPPServer.getInstance().getPacketRouter().route(iq);
+                    Log.info("iq-forward: delivered 1:1 {} {} -> {} (from {}) [reply relay best-effort]",
+                             type, iq.getFrom(), iq.getTo(), fromDomain);
+                }
+            } else {
+                // A REPLY (result/error) reached its final destination — deliver to the local client.
+                XMPPServer.getInstance().getPacketRouter().route(iq);
+                Log.info("iq-forward: delivered 1:1 reply {} {} -> {} (from {})",
+                         type, iq.getFrom(), iq.getTo(), fromDomain);
+            }
         } else {
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
             manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
@@ -793,6 +810,48 @@ public class FederationIQHandler extends IQHandler {
                 () -> Log.warn("iq-forward: no route to {}, dropping", finalDest)
             );
         }
+    }
+
+    /**
+     * If {@code request} is a vCard get (XEP-0054, namespace {@code vcard-temp}) addressed to a local
+     * user, builds that user's vCard locally via {@link VCardManager} and relays the result back to the
+     * remote requester over the overlay — then returns true.  Returns false for anything else so the
+     * caller can fall back to plain local delivery.
+     *
+     * We build the reply ourselves (rather than letting Openfire's vCard handler answer) because that
+     * handler delivers its reply through the internal deliverer, which neither passes the
+     * PacketInterceptor nor fires an {@code IQResultListener}, so the reply to a multi-hop requester is
+     * handed to native S2S (no direct link) and lost.  This covers the avatar (vCard {@code PHOTO},
+     * XEP-0153) and profile fields — the data clients actually fetch for a contact.
+     */
+    private boolean answerVCardLocally(IQ request, String fromDomain) {
+        Element child = request.getChildElement();
+        if (request.getType() != IQ.Type.get
+                || child == null
+                || !"vCard".equals(child.getName())
+                || !"vcard-temp".equals(child.getNamespaceURI())) {
+            return false;
+        }
+        JID contact = request.getTo();                  // e.g. 2501-user@server1 (whose vCard is wanted)
+        if (contact == null || contact.getNode() == null) return false;
+
+        IQ result = IQ.createResultIQ(request);         // from=contact, to=requester, same id (correlates)
+        try {
+            Element vcard = VCardManager.getInstance().getVCard(contact.getNode());
+            result.setChildElement(vcard != null ? vcard.createCopy()
+                                                  : org.dom4j.DocumentHelper.createElement("vCard")
+                                                        .addNamespace("", "vcard-temp"));
+        } catch (Exception e) {
+            Log.warn("iq-forward: failed to build vCard for {}: {}", contact, e.getMessage());
+            result.setChildElement("vCard", "vcard-temp");
+        }
+        if (manager.forwardDirectIq(result)) {
+            Log.info("iq-forward: answered + relayed vCard for {} -> {} (from {})",
+                     contact, request.getFrom(), fromDomain);
+        } else {
+            Log.warn("iq-forward: built vCard for {} but no route back to {}", contact, request.getFrom());
+        }
+        return true;
     }
 
     // ── user-directory (opt-in online-user gossip) ─────────────────────────────

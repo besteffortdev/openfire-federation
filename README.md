@@ -195,7 +195,7 @@ The plugin exchanges control messages with peers using IQ stanzas in the `urn:xm
 | `muc-forward` | Carries the actual MUC presence/message traffic between mapped rooms. |
 | `direct-forward` | Carries 1:1 chat messages to a multi‑hop contact (and message‑embedded XEPs: typing, receipts, reactions, OOB/upload links). |
 | `presence-forward` | Carries 1:1 presence and subscription stanzas to a multi‑hop contact. |
-| `iq-forward` | Carries user‑addressed IQs to a multi‑hop contact — **vCard/avatar (XEP‑0054/0153/0084), service discovery (0030), entity caps (0115), version/time/ping/last‑activity**. The reply relays back the same way, correlated by `id`. |
+| `iq-forward` | Carries user‑addressed IQs to a multi‑hop contact — **vCard/avatar (XEP‑0054/0153)**, plus disco/version/ping when answered by the contact's client. The vCard reply is built at the contact's server and relayed back, correlated by `id`. |
 | `user-directory` | Opt‑in gossip of online users reachable on a domain. |
 
 Remote users appear in local rooms as **virtual occupants**, tracked by their home origin (for reachability
