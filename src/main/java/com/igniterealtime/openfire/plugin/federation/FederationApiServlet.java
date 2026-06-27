@@ -701,8 +701,24 @@ public class FederationApiServlet extends HttpServlet {
 
     private String esc(String s) {
         if (s == null) return "";
-        return s.replace("\\", "\\\\").replace("\"", "\\\"")
-                .replace("\n", "\\n").replace("\r", "\\r");
+        StringBuilder b = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> b.append("\\\\");
+                case '"'  -> b.append("\\\"");
+                case '\n' -> b.append("\\n");
+                case '\r' -> b.append("\\r");
+                case '\t' -> b.append("\\t");
+                default -> {
+                    // Escape any remaining control character so peer-supplied strings (presence
+                    // status/show, room names, JIDs) can never produce invalid JSON in the admin feed.
+                    if (c < 0x20) b.append(String.format("\\u%04x", (int) c));
+                    else          b.append(c);
+                }
+            }
+        }
+        return b.toString();
     }
 
     private String str(Object o) { return o == null ? "" : o.toString(); }

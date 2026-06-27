@@ -1178,6 +1178,13 @@ public class FederationManager {
      */
     public void handleUserDirectory(String fromDomain, String originDomain,
                                     Collection<UserDirectory.UserPresence> users, String via) {
+        // Trust gate (receive side): we never expose our own directory across an untrusted edge,
+        // and legitimate directory data never crosses one, so anything arriving over an untrusted
+        // link is a misbehaving/malicious peer trying to poison our view — drop it.
+        if (isUntrusted(fromDomain)) {
+            Log.warn("SECURITY: dropping user-directory from untrusted peer {} — refusing to cache its user list", fromDomain);
+            return;
+        }
         userDirectory.setUsersForOrigin(originDomain, users);
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getDomain().equals(fromDomain)) continue;
@@ -1238,6 +1245,14 @@ public class FederationManager {
      */
     public void handleBookmarkPush(String fromDomain, String originDomain,
                                    Collection<UserDirectory.UserPresence> users, String via) {
+        // Trust gate (receive side): bookmark-push writes into EVERY local user's private storage.
+        // We never send it across an untrusted edge and legitimate pushes never traverse one, so a
+        // push arriving over an untrusted link can only be a hostile peer trying to inject bookmarks
+        // into our users' clients — drop it before it touches storage.
+        if (isUntrusted(fromDomain)) {
+            Log.warn("SECURITY: dropping bookmark-push from untrusted peer {} — refusing to inject into local users", fromDomain);
+            return;
+        }
         bookmarkInjector.applyForOrigin(originDomain, users);
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getDomain().equals(fromDomain)) continue;
