@@ -368,6 +368,30 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    // ── bookmark-push (XEP-0048 connected-client advertisement) ─────────────────
+
+    /**
+     * Advertises the connected clients of {@code originDomain} so the receiver can inject them as
+     * XEP-0048 {@code <url>} bookmarks into its local users' storage. Gossiped exactly like a
+     * user-directory: an {@code origin} attribute and a {@code via} trail let it relay multi-hop
+     * without looping; an empty list is a withdrawal (remove this origin's injected bookmarks).
+     */
+    public static IQ bookmarkPush(String toDomain, Collection<UserDirectory.UserPresence> users,
+                                  String originDomain, String via) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        Element push = fed.addElement("bookmark-push");
+        if (originDomain != null)           push.addAttribute("origin", originDomain);
+        if (via != null && !via.isEmpty())  push.addAttribute("via", via);
+        for (UserDirectory.UserPresence u : users) {
+            Element e = push.addElement("user");
+            e.addAttribute("jid", u.jid());
+            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show",   u.show());
+            if (u.status() != null && !u.status().isEmpty()) e.addAttribute("status", u.status());
+        }
+        return iq;
+    }
+
     /**
      * Delivers a packet directly to the recipient's ClientSession, bypassing the
      * packet router and all PacketInterceptors (including MUC's non-occupant check).

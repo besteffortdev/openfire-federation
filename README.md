@@ -197,6 +197,7 @@ The plugin exchanges control messages with peers using IQ stanzas in the `urn:xm
 | `presence-forward` | Carries 1:1 presence and subscription stanzas to a multi‑hop contact. |
 | `iq-forward` | Carries user‑addressed IQs to a multi‑hop contact — **vCard/avatar (XEP‑0054/0153)**, plus disco/version/ping when answered by the contact's client. The vCard reply is built at the contact's server and relayed back, correlated by `id`. |
 | `user-directory` | Opt‑in gossip of online users reachable on a domain. |
+| `bookmark-push` | Opt‑in advertisement of a server's connected clients, injected into each peer user's bookmark storage as **XEP‑0048** `<url>` bookmarks so they appear in a normal chat client. |
 
 Remote users appear in local rooms as **virtual occupants**, tracked by their home origin (for reachability
 cleanup) and by the neighbour they arrived through (for per‑mapping teardown). Loop prevention uses a

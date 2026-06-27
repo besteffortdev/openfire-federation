@@ -258,6 +258,20 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"blockDirectMuc\":").append(FederationProperties.BLOCK_DIRECT_MUC.getValue()).append(",");
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
         sb.append("\"directoryPublish\":").append(FederationProperties.DIRECTORY_PUBLISH.getValue()).append(",");
+        sb.append("\"bookmarkPush\":").append(FederationProperties.BOOKMARK_PUSH.getValue()).append(",");
+
+        // ── this server's connected clients (local online users) ───────────────
+        sb.append("\"localUsers\":[");
+        first = true;
+        for (com.igniterealtime.openfire.plugin.federation.UserDirectory.UserPresence u
+                : mgr.getUserDirectory().localOnlineUsers()) {
+            if (!first) sb.append(",");
+            first = false;
+            sb.append("{\"jid\":\"").append(esc(u.jid()))
+              .append("\",\"show\":\"").append(esc(u.show()))
+              .append("\",\"status\":\"").append(esc(u.status())).append("\"}");
+        }
+        sb.append("],");
 
         // ── user directory (origin server domain → [{jid,show,status}]) ────────
         sb.append("\"directory\":{");
@@ -548,6 +562,24 @@ public class FederationApiServlet extends HttpServlet {
                 // Push (or, when turning off, withdraw with an empty list) to peers immediately.
                 mgr.publishDirectory();
                 out.print("{\"ok\":true,\"directoryPublish\":" + FederationProperties.DIRECTORY_PUBLISH.getValue() + "}");
+                return;
+            }
+            case "set-bookmark-push": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.BOOKMARK_PUSH.setValue(Boolean.parseBoolean(enabled.strip()));
+                // Push (or, when turning off, withdraw with an empty list) to peers immediately.
+                mgr.pushBookmarks();
+                out.print("{\"ok\":true,\"bookmarkPush\":" + FederationProperties.BOOKMARK_PUSH.getValue() + "}");
+                return;
+            }
+            case "push-bookmarks": {
+                // Manual one-shot advertisement of our connected clients (independent of the toggle).
+                mgr.pushBookmarksNow();
+                out.print("{\"ok\":true}");
                 return;
             }
             case "set-untrusted": {

@@ -58,7 +58,8 @@ function refresh() {
             const localRooms = data.localRooms  || [];
             renderPeers(data.peers || []);
             renderS2SSessions(data.s2sSessions || []);
-            renderRouting(data.routing || [], data.directory || {});
+            renderRouting(data.routing || []);
+            renderUsersTab(data.localUsers || [], data.directory || {});
             renderPendingRequests(data.pendingRequests || []);
             renderLocalRooms(localRooms);
             renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
@@ -69,6 +70,7 @@ function refresh() {
             updateBlockDirectToggle(data.blockDirectMuc);
             updateDirectRelayToggle(data.directMsgRelay);
             updateDirectoryPublishToggle(data.directoryPublish);
+            updateBookmarkPushToggle(data.bookmarkPush);
         })
         .catch(err => console.error('Federation API error:', err));
 }
@@ -604,47 +606,104 @@ function statusClass(s) {
 
 // ── Routing table tab ─────────────────────────────────────────────────────────
 
-let expandedRoutes = new Set();
-
-function renderRouting(entries, directory) {
+function renderRouting(entries) {
     const tbody = document.getElementById('routing-tbody');
     if (entries.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
         return;
     }
-    directory = directory || {};
     entries.sort((a, b) => a.hops - b.hops);
-    tbody.innerHTML = entries.map(r => {
-        const users    = directory[r.destination] || [];
-        const count    = users.length;
-        const expanded = expandedRoutes.has(r.destination);
-        const caret    = count > 0 ? (expanded ? '▾ ' : '▸ ') : '';
-        const userCell = count > 0 ? `${count} online` : '<span style="color:#999">—</span>';
-        const click    = count > 0
-            ? `style="cursor:pointer" onclick="toggleRouteUsers('${r.destination}')"` : '';
-        const detail = (count > 0 && expanded) ? `
-            <tr class="route-detail"><td colspan="5" style="background:#fafafa;padding:8px 24px">
-                <div style="font-size:12px;color:#555;margin-bottom:4px">Users published by ${escHtml(r.destination)} — private-message any of them from a normal chat client:</div>
-                ${users.map(u => {
-                    const st = u.status ? ` <span style="color:#888">(${escHtml(u.status)})</span>` : '';
-                    return `<span style="display:inline-block;margin:2px 12px 2px 0;font-family:monospace;font-size:12px">${presenceDot(u.show)}${escHtml(u.jid)}${st}</span>`;
-                }).join('')}
-            </td></tr>` : '';
-        return `
-        <tr ${click}>
-            <td>${caret}${escHtml(r.destination)}</td>
+    tbody.innerHTML = entries.map(r => `
+        <tr>
+            <td>${escHtml(r.destination)}</td>
             <td>${escHtml(r.nextHop)}</td>
             <td>${r.hops}</td>
-            <td>${userCell}</td>
             <td class="ts">${new Date(r.updatedAt).toLocaleTimeString()}</td>
-        </tr>${detail}`;
+        </tr>`).join('');
+}
+
+// ── Users tab ──────────────────────────────────────────────────────────────────
+
+function renderUsersTab(localUsers, directory) {
+    // This server's connected clients.
+    const tbody = document.getElementById('local-users-tbody');
+    if (tbody) {
+        tbody.innerHTML = localUsers.length === 0
+            ? '<tr><td colspan="2" class="empty">No clients connected to this server.</td></tr>'
+            : localUsers.map(u => {
+                const st = u.status ? ` <span style="color:#888">${escHtml(u.status)}</span>` : '';
+                return `
+                <tr>
+                    <td style="font-family:monospace;font-size:12px">${escHtml(u.jid)}</td>
+                    <td>${presenceDot(u.show)}${u.show ? escHtml(u.show) : 'available'}${st}</td>
+                </tr>`;
+            }).join('');
+    }
+
+    // Users advertised by peer servers (the directory gossip), grouped by origin server.
+    const container = document.getElementById('remote-users-container');
+    if (!container) return;
+    const servers = Object.keys(directory).filter(s => (directory[s] || []).length > 0).sort();
+    if (servers.length === 0) {
+        container.innerHTML = '<p class="empty">No peers are publishing their users yet. A peer must enable '
+            + '"Publish my user directory to peers" for its online users to appear here.</p>';
+        return;
+    }
+    container.innerHTML = servers.map(srv => {
+        const users = directory[srv] || [];
+        const items = users.map(u => {
+            const st = u.status ? ` <span style="color:#888">(${escHtml(u.status)})</span>` : '';
+            return `<span style="display:inline-block;margin:2px 14px 2px 0;font-family:monospace;font-size:12px">`
+                 + `${presenceDot(u.show)}${escHtml(u.jid)}${st}</span>`;
+        }).join('');
+        return `
+        <div class="peer-section">
+            <div class="peer-section-header" style="cursor:default">
+                <strong>${escHtml(srv)}</strong>
+                <span class="peer-room-count">${users.length} user(s)</span>
+            </div>
+            <div class="peer-section-body" style="padding:10px 14px">${items}</div>
+        </div>`;
     }).join('');
 }
 
-function toggleRouteUsers(dest) {
-    if (expandedRoutes.has(dest)) expandedRoutes.delete(dest);
-    else expandedRoutes.add(dest);
-    refresh();
+// ── Users tab: bookmark push controls ──────────────────────────────────────────
+
+function updateBookmarkPushToggle(enabled) {
+    const cb = document.getElementById('bookmarkpush-toggle');
+    const lbl = document.getElementById('bookmarkpush-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Advertised to peers' : 'Not advertised';
+}
+
+function saveBookmarkPush() {
+    const cb = document.getElementById('bookmarkpush-toggle');
+    if (!cb) return;
+    const enabled = cb.checked;
+    post({ action: 'set-bookmark-push', enabled })
+        .then(result => {
+            if (result && result.ok) {
+                const badge = document.getElementById('bookmarkpush-saved');
+                if (badge) {
+                    badge.style.display = 'inline';
+                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
+                }
+                refresh();
+            }
+        });
+}
+
+function pushBookmarks() {
+    post({ action: 'push-bookmarks' })
+        .then(result => {
+            if (result && result.ok) {
+                const badge = document.getElementById('bookmarkpush-pushed');
+                if (badge) {
+                    badge.style.display = 'inline';
+                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
+                }
+            }
+        });
 }
 
 // A small colored presence dot. show: '' (available), away/xa, dnd, chat; 'offline' = grey.

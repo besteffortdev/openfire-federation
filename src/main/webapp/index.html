@@ -180,6 +180,7 @@
         <button class="fed-tab active" data-tab="peers">Peer Servers</button>
         <button class="fed-tab"        data-tab="routing">Routing Table</button>
         <button class="fed-tab"        data-tab="rooms">Rooms <span id="rooms-tab-badge" class="badge badge-untrusted" style="display:none"></span></button>
+        <button class="fed-tab"        data-tab="users">Users</button>
     </div>
 
     <!-- ── Peers panel ──────────────────────────────────────────────────────── -->
@@ -417,12 +418,11 @@
                         <th>Destination</th>
                         <th>Next hop</th>
                         <th>Hops</th>
-                        <th>Users</th>
                         <th>Last updated</th>
                     </tr>
                 </thead>
                 <tbody id="routing-tbody">
-                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                    <tr><td colspan="4" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -430,8 +430,7 @@
             A hop count of 1 means directly connected via S2S.
             Routes are learned automatically through gossip when peers connect.
             Stale routes are removed when a peer goes offline.
-            Click a destination to see the users it has published — a local user can private-message
-            any of them from their normal chat client (they must have "Relay 1:1 messages" enabled).
+            See the <strong>Users</strong> tab for the clients each server has published.
         </p>
     </div>
 
@@ -471,6 +470,83 @@
                 <p class="empty">Loading…</p>
             </div>
         </div>
+    </div>
+
+    <!-- ── Users panel ───────────────────────────────────────────────────────── -->
+    <div id="panel-users" class="fed-panel">
+
+        <div class="section-box">
+            <div class="section-box-header">Advertise connected clients as bookmarks (XEP-0048)</div>
+            <div class="section-box-body">
+                <table class="settings-table">
+                    <tr>
+                        <td>
+                            <label for="bookmarkpush-toggle" style="font-weight:600;font-size:13px">
+                                Auto-push my connected clients to peers
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:520px">
+                                When enabled, this server's currently-connected clients are advertised
+                                to every trusted peer and injected into each peer user's bookmark
+                                storage as XEP-0048 <code style="font-size:11px">&lt;url&gt;</code>
+                                bookmarks — so they appear in a normal chat client. Re-pushes
+                                automatically as users come and go. Untrusted peers never receive it.
+                                Bookmarks are read at login, so a peer user sees changes on their next
+                                sign-in. Turning this off withdraws the bookmarks this server pushed.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="bookmarkpush-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveBookmarkPush()">
+                            <span id="bookmarkpush-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="bookmarkpush-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top:16px">
+                            <label style="font-weight:600;font-size:13px">Push once now</label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:520px">
+                                Advertise the current connected clients a single time, without enabling
+                                automatic re-pushing.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle;padding-top:16px">
+                            <button class="btn btn-primary" onclick="pushBookmarks()">Push bookmarks to peers</button>
+                            <span id="bookmarkpush-pushed"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Pushed ✓
+                            </span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Connected clients on this server</div>
+            <table class="fed-table">
+                <thead>
+                    <tr>
+                        <th>User</th>
+                        <th>Presence</th>
+                    </tr>
+                </thead>
+                <tbody id="local-users-tbody">
+                    <tr><td colspan="2" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Users on peer servers (advertised directory)</div>
+            <div class="section-box-body" id="remote-users-container">
+                <p class="empty">Loading…</p>
+            </div>
+        </div>
+
     </div>
 
 </div>

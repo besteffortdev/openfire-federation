@@ -109,6 +109,7 @@ public class FederationIQHandler extends IQHandler {
             case "presence-forward"    -> handlePresenceForward(fromDomain, child);
             case "iq-forward"          -> handleIqForward(fromDomain, child);
             case "user-directory"      -> handleUserDirectory(fromDomain, child);
+            case "bookmark-push"       -> handleBookmarkPush(fromDomain, child);
             default -> Log.warn("Unknown federation action '{}' from {}", child.getName(), fromDomain);
         }
 
@@ -886,6 +887,40 @@ public class FederationIQHandler extends IQHandler {
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
         manager.handleUserDirectory(fromDomain, sourceDomain, users, newVia);
         Log.debug("user-directory from {} (source={}) — {} user(s)", fromDomain, sourceDomain, users.size());
+    }
+
+    // ── bookmark-push (XEP-0048 connected-client advertisement) ────────────────
+
+    /** Injects an inbound bookmark-push into local users' storage and relays it onward (loop-guarded). */
+    private void handleBookmarkPush(String fromDomain, Element el) {
+        String origin      = el.attributeValue("origin");
+        String via         = el.attributeValue("via", "");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        if (via.contains(localDomain)) {
+            Log.debug("bookmark-push loop detected (via={}), dropping", via);
+            return;
+        }
+
+        String sourceDomain = (origin != null) ? origin : fromDomain;
+        if (localDomain.equals(sourceDomain)) {
+            Log.debug("bookmark-push origin is our own domain, ignoring");
+            return;
+        }
+
+        List<UserDirectory.UserPresence> users = new ArrayList<>();
+        for (Element u : el.elements("user")) {
+            String jid = u.attributeValue("jid");
+            if (jid != null && !jid.isBlank()) {
+                users.add(new UserDirectory.UserPresence(
+                        jid.strip(),
+                        u.attributeValue("show",   ""),
+                        u.attributeValue("status", "")));
+            }
+        }
+        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+        manager.handleBookmarkPush(fromDomain, sourceDomain, users, newVia);
+        Log.debug("bookmark-push from {} (source={}) — {} user(s)", fromDomain, sourceDomain, users.size());
     }
 
     private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {

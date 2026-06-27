@@ -59,6 +59,7 @@ public class FederationManager {
     private final FederationRoutingTable routingTable    = new FederationRoutingTable();
     private final FederatedRoomManager   roomManager     = new FederatedRoomManager();
     private final UserDirectory          userDirectory   = new UserDirectory();
+    private final BookmarkInjector       bookmarkInjector = new BookmarkInjector();
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
     private       FederationPacketInterceptor interceptor;
@@ -106,6 +107,8 @@ public class FederationManager {
      */
     private void onLocalPresenceEvent(ClientSession session, Presence presence) {
         if (FederationProperties.DIRECTORY_PUBLISH.getValue()) publishDirectory();
+        if (FederationProperties.BOOKMARK_PUSH.getValue())     pushBookmarks();
+        if (FederationProperties.BOOKMARK_PUSH.getValue())     pushBookmarks();
         try {
             if (session != null && session.getAddress() != null) {
                 forwardLocalOccupantPresence(session.getAddress(), presence);        // MUC occupants
@@ -936,6 +939,7 @@ public class FederationManager {
             evictOccupantsForLostHub(dest);                 // by mapped hub (catches un-routed origins)
             roomManager.clearRemoteRooms(dest);
             userDirectory.clearUsersForOrigin(dest);        // drop the gone server's published users
+            bookmarkInjector.applyForOrigin(dest, java.util.Collections.emptyList());  // withdraw its injected bookmarks
         }
     }
 
@@ -1159,6 +1163,66 @@ public class FederationManager {
                               peer.getDomain(), users, originDomain, via));
             } catch (Exception e) {
                 Log.warn("Failed to relay user-directory to {}: {}", peer.getDomain(), e.getMessage());
+            }
+        }
+    }
+
+    // ── Bookmark push (XEP-0048 connected-client advertisement) ────────────────
+
+    /**
+     * Pushes this server's connected clients to every trusted, reachable peer as a {@code
+     * bookmark-push} when {@link FederationProperties#BOOKMARK_PUSH} is enabled. When disabled we
+     * send an EMPTY list once so peers withdraw the bookmarks they previously injected for us.
+     * Untrusted peers never receive it. Cheap and idempotent — safe from the S2S tick and on peer-up.
+     */
+    public void pushBookmarks() {
+        boolean enabled = FederationProperties.BOOKMARK_PUSH.getValue();
+        sendBookmarks(enabled ? userDirectory.localOnlineUsers() : Collections.emptyList());
+    }
+
+    /**
+     * One-shot advertisement of our current connected clients regardless of the auto-push toggle —
+     * backs the admin "Push now" button. Peers inject the bookmarks; nothing is withdrawn.
+     */
+    public void pushBookmarksNow() {
+        sendBookmarks(userDirectory.localOnlineUsers());
+    }
+
+    /** Sends a bookmark-push (the given user set; empty = withdrawal) to every trusted, reachable peer. */
+    private void sendBookmarks(Collection<UserDirectory.UserPresence> users) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
+            if (isUntrusted(peer.getDomain())) continue;   // never advertise our clients to an untrusted edge
+            try {
+                XMPPServer.getInstance().getPacketRouter()
+                          .route(FederationStanzaFactory.bookmarkPush(
+                              peer.getDomain(), users, localDomain, null));
+            } catch (Exception e) {
+                Log.warn("Failed to send bookmark-push to {}: {}", peer.getDomain(), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Injects an inbound {@code bookmark-push} into local users' bookmark storage and gossips it
+     * onward to other trusted peers not already on the {@code via} trail (multi-hop, loop-guarded —
+     * mirrors {@link #handleUserDirectory}). An empty list withdraws the origin's bookmarks.
+     */
+    public void handleBookmarkPush(String fromDomain, String originDomain,
+                                   Collection<UserDirectory.UserPresence> users, String via) {
+        bookmarkInjector.applyForOrigin(originDomain, users);
+        for (PeerServer peer : peerRegistry.getPeers()) {
+            if (peer.getDomain().equals(fromDomain)) continue;
+            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
+            if (isUntrusted(peer.getDomain())) continue;
+            if (via != null && via.contains(peer.getDomain())) continue;
+            try {
+                XMPPServer.getInstance().getPacketRouter()
+                          .route(FederationStanzaFactory.bookmarkPush(
+                              peer.getDomain(), users, originDomain, via));
+            } catch (Exception e) {
+                Log.warn("Failed to relay bookmark-push to {}: {}", peer.getDomain(), e.getMessage());
             }
         }
     }
@@ -1690,4 +1754,5 @@ public class FederationManager {
     public FederationRoutingTable getRoutingTable()  { return routingTable;  }
     public FederatedRoomManager   getRoomManager()   { return roomManager;   }
     public UserDirectory          getUserDirectory() { return userDirectory; }
+    public BookmarkInjector       getBookmarkInjector() { return bookmarkInjector; }
 }

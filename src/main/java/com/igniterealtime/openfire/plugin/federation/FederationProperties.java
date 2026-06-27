@@ -70,6 +70,19 @@ public final class FederationProperties {
         .setDynamic(true)
         .build();
 
+    /**
+     * Advertise this server's connected clients to peers as XEP-0048 bookmarks (OFF by default).
+     * When true, the set of currently-logged-in users is pushed across the overlay and injected into
+     * each peer user's bookmark storage (as {@code <url>} bookmarks), so they appear in a normal chat
+     * client. Untrusted peers never receive it. Independent of the user-directory gossip.
+     */
+    public static final SystemProperty<Boolean> BOOKMARK_PUSH = SystemProperty.Builder.ofType(Boolean.class)
+        .setKey("plugin.federation.bookmarkPush")
+        .setPlugin(PLUGIN)
+        .setDefaultValue(false)
+        .setDynamic(true)
+        .build();
+
     /** Disable Openfire's server-wide S2S idle reaper on startup (applied at start; needs restart). */
     public static final SystemProperty<Boolean> DISABLE_S2S_IDLE = SystemProperty.Builder.ofType(Boolean.class)
         .setKey("plugin.federation.disableS2SIdle")

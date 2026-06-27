@@ -315,6 +315,9 @@ public class S2SMonitor {
         if (FederationProperties.DIRECTORY_PUBLISH.getValue()) {
             federationManager.publishDirectory();
         }
+        if (FederationProperties.BOOKMARK_PUSH.getValue()) {
+            federationManager.pushBookmarks();
+        }
     }
 
     private void sendKeepalives() {
@@ -379,6 +382,8 @@ public class S2SMonitor {
         federationManager.resendPendingRequests(domain);
         // Publish our online-user directory to the freshly-reachable peer (no-op unless enabled).
         federationManager.publishDirectory();
+        // Advertise our connected clients as XEP-0048 bookmarks (no-op unless enabled).
+        federationManager.pushBookmarks();
     }
 
     private void onPeerDown(String domain) {

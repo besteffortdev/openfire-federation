@@ -110,6 +110,20 @@
     relayed</strong>; they need a separate media path and are out of scope.
 </div>
 
+<h2>Users tab &amp; bookmark advertising</h2>
+<p>
+    The <strong>Users</strong> tab lists this server's currently‑connected clients and, grouped by peer,
+    the online users other servers have published through the directory gossip. As of
+    <strong>1.7.0</strong> it can also <strong>advertise your connected clients to peers as
+    <a href="https://xmpp.org/extensions/xep-0048.html">XEP‑0048</a> bookmarks</strong>: each connected
+    client is pushed across the overlay and injected into each peer user's bookmark storage as a
+    <code>&lt;url&gt;</code> bookmark (<code>xmpp:user@server?message</code>), so it shows up in a normal
+    chat client. Use <em>Push bookmarks to peers</em> for a one‑shot, or enable <em>Auto‑push</em> to
+    re‑advertise automatically as users come and go. Only trusted peers receive it; the injected entries
+    are tagged so they merge with — never overwrite — a user's own bookmarks, and turning auto‑push off
+    withdraws them. Bookmarks are read by clients at login, so changes appear on a peer user's next sign‑in.
+</p>
+
 <h2>Connection settings</h2>
 <p>On the <strong>Peer Servers</strong> tab, the <em>Connection settings</em> box exposes:</p>
 <table>
