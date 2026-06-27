@@ -4,174 +4,278 @@
     <title>Federation</title>
     <meta charset="UTF-8">
     <style>
-        /* ── Layout ───────────────────────────────────────────────── */
-        #fed-root { font-family: inherit; max-width: 1100px; }
+        /* ══ Design tokens ═══════════════════════════════════════════ */
+        #fed-root {
+            --fg:          #1f2933;
+            --muted:       #667085;
+            --faint:       #98a2b3;
+            --line:        #e4e7ec;
+            --line-soft:   #f0f2f5;
+            --surface:     #f9fafb;
+            --surface-2:   #f2f4f7;
 
-        .fed-header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
-        .fed-header h2 { margin: 0; }
+            --primary:     #2563eb;
+            --primary-d:   #1d4ed8;
+            --primary-soft:#e0ecff;
+            --primary-ink: #0b3aa3;
+
+            --green:#12b76a; --green-soft:#d1fadf; --green-ink:#05603a;
+            --amber:#f79009; --amber-soft:#fef0c7; --amber-ink:#93370d;
+            --red:  #f04438; --red-soft:  #fee4e2; --red-ink:  #912018;
+            --grey: #98a2b3;
+
+            --radius:    10px;
+            --radius-sm: 6px;
+            --shadow:    0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.07);
+            --shadow-pop:0 6px 22px rgba(16,24,40,.13);
+
+            font-family: inherit;
+            color: var(--fg);
+            max-width: 1240px;
+        }
+        #fed-root *, #fed-root *::before, #fed-root *::after { box-sizing: border-box; }
+
+        /* ══ Header ══════════════════════════════════════════════════ */
+        .fed-header {
+            display: flex; align-items: center; gap: 14px;
+            flex-wrap: wrap; margin: 4px 0 22px;
+        }
+        .fed-header h2 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+        .fed-meta { color: var(--muted); font-size: 12px; margin-left: auto; text-align: right; }
+        .fed-meta strong { color: var(--fg); }
+        .fed-live {
+            display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+            background: var(--green); margin-right: 4px; vertical-align: middle;
+            animation: fedpulse 2s ease-in-out infinite;
+        }
+        @keyframes fedpulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
         .fed-badge {
-            display: inline-block; padding: 3px 10px; border-radius: 12px;
-            font-size: 12px; font-weight: 600; white-space: nowrap;
+            display: inline-flex; align-items: center; padding: 4px 11px;
+            border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap;
         }
-        .fed-badge.ok      { background: #d4edda; color: #155724; }
-        .fed-badge.warn    { background: #fff3cd; color: #856404; }
-        .fed-badge.neutral { background: #e2e3e5; color: #383d41; }
+        .fed-badge.ok      { background: var(--green-soft); color: var(--green-ink); }
+        .fed-badge.warn    { background: var(--amber-soft); color: var(--amber-ink); }
+        .fed-badge.neutral { background: var(--surface-2); color: var(--muted); }
 
-        /* ── Tabs ─────────────────────────────────────────────────── */
-        .fed-tabs { display: flex; gap: 0; border-bottom: 2px solid #dee2e6; margin-bottom: 20px; }
+        /* ══ Tabs ════════════════════════════════════════════════════ */
+        .fed-tabs {
+            display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 22px;
+        }
         .fed-tab {
-            padding: 8px 20px; cursor: pointer; border: none; background: none;
-            font-size: 14px; font-weight: 500; color: #6c757d;
-            border-bottom: 2px solid transparent; margin-bottom: -2px;
+            position: relative; padding: 10px 18px; cursor: pointer;
+            border: none; background: none; font: inherit; font-size: 14px; font-weight: 600;
+            color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px;
+            transition: color .12s ease;
         }
-        .fed-tab.active { color: #0d6efd; border-bottom-color: #0d6efd; }
-        .fed-tab:hover  { color: #0d6efd; }
+        .fed-tab:hover  { color: var(--fg); }
+        .fed-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
 
-        .fed-panel { display: none; }
+        .fed-panel { display: none; animation: fedfade .18s ease; }
         .fed-panel.active { display: block; }
+        @keyframes fedfade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 
-        /* ── Tables ───────────────────────────────────────────────── */
-        .fed-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        .fed-table th {
-            background: #f8f9fa; text-align: left; padding: 8px 12px;
-            border-bottom: 2px solid #dee2e6; font-weight: 600; color: #495057;
+        /* ══ Section cards ═══════════════════════════════════════════ */
+        .section-box {
+            border: 1px solid var(--line); border-radius: var(--radius);
+            background: #fff; box-shadow: var(--shadow);
+            overflow: hidden; margin-bottom: 20px;
         }
-        .fed-table td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
-        .fed-table tr:last-child td { border-bottom: none; }
-        .fed-table td.empty { color: #999; font-style: italic; text-align: center; padding: 20px; }
-        .fed-table td.ts   { color: #999; font-size: 11px; }
+        .section-box-header {
+            display: flex; align-items: center; gap: 10px;
+            background: var(--surface); padding: 11px 16px;
+            font-weight: 600; font-size: 13px; color: var(--fg);
+            border-bottom: 1px solid var(--line);
+        }
+        .section-box-body { padding: 18px; }
 
-        /* ── Status dots ──────────────────────────────────────────── */
+        .count-chip {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-width: 22px; height: 20px; padding: 0 7px; border-radius: 999px;
+            background: var(--surface-2); color: var(--muted);
+            font-size: 11px; font-weight: 700; line-height: 1;
+        }
+        .count-chip:empty { display: none; }
+
+        /* ══ Filter inputs ═══════════════════════════════════════════ */
+        .filter-input, #room-search {
+            margin-left: auto; width: 220px; max-width: 50%;
+            padding: 6px 11px 6px 30px; border: 1px solid var(--line);
+            border-radius: 999px; font: inherit; font-size: 12.5px; color: var(--fg);
+            background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2398a2b3' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E") no-repeat 10px center;
+            transition: border-color .12s ease, box-shadow .12s ease;
+        }
+        .filter-input:focus, #room-search:focus {
+            outline: none; border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-soft);
+        }
+        #room-search { margin: 0 0 14px; width: 320px; }
+
+        /* ══ Tables ══════════════════════════════════════════════════ */
+        .table-scroll { max-height: 480px; overflow: auto; }
+        .fed-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .fed-table thead th {
+            position: sticky; top: 0; z-index: 2;
+            background: var(--surface); text-align: left; padding: 10px 14px;
+            border-bottom: 1px solid var(--line); font-weight: 600;
+            font-size: 11.5px; letter-spacing: .03em; text-transform: uppercase; color: var(--muted);
+        }
+        .fed-table td {
+            padding: 10px 14px; border-bottom: 1px solid var(--line-soft); vertical-align: middle;
+        }
+        .fed-table tbody tr { transition: background .1s ease; }
+        .fed-table tbody tr:hover { background: var(--surface); }
+        .fed-table tr:last-child td { border-bottom: none; }
+        .fed-table td.empty { color: var(--faint); font-style: italic; text-align: center; padding: 26px; }
+        .fed-table td.empty:hover, .fed-table tr:hover td.empty { background: transparent; }
+        .fed-table td.ts   { color: var(--faint); font-size: 11px; white-space: nowrap; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+
+        /* ══ Status dots ═════════════════════════════════════════════ */
         .status-dot {
             display: inline-block; width: 9px; height: 9px;
-            border-radius: 50%; margin-right: 5px; vertical-align: middle;
+            border-radius: 50%; margin-right: 6px; vertical-align: middle;
+            box-shadow: 0 0 0 3px rgba(0,0,0,.04);
         }
-        .status-dot.green  { background: #28a745; }
-        .status-dot.red    { background: #dc3545; }
-        .status-dot.grey   { background: #adb5bd; }
-        .status-dot.orange { background: #fd7e14; }
+        .status-dot.green  { background: var(--green); }
+        .status-dot.red    { background: var(--red); }
+        .status-dot.grey   { background: var(--grey); }
+        .status-dot.orange { background: var(--amber); }
 
-        /* ── Forms ────────────────────────────────────────────────── */
-        .add-peer-form { display: flex; gap: 8px; margin-bottom: 16px; }
+        /* ══ Buttons ═════════════════════════════════════════════════ */
+        .btn {
+            padding: 7px 15px; border: 1px solid transparent; border-radius: var(--radius-sm);
+            cursor: pointer; font: inherit; font-size: 13px; font-weight: 600;
+            transition: background .12s ease, border-color .12s ease, transform .04s ease;
+        }
+        .btn:active { transform: translateY(1px); }
+        .btn-primary{ background: var(--primary); color: #fff; }
+        .btn-primary:hover { background: var(--primary-d); }
+        .btn-small  { padding: 4px 11px; font-size: 12px; border-radius: 5px; font-weight: 600; }
+        .btn-danger { background: var(--red-soft);  color: var(--red-ink);   border-color: #fbcfca; }
+        .btn-danger:hover { background: #fdd; }
+        .btn-warn   { background: var(--amber-soft); color: var(--amber-ink); border-color: #fde7ab; }
+        .btn-warn:hover { background: #fdecb8; }
+        .btn-ghost  { background: var(--surface-2); color: #475467; }
+        .btn-ghost:hover { background: #e6e9ee; }
+
+        /* ══ Add-peer form ═══════════════════════════════════════════ */
+        .add-peer-form { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
         .add-peer-form input[type=text] {
-            flex: 1; padding: 6px 10px; border: 1px solid #ced4da; border-radius: 4px;
-            font-size: 13px;
+            flex: 1; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+            font: inherit; font-size: 13px;
         }
-        .btn        { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-        .btn-primary{ background: #0d6efd; color: #fff; }
-        .btn-primary:hover { background: #0b5ed7; }
-        .btn-small  { padding: 3px 10px; font-size: 12px; border-radius: 3px; }
-        .btn-danger { background: #dc3545; color: #fff; }
-        .btn-danger:hover { background: #bb2d3b; }
-        .btn-warn   { background: #ffc107; color: #000; }
-        .btn-warn:hover { background: #e0a800; }
-
-        /* ── Room search ──────────────────────────────────────────── */
-        #room-search {
-            width: 280px; padding: 6px 10px; border: 1px solid #ced4da;
-            border-radius: 4px; font-size: 13px; margin-bottom: 12px;
+        .add-peer-form input[type=text]:focus {
+            outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft);
         }
+        .hint { color: var(--muted); font-size: 12px; line-height: 1.55; }
 
-        /* ── Toggle switch ────────────────────────────────────────── */
-        .toggle { position: relative; display: inline-block; width: 38px; height: 20px; }
+        /* ══ Toggle switch ═══════════════════════════════════════════ */
+        .toggle { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
         .toggle input { opacity: 0; width: 0; height: 0; }
         .slider {
             position: absolute; cursor: pointer; inset: 0;
-            background: #ccc; border-radius: 20px; transition: .2s;
+            background: #cdd3db; border-radius: 22px; transition: .18s;
         }
         .slider:before {
             content: ""; position: absolute;
-            width: 14px; height: 14px; left: 3px; bottom: 3px;
-            background: #fff; border-radius: 50%; transition: .2s;
+            width: 16px; height: 16px; left: 3px; bottom: 3px;
+            background: #fff; border-radius: 50%; transition: .18s;
+            box-shadow: 0 1px 2px rgba(16,24,40,.2);
         }
-        input:checked + .slider              { background: #0d6efd; }
-        input:checked + .slider:before       { transform: translateX(18px); }
+        input:checked + .slider        { background: var(--primary); }
+        input:checked + .slider:before { transform: translateX(18px); }
+        input:focus-visible + .slider  { box-shadow: 0 0 0 3px var(--primary-soft); }
 
-        /* ── Mapping rows in local rooms table ────────────────────── */
-        .mapping-row {
-            display: flex; align-items: center; gap: 4px; margin-bottom: 3px;
+        /* ══ Settings rows ═══════════════════════════════════════════ */
+        .setting {
+            display: flex; align-items: flex-start; gap: 18px;
+            padding: 16px 0; border-top: 1px solid var(--line-soft);
         }
+        .setting:first-child { padding-top: 0; border-top: none; }
+        .setting-main { flex: 1; min-width: 0; }
+        .setting-title { font-weight: 600; font-size: 13px; }
+        .setting-desc { color: var(--muted); font-size: 12px; margin-top: 5px; line-height: 1.55; max-width: 620px; }
+        .setting-desc code { font-size: 11px; background: var(--surface-2); padding: 1px 4px; border-radius: 3px; }
+        .setting-ctl {
+            flex: none; display: flex; align-items: center; gap: 10px;
+            white-space: nowrap; padding-top: 2px;
+        }
+        .setting-state { font-size: 12.5px; color: var(--muted); }
+        .num-input {
+            width: 84px; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+            font: inherit; font-size: 13px; text-align: right;
+        }
+        .num-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+
+        /* ══ Status dot helper + presence ════════════════════════════ */
+        p.empty, .empty { color: var(--faint); font-style: italic; }
+
+        /* ══ Mapping rows ════════════════════════════════════════════ */
+        .mapping-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
         .mapping-row:last-child { margin-bottom: 0; }
+        .mapping-state        { font-size: 11px; font-weight: 700; margin-left: 2px; }
+        .mapping-connected    { color: var(--green-ink); }
+        .mapping-disconnected { color: var(--red); }
 
-        /* ── Collapsible peer sections (remote rooms) ─────────────── */
+        /* ══ Collapsible peer sections ═══════════════════════════════ */
         .peer-section {
-            border: 1px solid #dee2e6; border-radius: 6px;
+            border: 1px solid var(--line); border-radius: var(--radius-sm);
             overflow: hidden; margin-bottom: 12px;
         }
+        .peer-section:last-child { margin-bottom: 0; }
         .peer-section-header {
             display: flex; align-items: center; gap: 10px;
-            padding: 10px 14px; cursor: pointer;
-            background: #f8f9fa; user-select: none;
+            padding: 11px 14px; cursor: pointer; background: var(--surface); user-select: none;
         }
-        .peer-section-header:hover { background: #e9ecef; }
-        .peer-collapse-icon { font-size: 10px; color: #6c757d; width: 10px; }
-        .peer-room-count    { color: #6c757d; font-size: 12px; }
+        .peer-section-header:hover { background: var(--surface-2); }
+        .peer-collapse-icon { font-size: 9px; color: var(--faint); width: 10px; }
+        .peer-room-count    { color: var(--muted); font-size: 12px; }
         .peer-map-count     {
-            margin-left: auto; background: #d1e7dd; color: #0a3622;
-            border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600;
+            margin-left: auto; background: var(--green-soft); color: var(--green-ink);
+            border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 700;
         }
-        .peer-section-body  { border-top: 1px solid #dee2e6; }
+        .peer-section-body  { border-top: 1px solid var(--line); }
 
-        /* ── Section boxes ────────────────────────────────────────── */
-        p.empty { color: #999; font-style: italic; }
-
-        .section-box {
-            border: 1px solid #dee2e6; border-radius: 6px;
-            overflow: hidden; margin-bottom: 24px;
-        }
-        .section-box-header {
-            background: #f8f9fa; padding: 10px 16px;
-            font-weight: 600; font-size: 13px; color: #495057;
-            border-bottom: 1px solid #dee2e6;
-        }
-        .section-box-body { padding: 16px; }
-
-        /* ── Reconnect countdown ──────────────────────────────────── */
-        .retry-countdown {
-            color: #6c757d; font-size: 11px; font-style: italic; margin-left: 6px;
-        }
-
-        /* ── Direction badges ─────────────────────────────────────── */
+        /* ══ Badges ══════════════════════════════════════════════════ */
         .badge {
-            display: inline-block; padding: 2px 8px; border-radius: 10px;
-            font-size: 11px; font-weight: 600; white-space: nowrap;
+            display: inline-block; padding: 2px 9px; border-radius: 999px;
+            font-size: 11px; font-weight: 700; white-space: nowrap;
         }
-        .badge-out    { background: #cfe2ff; color: #084298; }
-        .badge-in     { background: #d1e7dd; color: #0a3622; }
-        .badge-fed    { background: #fff3cd; color: #664d03; margin-left: 4px; }
-        .badge-tls    { background: #f8d7da; color: #58151c; margin-left: 4px; }
-        .badge-tls-ok { background: #d1e7dd; color: #0a3622; margin-left: 4px; }
-        .badge-untrusted { background: #f8d7da; color: #58151c; margin-left: 8px; }
+        .badge-out    { background: var(--primary-soft); color: var(--primary-ink); }
+        .badge-in     { background: var(--green-soft);   color: var(--green-ink); }
+        .badge-fed    { background: var(--amber-soft);   color: var(--amber-ink); margin-left: 4px; }
+        .badge-tls    { background: var(--red-soft);     color: var(--red-ink);   margin-left: 4px; }
+        .badge-tls-ok { background: var(--green-soft);   color: var(--green-ink); margin-left: 4px; }
+        .badge-untrusted { background: var(--red-soft);  color: var(--red-ink);   margin-left: 8px; }
 
-        /* ── Untrusted peer: exposed-room editor ──────────────────── */
-        .exposed-editor-row td { background: #fbfcfd; }
-        .exposed-cols { display: flex; gap: 18px; padding: 4px 2px 6px; }
+        /* ══ Untrusted exposed-room editor ═══════════════════════════ */
+        .exposed-editor-row td { background: var(--surface); }
+        .exposed-cols { display: flex; gap: 22px; padding: 6px 2px 8px; }
         .exposed-col { flex: 1 1 0; min-width: 0; }
-        .exposed-col + .exposed-col { border-left: 1px solid #e9ecef; padding-left: 18px; }
-        .exposed-col-h { font-weight: 600; font-size: 12px; margin-bottom: 6px; }
-        .exposed-col-sub { display: block; font-weight: 400; color: #6c757d; font-size: 11px; margin-top: 2px; }
+        .exposed-col + .exposed-col { border-left: 1px solid var(--line); padding-left: 22px; }
+        .exposed-col-h { font-weight: 600; font-size: 12px; margin-bottom: 8px; }
+        .exposed-col-sub { display: block; font-weight: 400; color: var(--muted); font-size: 11px; margin-top: 3px; }
         .exposed-room {
             display: flex; align-items: center; gap: 8px;
-            padding: 4px 6px; border-bottom: 1px solid #f0f0f0; font-size: 13px;
+            padding: 5px 6px; border-bottom: 1px solid var(--line-soft); font-size: 13px;
         }
         .exposed-room:last-of-type { border-bottom: none; }
         .exposed-room input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
-        .exposed-room small { color: #6c757d; }
+        .exposed-room small { color: var(--muted); }
 
-        /* ── Mapping connection state ─────────────────────────────── */
-        .mapping-state          { font-size: 11px; font-weight: 600; margin-left: 6px; }
-        .mapping-connected      { color: #28a745; }
-        .mapping-disconnected   { color: #dc3545; }
+        /* ══ Misc ════════════════════════════════════════════════════ */
+        .retry-countdown { color: var(--muted); font-size: 11px; font-style: italic; margin-left: 6px; }
+        .panel-foot { font-size: 12px; color: var(--muted); margin: 4px 2px 0; line-height: 1.6; }
 
-        /* ── Saved toast (uniform "change applied" confirmation) ──── */
+        /* ══ Saved toast ═════════════════════════════════════════════ */
         #fed-toast {
-            position: fixed; top: 16px; right: 16px; z-index: 9999;
-            background: #d4edda; color: #155724; border: 1px solid #b7dfc1;
-            padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;
-            box-shadow: 0 2px 8px rgba(0,0,0,.12);
-            opacity: 0; transform: translateY(-8px); pointer-events: none;
-            transition: opacity .15s ease, transform .15s ease;
+            position: fixed; top: 18px; right: 18px; z-index: 9999;
+            background: #101828; color: #fff;
+            padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: 600;
+            box-shadow: var(--shadow-pop);
+            opacity: 0; transform: translateY(-10px); pointer-events: none;
+            transition: opacity .16s ease, transform .16s ease;
         }
         #fed-toast.show { opacity: 1; transform: translateY(0); }
     </style>
@@ -183,8 +287,10 @@
     <div class="fed-header">
         <h2>Federation</h2>
         <span id="fed-status-badge" class="fed-badge neutral">Loading…</span>
-        <small style="color:#999">This server: <strong id="local-domain">…</strong>
-               &nbsp;·&nbsp; Auto-refreshes every 5 s</small>
+        <span class="fed-meta">
+            <span class="fed-live"></span>This server: <strong id="local-domain">…</strong><br>
+            Auto-refreshes every 5&nbsp;s
+        </span>
     </div>
 
     <!-- Tabs -->
@@ -205,240 +311,205 @@
                     <input type="text" id="input-peer-domain"
                            placeholder="xmpp.example.com"
                            required autocomplete="off">
-                    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#495057;white-space:nowrap">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#475467;white-space:nowrap">
                         <input type="checkbox" id="input-peer-untrusted"
                                style="width:15px;height:15px;cursor:pointer">
                         Untrusted
                     </label>
                     <button type="submit" class="btn btn-primary">Add peer</button>
                 </form>
-                <small style="color:#999">
+                <p class="hint">
                     Enter the XMPP domain of the other Openfire server.
                     An S2S connection will be established automatically.
                     Tick <strong>Untrusted</strong> for a peer that should see nothing until you
                     explicitly expose specific servers to it (e.g. a partner reached via an edge server).
                     Peers under a different parent domain are ticked automatically. The S2S certificate
                     is pinned on first contact; if it later changes, the peer is auto-untrusted and flagged.
-                </small>
+                </p>
             </div>
         </div>
 
         <div class="section-box">
-            <div class="section-box-header">Configured peers</div>
-            <table class="fed-table">
-                <thead>
-                    <tr>
-                        <th>Domain</th>
-                        <th>Status</th>
-                        <th>Last seen</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody id="peers-tbody">
-                    <tr><td colspan="4" class="empty">Loading…</td></tr>
-                </tbody>
-            </table>
+            <div class="section-box-header">
+                Configured peers
+                <span class="count-chip" data-count-for="peers-tbody"></span>
+                <input class="filter-input" data-target="peers-tbody" placeholder="Filter peers…">
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Domain</th>
+                            <th>Status</th>
+                            <th>Last seen</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="peers-tbody">
+                        <tr><td colspan="4" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <div class="section-box">
-            <div class="section-box-header">Active S2S sessions</div>
-            <table class="fed-table">
-                <thead>
-                    <tr>
-                        <th>Remote domain</th>
-                        <th>Direction</th>
-                        <th>Connected since</th>
-                        <th>TLS</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody id="s2s-tbody">
-                    <tr><td colspan="5" class="empty">Loading…</td></tr>
-                </tbody>
-            </table>
+            <div class="section-box-header">
+                Active S2S sessions
+                <span class="count-chip" data-count-for="s2s-tbody"></span>
+                <input class="filter-input" data-target="s2s-tbody" placeholder="Filter sessions…">
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Remote domain</th>
+                            <th>Direction</th>
+                            <th>Connected since</th>
+                            <th>TLS</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="s2s-tbody">
+                        <tr><td colspan="5" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <div class="section-box">
             <div class="section-box-header">Connection settings</div>
             <div class="section-box-body">
-                <table class="settings-table">
-                    <tr>
-                        <td>
-                            <label for="keepalive-input" style="font-weight:600;font-size:13px">
-                                S2S keepalive interval
-                            </label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
-                                Sends a lightweight ping to each reachable peer at this interval to
-                                prevent Openfire from closing idle S2S sessions. Must be less than
-                                Openfire's <code style="font-size:11px">xmpp.server.idle</code> setting
-                                (milliseconds ÷ 1000 × 0.8). Minimum: 30 s. Default: 240 s — safe
-                                for Openfire's built-in 6-minute idle timeout.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
-                            <input type="number" id="keepalive-input"
-                                   min="30" max="3600" step="10"
-                                   style="width:90px;padding:5px 8px;border:1px solid #ced4da;
-                                          border-radius:4px;font-size:13px;text-align:right">
-                            <span style="color:#6c757d;font-size:13px;margin-left:4px">s</span>
-                            <button class="btn btn-primary" style="margin-left:10px"
-                                    onclick="saveKeepalive()">Save</button>
-                            <span id="keepalive-saved"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Saved ✓
-                            </span>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="padding-top:16px">
-                            <label for="reconnect-input" style="font-weight:600;font-size:13px">
-                                Max reconnect interval (back-off cap)
-                            </label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
-                                Maximum interval between reconnection attempts for UNREACHABLE peers.
-                                Retries use exponential back-off starting at 5 s: 5 s → 10 s → 20 s → …
-                                capped at this value. On reconnect the back-off resets automatically.
-                                Minimum: 5 s. Default: 30 s.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle;padding-top:16px">
-                            <input type="number" id="reconnect-input"
-                                   min="5" max="300" step="5"
-                                   style="width:90px;padding:5px 8px;border:1px solid #ced4da;
-                                          border-radius:4px;font-size:13px;text-align:right">
-                            <span style="color:#6c757d;font-size:13px;margin-left:4px">s</span>
-                            <button class="btn btn-primary" style="margin-left:10px"
-                                    onclick="saveReconnect()">Save</button>
-                            <span id="reconnect-saved"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Saved ✓
-                            </span>
-                        </td>
-                    </tr>
-                </table>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">S2S keepalive interval</div>
+                        <div class="setting-desc">
+                            Sends a lightweight ping to each reachable peer at this interval to
+                            prevent Openfire from closing idle S2S sessions. Must be less than
+                            Openfire's <code>xmpp.server.idle</code> setting
+                            (milliseconds ÷ 1000 × 0.8). Minimum: 30 s. Default: 240 s — safe
+                            for Openfire's built-in 6-minute idle timeout.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="keepalive-input" class="num-input"
+                               min="30" max="3600" step="10">
+                        <span class="setting-state">s</span>
+                        <button class="btn btn-primary btn-small" onclick="saveKeepalive()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Max reconnect interval (back-off cap)</div>
+                        <div class="setting-desc">
+                            Maximum interval between reconnection attempts for UNREACHABLE peers.
+                            Retries use exponential back-off starting at 5 s: 5 s → 10 s → 20 s → …
+                            capped at this value. On reconnect the back-off resets automatically.
+                            Minimum: 5 s. Default: 30 s.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="reconnect-input" class="num-input"
+                               min="5" max="300" step="5">
+                        <span class="setting-state">s</span>
+                        <button class="btn btn-primary btn-small" onclick="saveReconnect()">Save</button>
+                    </div>
+                </div>
             </div>
         </div>
 
         <div class="section-box">
-            <div class="section-box-header">Security</div>
+            <div class="section-box-header">Security &amp; presence</div>
             <div class="section-box-body">
-                <table class="settings-table">
-                    <tr>
-                        <td>
-                            <label for="allowlist-toggle" style="font-weight:600;font-size:13px">
-                                Restrict federation to approved peers
-                            </label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
-                                When enabled, only peers you have explicitly added here may federate;
-                                federation actions from any other server are rejected. Disable for open
-                                federation (accept any server that can connect). Existing peers stay
-                                approved when this is turned on.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
-                            <input type="checkbox" id="allowlist-toggle"
-                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
-                                   onchange="saveAllowlist()">
-                            <span id="allowlist-state" style="font-size:13px;margin-left:6px">…</span>
-                            <span id="allowlist-saved"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Saved ✓
-                            </span>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td>
-                            <label for="blockdirect-toggle" style="font-weight:600;font-size:13px">
-                                Force federation for remote room access
-                            </label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
-                                When enabled, a user on another server cannot join or post to a local
-                                MUC room directly over S2S — the room is only reachable through a
-                                federation mapping. Federation's own traffic is unaffected. Disable to
-                                also allow direct cross-server room access.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
-                            <input type="checkbox" id="blockdirect-toggle"
-                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
-                                   onchange="saveBlockDirect()">
-                            <span id="blockdirect-state" style="font-size:13px;margin-left:6px">…</span>
-                            <span id="blockdirect-saved"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Saved ✓
-                            </span>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td>
-                            <label for="directrelay-toggle" style="font-weight:600;font-size:13px">
-                                Relay 1:1 messages over federation
-                            </label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
-                                When enabled, a private message a local user sends to a user on an
-                                overlay-reachable peer is relayed hop-by-hop through federation (so it
-                                works even across untrusted edges with no direct S2S). Replies route
-                                back the same way. Disable to use Openfire's native S2S for 1:1 chat.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
-                            <input type="checkbox" id="directrelay-toggle"
-                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
-                                   onchange="saveDirectRelay()">
-                            <span id="directrelay-state" style="font-size:13px;margin-left:6px">…</span>
-                            <span id="directrelay-saved"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Saved ✓
-                            </span>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td>
-                            <label for="probesub-toggle" style="font-weight:600;font-size:13px">
-                                Probe federated contacts on subscription
-                            </label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
-                                When a local user adds a contact on a multi-hop peer, Openfire's own
-                                presence probe leaks to native S2S and fails (no direct link), so the
-                                contact never shows online. With this on, the probe is re-issued over the
-                                federation overlay so the contact's presence is pulled. Recommended on.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
-                            <input type="checkbox" id="probesub-toggle"
-                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
-                                   onchange="saveProbeOnSubscribe()">
-                            <span id="probesub-state" style="font-size:13px;margin-left:6px">…</span>
-                            <span id="probesub-saved"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Saved ✓
-                            </span>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td>
-                            <label for="dirpublish-toggle" style="font-weight:600;font-size:13px">
-                                Publish my user directory to peers
-                            </label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
-                                When enabled, this server gossips its list of currently-online users so
-                                peers can see who is reachable here (expand a row in the Routing Table).
-                                Off by default for privacy; untrusted peers never receive it. Messaging
-                                by typed JID still works when this is off.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
-                            <input type="checkbox" id="dirpublish-toggle"
-                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
-                                   onchange="saveDirectoryPublish()">
-                            <span id="dirpublish-state" style="font-size:13px;margin-left:6px">…</span>
-                            <span id="dirpublish-saved"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Saved ✓
-                            </span>
-                        </td>
-                    </tr>
-                </table>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Restrict federation to approved peers</div>
+                        <div class="setting-desc">
+                            When enabled, only peers you have explicitly added here may federate;
+                            federation actions from any other server are rejected. Disable for open
+                            federation (accept any server that can connect). Existing peers stay
+                            approved when this is turned on.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="allowlist-toggle" onchange="saveAllowlist()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="allowlist-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Force federation for remote room access</div>
+                        <div class="setting-desc">
+                            When enabled, a user on another server cannot join or post to a local
+                            MUC room directly over S2S — the room is only reachable through a
+                            federation mapping. Federation's own traffic is unaffected. Disable to
+                            also allow direct cross-server room access.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="blockdirect-toggle" onchange="saveBlockDirect()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="blockdirect-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Relay 1:1 messages over federation</div>
+                        <div class="setting-desc">
+                            When enabled, a private message a local user sends to a user on an
+                            overlay-reachable peer is relayed hop-by-hop through federation (so it
+                            works even across untrusted edges with no direct S2S). Replies route
+                            back the same way. Disable to use Openfire's native S2S for 1:1 chat.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="directrelay-toggle" onchange="saveDirectRelay()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="directrelay-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Probe federated contacts on subscription</div>
+                        <div class="setting-desc">
+                            When a local user adds a contact on a multi-hop peer, Openfire's own
+                            presence probe leaks to native S2S and fails (no direct link), so the
+                            contact never shows online. With this on, the probe is re-issued over the
+                            federation overlay so the contact's presence is pulled. Recommended on.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="probesub-toggle" onchange="saveProbeOnSubscribe()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="probesub-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Publish my user directory to peers</div>
+                        <div class="setting-desc">
+                            When enabled, this server gossips its list of currently-online users so
+                            peers can see who is reachable here (see the <strong>Users</strong> tab).
+                            Off by default for privacy; untrusted peers never receive it. Messaging
+                            by typed JID still works when this is off.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="dirpublish-toggle" onchange="saveDirectoryPublish()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="dirpublish-state" class="setting-state">…</span>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -446,22 +517,28 @@
     <!-- ── Routing table panel ──────────────────────────────────────────────── -->
     <div id="panel-routing" class="fed-panel">
         <div class="section-box">
-            <div class="section-box-header">Federation routing table</div>
-            <table class="fed-table">
-                <thead>
-                    <tr>
-                        <th>Destination</th>
-                        <th>Next hop</th>
-                        <th>Hops</th>
-                        <th>Last updated</th>
-                    </tr>
-                </thead>
-                <tbody id="routing-tbody">
-                    <tr><td colspan="4" class="empty">Loading…</td></tr>
-                </tbody>
-            </table>
+            <div class="section-box-header">
+                Federation routing table
+                <span class="count-chip" data-count-for="routing-tbody"></span>
+                <input class="filter-input" data-target="routing-tbody" placeholder="Filter routes…">
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Destination</th>
+                            <th>Next hop</th>
+                            <th>Hops</th>
+                            <th>Last updated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="routing-tbody">
+                        <tr><td colspan="4" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
-        <p style="font-size:12px;color:#999">
+        <p class="panel-foot">
             A hop count of 1 means directly connected via S2S.
             Routes are learned automatically through gossip when peers connect.
             Stale routes are removed when a peer goes offline.
@@ -479,28 +556,36 @@
         </div>
 
         <div class="section-box">
-            <div class="section-box-header">Local rooms — enable federation per room</div>
+            <div class="section-box-header">
+                Local rooms — enable federation per room
+                <span class="count-chip" data-count-for="local-rooms-tbody"></span>
+            </div>
             <div class="section-box-body" style="padding-bottom:0">
                 <input type="text" id="room-search" placeholder="Filter rooms…">
             </div>
-            <table class="fed-table">
-                <thead>
-                    <tr>
-                        <th>Room</th>
-                        <th>Description</th>
-                        <th>Occupants</th>
-                        <th>Federated</th>
-                        <th>Mapped to</th>
-                    </tr>
-                </thead>
-                <tbody id="local-rooms-tbody">
-                    <tr><td colspan="5" class="empty">Loading…</td></tr>
-                </tbody>
-            </table>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Room</th>
+                            <th>Description</th>
+                            <th>Occupants</th>
+                            <th>Federated</th>
+                            <th>Mapped to</th>
+                        </tr>
+                    </thead>
+                    <tbody id="local-rooms-tbody">
+                        <tr><td colspan="5" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <div class="section-box">
-            <div class="section-box-header">Remote rooms (advertised by peers)</div>
+            <div class="section-box-header">
+                Remote rooms (advertised by peers)
+                <input class="filter-input" data-target="remote-rooms-container" placeholder="Filter servers…">
+            </div>
             <div class="section-box-body" id="remote-rooms-container">
                 <p class="empty">Loading…</p>
             </div>
@@ -513,77 +598,78 @@
         <div class="section-box">
             <div class="section-box-header">Advertise connected clients as bookmarks (XEP-0048)</div>
             <div class="section-box-body">
-                <table class="settings-table">
-                    <tr>
-                        <td>
-                            <label for="bookmarkpush-toggle" style="font-weight:600;font-size:13px">
-                                Auto-push my connected clients to peers
-                            </label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:520px">
-                                When enabled, this server's currently-connected clients are advertised
-                                to every trusted peer and injected into each peer user's bookmark
-                                storage as XEP-0048 <code style="font-size:11px">&lt;url&gt;</code>
-                                bookmarks — so they appear in a normal chat client. Re-pushes
-                                automatically as users come and go. Untrusted peers never receive it.
-                                Bookmarks are read at login, so a peer user sees changes on their next
-                                sign-in. Turning this off withdraws the bookmarks this server pushed.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
-                            <input type="checkbox" id="bookmarkpush-toggle"
-                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
-                                   onchange="saveBookmarkPush()">
-                            <span id="bookmarkpush-state" style="font-size:13px;margin-left:6px">…</span>
-                            <span id="bookmarkpush-saved"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Saved ✓
-                            </span>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="padding-top:16px">
-                            <label style="font-weight:600;font-size:13px">Push once now</label>
-                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:520px">
-                                Advertise the current connected clients a single time, without enabling
-                                automatic re-pushing.
-                            </div>
-                        </td>
-                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle;padding-top:16px">
-                            <button class="btn btn-primary" onclick="pushBookmarks()">Push bookmarks to peers</button>
-                            <span id="bookmarkpush-pushed"
-                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
-                                Pushed ✓
-                            </span>
-                        </td>
-                    </tr>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Auto-push my connected clients to peers</div>
+                        <div class="setting-desc">
+                            When enabled, this server's currently-connected clients are advertised
+                            to every trusted peer and injected into each peer user's bookmark
+                            storage as XEP-0048 <code>&lt;url&gt;</code> bookmarks — so they appear
+                            in a normal chat client. Re-pushes automatically as users come and go.
+                            Untrusted peers never receive it. Bookmarks are read at login, so a peer
+                            user sees changes on their next sign-in. Turning this off withdraws the
+                            bookmarks this server pushed.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="bookmarkpush-toggle" onchange="saveBookmarkPush()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="bookmarkpush-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Push once now</div>
+                        <div class="setting-desc">
+                            Advertise the current connected clients a single time, without enabling
+                            automatic re-pushing.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <button class="btn btn-primary btn-small" onclick="pushBookmarks()">Push bookmarks to peers</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">
+                Connected clients on this server
+                <span class="count-chip" data-count-for="local-users-tbody"></span>
+                <input class="filter-input" data-target="local-users-tbody" placeholder="Filter clients…">
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>User</th>
+                            <th>Presence</th>
+                        </tr>
+                    </thead>
+                    <tbody id="local-users-tbody">
+                        <tr><td colspan="2" class="empty">Loading…</td></tr>
+                    </tbody>
                 </table>
             </div>
         </div>
 
         <div class="section-box">
-            <div class="section-box-header">Connected clients on this server</div>
-            <table class="fed-table">
-                <thead>
-                    <tr>
-                        <th>User</th>
-                        <th>Presence</th>
-                    </tr>
-                </thead>
-                <tbody id="local-users-tbody">
-                    <tr><td colspan="2" class="empty">Loading…</td></tr>
-                </tbody>
-            </table>
-        </div>
-
-        <div class="section-box">
-            <div class="section-box-header">Bookmarks advertised by peers (XEP-0048)</div>
+            <div class="section-box-header">
+                Bookmarks advertised by peers (XEP-0048)
+                <input class="filter-input" data-target="advertised-bookmarks-container" placeholder="Filter servers…">
+            </div>
             <div class="section-box-body" id="advertised-bookmarks-container">
                 <p class="empty">Loading…</p>
             </div>
         </div>
 
         <div class="section-box">
-            <div class="section-box-header">Users on peer servers (advertised directory)</div>
+            <div class="section-box-header">
+                Users on peer servers (advertised directory)
+                <input class="filter-input" data-target="remote-users-container" placeholder="Filter…">
+            </div>
             <div class="section-box-body" id="remote-users-container">
                 <p class="empty">Loading…</p>
             </div>
