@@ -290,6 +290,23 @@ public class FederationApiServlet extends HttpServlet {
             }
             sb.append("]");
         }
+        sb.append("},");
+
+        // ── bookmarks advertised to us by peers (origin domain → [jid]) ────────
+        sb.append("\"advertisedBookmarks\":{");
+        first = true;
+        for (java.util.Map.Entry<String, java.util.List<String>> e
+                : mgr.getBookmarkInjector().getAdvertised().entrySet()) {
+            if (!first) sb.append(",");
+            first = false;
+            sb.append("\"").append(esc(e.getKey())).append("\":[");
+            boolean fj = true;
+            for (String jid : e.getValue()) {
+                if (!fj) sb.append(","); fj = false;
+                sb.append("\"").append(esc(jid)).append("\"");
+            }
+            sb.append("]");
+        }
         sb.append("}");
 
         sb.append("}");

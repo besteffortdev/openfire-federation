@@ -59,7 +59,7 @@ function refresh() {
             renderPeers(data.peers || []);
             renderS2SSessions(data.s2sSessions || []);
             renderRouting(data.routing || []);
-            renderUsersTab(data.localUsers || [], data.directory || {});
+            renderUsersTab(data.localUsers || [], data.directory || {}, data.advertisedBookmarks || {});
             renderPendingRequests(data.pendingRequests || []);
             renderLocalRooms(localRooms);
             renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
@@ -624,7 +624,8 @@ function renderRouting(entries) {
 
 // ── Users tab ──────────────────────────────────────────────────────────────────
 
-function renderUsersTab(localUsers, directory) {
+function renderUsersTab(localUsers, directory, advertisedBookmarks) {
+    advertisedBookmarks = advertisedBookmarks || {};
     // This server's connected clients.
     const tbody = document.getElementById('local-users-tbody');
     if (tbody) {
@@ -637,6 +638,31 @@ function renderUsersTab(localUsers, directory) {
                     <td style="font-family:monospace;font-size:12px">${escHtml(u.jid)}</td>
                     <td>${presenceDot(u.show)}${u.show ? escHtml(u.show) : 'available'}${st}</td>
                 </tr>`;
+            }).join('');
+    }
+
+    // Connected clients each peer has advertised to us as XEP-0048 bookmarks (injected into our
+    // local users' bookmark storage), grouped by origin server.
+    const bm = document.getElementById('advertised-bookmarks-container');
+    if (bm) {
+        const bmServers = Object.keys(advertisedBookmarks).filter(s => (advertisedBookmarks[s] || []).length > 0).sort();
+        bm.innerHTML = bmServers.length === 0
+            ? '<p class="empty">No peers are advertising bookmarks yet. A peer must enable bookmark '
+              + 'auto-push (or click "Push bookmarks to peers") for its connected clients to appear here. '
+              + 'These are injected into your local users\' bookmark storage as <code>&lt;url&gt;</code> bookmarks.</p>'
+            : bmServers.map(srv => {
+                const jids = advertisedBookmarks[srv] || [];
+                const items = jids.map(j =>
+                    `<span style="display:inline-block;margin:2px 14px 2px 0;font-family:monospace;font-size:12px">${escHtml(j)}</span>`
+                ).join('');
+                return `
+                <div class="peer-section">
+                    <div class="peer-section-header" style="cursor:default">
+                        <strong>${escHtml(srv)}</strong>
+                        <span class="peer-room-count">${jids.length} client(s)</span>
+                    </div>
+                    <div class="peer-section-body" style="padding:10px 14px">${items}</div>
+                </div>`;
             }).join('');
     }
 

@@ -130,4 +130,16 @@ public class BookmarkInjector {
     public Collection<String> activeOrigins() {
         return new ArrayList<>(lastApplied.keySet());
     }
+
+    /**
+     * Snapshot of what each peer currently advertises to us (origin domain → injected bare JIDs).
+     * Reflects the live injected state — an origin disappears when it withdraws. For the admin UI.
+     */
+    public synchronized Map<String, List<String>> getAdvertised() {
+        Map<String, List<String>> copy = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : lastApplied.entrySet()) {
+            copy.put(e.getKey(), new ArrayList<>(e.getValue()));
+        }
+        return copy;
+    }
 }
