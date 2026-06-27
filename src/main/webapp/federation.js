@@ -26,6 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
     bindPeerForm();
     bindRoomSearch();
+    bindFilters();
     refresh();
     pollTimer = setInterval(refresh, POLL_MS);
 });
@@ -72,6 +73,7 @@ function refresh() {
             updateProbeOnSubscribeToggle(data.probeOnSubscribe);
             updateDirectoryPublishToggle(data.directoryPublish);
             updateBookmarkPushToggle(data.bookmarkPush);
+            applyAllFilters();
         })
         .catch(err => console.error('Federation API error:', err));
 }
@@ -740,6 +742,79 @@ function bindRoomSearch() {
             row.style.display = row.dataset.jid.toLowerCase().includes(roomFilter) ? '' : 'none';
         });
     });
+}
+
+// ── Generic list filtering + live counts ──────────────────────────────────────
+//
+// Any `.filter-input[data-target]` filters the rows of the table tbody (or the
+// `.peer-section` cards of the container) with that id by substring match, and any
+// `.count-chip[data-count-for]` shows that list's size. Both survive the 5 s poll:
+// renders rebuild the rows, then refresh() calls applyAllFilters() to re-apply.
+const tableFilters = {};   // targetId -> active lowercase query (presence = it has a filter input)
+
+function bindFilters() {
+    document.querySelectorAll('.filter-input').forEach(inp => {
+        const target = inp.dataset.target;
+        tableFilters[target] = '';
+        inp.addEventListener('input', () => {
+            tableFilters[target] = inp.value.trim().toLowerCase();
+            applyAllFilters();
+        });
+    });
+}
+
+/** Re-applies every active filter and refreshes every count chip. Cheap; safe to call each poll. */
+function applyAllFilters() {
+    document.querySelectorAll('[data-count-for]').forEach(chip => {
+        const target = chip.dataset.countFor;
+        // null query = count-only (no filter input owns this list, e.g. local rooms);
+        // a string (even '') = this list is filterable, so set row/section visibility too.
+        const q = (target in tableFilters) ? tableFilters[target] : null;
+        const el = document.getElementById(target);
+        if (!el) { chip.textContent = ''; return; }
+        const { shown, total } = (el.tagName === 'TBODY') ? filterTbody(el, q) : filterContainer(el, q);
+        chip.textContent = (q && q.length) ? shown + '/' + total : String(total);
+    });
+    // Filterable lists that have no count chip still need their visibility applied.
+    document.querySelectorAll('.filter-input').forEach(inp => {
+        const target = inp.dataset.target;
+        if (document.querySelector('[data-count-for="' + cssEscape(target) + '"]')) return;
+        const el = document.getElementById(target);
+        if (!el) return;
+        (el.tagName === 'TBODY' ? filterTbody : filterContainer)(el, tableFilters[target] || '');
+    });
+}
+
+/** Filters top-level rows of a tbody; detail rows (editors/occupants) follow their parent. */
+function filterTbody(tbody, q) {
+    let shown = 0, total = 0, lastVisible = true;
+    tbody.querySelectorAll(':scope > tr').forEach(tr => {
+        if (tr.querySelector('td.empty')) return;   // placeholder — leave untouched
+        const isDetail = tr.classList.contains('exposed-editor-row')
+                      || tr.classList.contains('route-detail');
+        if (isDetail) {
+            if (q != null) tr.style.display = lastVisible ? '' : 'none';
+            return;
+        }
+        total++;
+        const match = (q == null) || !q || tr.textContent.toLowerCase().includes(q);
+        lastVisible = match;
+        if (q != null) tr.style.display = match ? '' : 'none';
+        if (match) shown++;
+    });
+    return { shown, total };
+}
+
+/** Filters the `.peer-section` cards of a container by substring match. */
+function filterContainer(el, q) {
+    let shown = 0, total = 0;
+    el.querySelectorAll(':scope > .peer-section').forEach(sec => {
+        total++;
+        const match = (q == null) || !q || sec.textContent.toLowerCase().includes(q);
+        if (q != null) sec.style.display = match ? '' : 'none';
+        if (match) shown++;
+    });
+    return { shown, total };
 }
 
 // ── Local rooms ───────────────────────────────────────────────────────────────
