@@ -104,6 +104,7 @@ function bindPeerForm() {
             .then(() => {
                 domainField.value = '';
                 if (untrustedCb) untrustedCb.checked = false;
+                flashSaved('Peer added ✓');
                 refresh();
             });
     });
@@ -335,11 +336,7 @@ function saveExposedServers(domain) {
         .then(result => {
             if (result && result.ok) {
                 delete editedExposed[domain];   // persisted set is now authoritative
-                const badge = document.getElementById('exposed-saved-' + jidToElemId(domain));
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -437,11 +434,7 @@ function saveKeepalive() {
     post({ action: 'set-keepalive', seconds })
         .then(result => {
             if (result && result.ok) {
-                const badge = document.getElementById('keepalive-saved');
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -464,11 +457,7 @@ function saveReconnect() {
     post({ action: 'set-reconnect', seconds })
         .then(result => {
             if (result && result.ok) {
-                const badge = document.getElementById('reconnect-saved');
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -502,11 +491,7 @@ function saveAllowlist() {
     post({ action: 'set-allowlist', enabled })
         .then(result => {
             if (result && result.ok) {
-                const badge = document.getElementById('allowlist-saved');
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -528,11 +513,7 @@ function saveBlockDirect() {
     post({ action: 'set-block-direct-muc', enabled })
         .then(result => {
             if (result && result.ok) {
-                const badge = document.getElementById('blockdirect-saved');
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -554,11 +535,7 @@ function saveDirectRelay() {
     post({ action: 'set-direct-relay', enabled })
         .then(result => {
             if (result && result.ok) {
-                const badge = document.getElementById('directrelay-saved');
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -580,11 +557,7 @@ function saveDirectoryPublish() {
     post({ action: 'set-directory-publish', enabled })
         .then(result => {
             if (result && result.ok) {
-                const badge = document.getElementById('dirpublish-saved');
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -709,11 +682,7 @@ function saveBookmarkPush() {
     post({ action: 'set-bookmark-push', enabled })
         .then(result => {
             if (result && result.ok) {
-                const badge = document.getElementById('bookmarkpush-saved');
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -723,11 +692,7 @@ function pushBookmarks() {
     post({ action: 'push-bookmarks' })
         .then(result => {
             if (result && result.ok) {
-                const badge = document.getElementById('bookmarkpush-pushed');
-                if (badge) {
-                    badge.style.display = 'inline';
-                    setTimeout(() => { badge.style.display = 'none'; }, 2500);
-                }
+                flashSaved('Pushed ✓');
             }
         });
 }
@@ -840,11 +805,13 @@ function renderRoomOccupants(r) {
 }
 
 function setRoomFederated(jid, federated) {
-    post({ action: 'set-room', jid, federated: federated.toString() }).then(refresh);
+    post({ action: 'set-room', jid, federated: federated.toString() })
+        .then(() => { flashSaved('Saved ✓'); refresh(); });
 }
 
 function setRoomAutoAccept(jid, autoAccept) {
-    post({ action: 'set-room-autoaccept', jid, autoAccept: autoAccept.toString() }).then(refresh);
+    post({ action: 'set-room-autoaccept', jid, autoAccept: autoAccept.toString() })
+        .then(() => { flashSaved('Saved ✓'); refresh(); });
 }
 
 // ── Mapping consent: inline rows + pending-requests panel ───────────────────────
@@ -1035,8 +1002,7 @@ function saveRoomVis(jid) {
         .then(result => {
             if (result && result.ok) {
                 delete editedRoomVis[jid];
-                const badge = document.getElementById('roomvis-saved-' + jidToElemId(jid));
-                if (badge) { badge.style.display = 'inline'; setTimeout(() => { badge.style.display = 'none'; }, 2500); }
+                flashSaved('Saved ✓');
                 refresh();
             }
         });
@@ -1161,13 +1127,25 @@ function mapRoom(remoteJid, remoteDomain, selId) {
         return;
     }
     post({ action: 'map-room', localJid: sel.value, remoteJid, remoteDomain })
-        .then(d => { if (d && d.error) alert(d.error); refresh(); });
+        .then(d => { if (d && d.error) alert(d.error); else flashSaved('Mapping requested ✓'); refresh(); });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function jidToElemId(jid) {
     return jid.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+// Uniform "change applied" confirmation. A single green toast so it survives the table
+// re-renders that would otherwise wipe an inline badge, and works for every save/apply button.
+let _toastTimer = null;
+function flashSaved(label) {
+    const t = document.getElementById('fed-toast');
+    if (!t) return;
+    t.textContent = '✓ ' + (label || 'Saved');
+    t.classList.add('show');
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
 }
 
 function post(params) {
