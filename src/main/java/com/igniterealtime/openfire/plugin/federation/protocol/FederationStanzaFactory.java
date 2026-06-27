@@ -6,9 +6,12 @@ import org.dom4j.Element;
 import org.jivesoftware.openfire.RoutingTable;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.session.ClientSession;
+import com.igniterealtime.openfire.plugin.federation.UserDirectory;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
+import org.xmpp.packet.Message;
 import org.xmpp.packet.Packet;
+import org.xmpp.packet.Presence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,7 +53,11 @@ public final class FederationStanzaFactory {
     // ── peer-announce ──────────────────────────────────────────────────────────
 
     public static IQ peerAnnounce(String toDomain) {
-        return peerAnnounce(toDomain, false);
+        return peerAnnounce(toDomain, false, false);
+    }
+
+    public static IQ peerAnnounce(String toDomain, boolean isReply) {
+        return peerAnnounce(toDomain, isReply, false);
     }
 
     /**
@@ -58,12 +65,16 @@ public final class FederationStanzaFactory {
      *        The receiver does not reply to a reply, so one side's keepalive timer
      *        warms BOTH S2S directions (each direction is a separate socket with its
      *        own idle timer) without an endless ping-pong.
+     * @param untrusted our trust stance toward this peer. Trust is a property of the LINK:
+     *        the receiver compares it with its own and blocks the link (TRUST_MISMATCH) if
+     *        they disagree. Absent attribute = trusted (back-compat with pre-1.3.39 peers).
      */
-    public static IQ peerAnnounce(String toDomain, boolean isReply) {
+    public static IQ peerAnnounce(String toDomain, boolean isReply, boolean untrusted) {
         IQ iq = base(toDomain);
         Element fed = iq.setChildElement("federation", NS);
         Element ann = fed.addElement("peer-announce");
         if (isReply) ann.addAttribute("reply", "true");
+        if (untrusted) ann.addAttribute("untrusted", "true");
         ann.addElement("server").setText(localJID().getDomain());
         ann.addElement("version").setText("1");
         return iq;
@@ -147,6 +158,10 @@ public final class FederationStanzaFactory {
             r.addAttribute("jid",         room.jid());
             r.addAttribute("name",        room.name()        != null ? room.name()        : "");
             r.addAttribute("description", room.description() != null ? room.description() : "");
+            // Per-room visibility ACL travels with the ad so every relay enforces it (absent = all).
+            if (room.visibleTo() != null && !room.visibleTo().isEmpty()) {
+                r.addAttribute("visibleto", String.join(",", room.visibleTo()));
+            }
         }
         return iq;
     }
@@ -185,11 +200,52 @@ public final class FederationStanzaFactory {
      */
     public static IQ roomUnmapping(String nextHop, String destination, String originDomain,
                                    String localJid, String remoteJid) {
+        return roomUnmapping(nextHop, destination, originDomain, localJid, remoteJid, null);
+    }
+
+    public static IQ roomUnmapping(String nextHop, String destination, String originDomain,
+                                   String localJid, String remoteJid, String token) {
+        return mappingLifecycle("room-unmap", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+    }
+
+    // ── room-mapping lifecycle (consent handshake) ─────────────────────────────
+
+    /** Accept a mapping request — carries the minted consent {@code token}. */
+    public static IQ roomMappingAccept(String nextHop, String destination, String originDomain,
+                                       String localJid, String remoteJid, String token) {
+        return mappingLifecycle("room-mapping-accept", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+    }
+
+    /** Reject a mapping request (optional {@code reason}). */
+    public static IQ roomMappingReject(String nextHop, String destination, String originDomain,
+                                       String localJid, String remoteJid, String reason) {
+        return mappingLifecycle("room-mapping-reject", nextHop, destination, originDomain, localJid, remoteJid, null, reason);
+    }
+
+    /** Disable an active mapping — the peer will show "disabled by peer". Carries the {@code token}. */
+    public static IQ roomMappingDisable(String nextHop, String destination, String originDomain,
+                                        String localJid, String remoteJid, String token) {
+        return mappingLifecycle("room-mapping-disable", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+    }
+
+    /** Re-enable a disabled mapping. Carries the {@code token}. */
+    public static IQ roomMappingEnable(String nextHop, String destination, String originDomain,
+                                       String localJid, String remoteJid, String token) {
+        return mappingLifecycle("room-mapping-enable", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+    }
+
+    /** Shared builder for the hop-by-hop mapping lifecycle IQs (same shape as room-mapping). Also
+     *  used by relays to re-emit an unchanged lifecycle IQ toward the next hop. */
+    public static IQ mappingLifecycle(String element, String nextHop, String destination,
+                                      String originDomain, String localJid, String remoteJid,
+                                      String token, String reason) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
-        Element mapping = fed.addElement("room-unmap");
+        Element mapping = fed.addElement(element);
         mapping.addAttribute("destination", destination);
         mapping.addAttribute("origin",      originDomain);
+        if (token  != null && !token.isEmpty())  mapping.addAttribute("token",  token);
+        if (reason != null && !reason.isEmpty()) mapping.addAttribute("reason", reason);
         Element map = mapping.addElement("map");
         map.addAttribute("local",  localJid);
         map.addAttribute("remote", remoteJid);
@@ -206,12 +262,20 @@ public final class FederationStanzaFactory {
      * @param targetRoom       the room JID on finalDestination to inject into
      *                         (null = use the payload's existing to-address)
      * @param viaTrail         comma-separated list of servers already visited
+     * @param srcMapped        the MAPPED server this roster traffic enters the destination
+     *                         through — i.e. the far end of the destination's mapping (a peer
+     *                         or a hub re-originating a fan-out), NOT the relay neighbour and
+     *                         NOT the user's home.  Recorded as the occupant's arrivedVia so a
+     *                         mapping-disable can evict exactly the occupants that came through
+     *                         that mapping (including hub-relayed cross-spoke users).  Preserved
+     *                         unchanged across pure relay hops.
      * @param payload          the original MUC packet (message or presence)
      */
     public static IQ mucForward(String nextHop,
                                 String finalDestination,
                                 String targetRoom,
                                 String viaTrail,
+                                String srcMapped,
                                 Packet payload) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
@@ -219,7 +283,112 @@ public final class FederationStanzaFactory {
         fwd.addAttribute("destination", finalDestination);
         if (targetRoom != null) fwd.addAttribute("targetRoom", targetRoom);
         fwd.addAttribute("via",         viaTrail);
+        if (srcMapped != null) fwd.addAttribute("src", srcMapped);
         fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
+    // ── direct-forward (1:1 private messaging over the overlay) ─────────────────
+
+    /**
+     * Wraps a 1:1 chat message for relay to the next hop toward {@code finalDestination}.
+     * Shaped like {@link #mucForward} but without room/occupant addressing — the embedded
+     * message keeps its real {@code from}/{@code to} so the recipient can simply reply
+     * (the reply is caught by that server's interceptor and relayed back the same way).
+     *
+     * @param nextHop          directly-connected peer we're sending to now
+     * @param finalDestination the domain that ultimately receives this message
+     * @param viaTrail         comma-separated list of servers already visited (loop guard)
+     * @param payload          the original 1:1 message
+     */
+    public static IQ directForward(String nextHop, String finalDestination,
+                                   String viaTrail, Message payload) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element fwd = fed.addElement("direct-forward");
+        fwd.addAttribute("destination", finalDestination);
+        fwd.addAttribute("via",         viaTrail);
+        fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
+    /**
+     * Wraps a 1:1 presence stanza (subscribe/subscribed/probe/directed available/unavailable) for
+     * relay toward {@code finalDestination}.  Same envelope as {@link #directForward}; the embedded
+     * presence keeps its real {@code from}/{@code to} so the destination can route it through its own
+     * roster/subscription engine.
+     */
+    public static IQ presenceForward(String nextHop, String finalDestination,
+                                     String viaTrail, Presence payload) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element fwd = fed.addElement("presence-forward");
+        fwd.addAttribute("destination", finalDestination);
+        fwd.addAttribute("via",         viaTrail);
+        fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
+    /**
+     * Wraps a user-addressed IQ (vCard, disco, entity-caps, version, ping, PEP …) for relay toward
+     * {@code finalDestination}.  Same envelope as {@link #directForward}; the embedded IQ keeps its
+     * real {@code id}/{@code from}/{@code to} so the destination server answers it (or delivers it to
+     * the target session) and the result relays back the same way, correlated by id.
+     */
+    public static IQ iqForward(String nextHop, String finalDestination, String viaTrail, IQ payload) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element fwd = fed.addElement("iq-forward");
+        fwd.addAttribute("destination", finalDestination);
+        fwd.addAttribute("via",         viaTrail);
+        fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
+    // ── user-directory (opt-in online-user gossip) ──────────────────────────────
+
+    /**
+     * Advertises a list of user JIDs reachable on {@code originDomain}.  Gossiped exactly
+     * like a room-advertisement: an {@code origin} attribute and a {@code via} trail let it
+     * relay multi-hop without looping; an empty list is a withdrawal (clear this origin).
+     */
+    public static IQ userDirectory(String toDomain, Collection<UserDirectory.UserPresence> users,
+                                   String originDomain, String via) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        Element dir = fed.addElement("user-directory");
+        if (originDomain != null)              dir.addAttribute("origin", originDomain);
+        if (via != null && !via.isEmpty())     dir.addAttribute("via", via);
+        for (UserDirectory.UserPresence u : users) {
+            Element e = dir.addElement("user");
+            e.addAttribute("jid", u.jid());
+            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show",   u.show());
+            if (u.status() != null && !u.status().isEmpty()) e.addAttribute("status", u.status());
+        }
+        return iq;
+    }
+
+    // ── bookmark-push (XEP-0048 connected-client advertisement) ─────────────────
+
+    /**
+     * Advertises the connected clients of {@code originDomain} so the receiver can inject them as
+     * XEP-0048 {@code <url>} bookmarks into its local users' storage. Gossiped exactly like a
+     * user-directory: an {@code origin} attribute and a {@code via} trail let it relay multi-hop
+     * without looping; an empty list is a withdrawal (remove this origin's injected bookmarks).
+     */
+    public static IQ bookmarkPush(String toDomain, Collection<UserDirectory.UserPresence> users,
+                                  String originDomain, String via) {
+        IQ iq = base(toDomain);
+        Element fed = iq.setChildElement("federation", NS);
+        Element push = fed.addElement("bookmark-push");
+        if (originDomain != null)           push.addAttribute("origin", originDomain);
+        if (via != null && !via.isEmpty())  push.addAttribute("via", via);
+        for (UserDirectory.UserPresence u : users) {
+            Element e = push.addElement("user");
+            e.addAttribute("jid", u.jid());
+            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show",   u.show());
+            if (u.status() != null && !u.status().isEmpty()) e.addAttribute("status", u.status());
+        }
         return iq;
     }
 

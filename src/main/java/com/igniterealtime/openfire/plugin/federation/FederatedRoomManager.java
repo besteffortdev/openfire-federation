@@ -32,10 +32,17 @@ public class FederatedRoomManager {
 
     private static final String PROP_ROOMS_INDEX = "federation.rooms.index";
     private static final String PROP_ROOM_PREFIX = "federation.room.federated.";
+    private static final String PROP_ROOM_VISIBLE = "federation.room.visibleto."; // + roomJid → csv of server domains
+    private static final String PROP_VIS_MIGRATED = "federation.room.visibility.migrated"; // one-time legacy→all flag
+    /** Sentinel in a room's visibility ACL meaning "visible to all peers". Empty ACL = visible to none. */
+    public static final String VISIBLE_ALL = "*";
     private static final String PROP_MAP_INDEX   = "federation.rooms.mappings.index";
     private static final String PROP_MAP_COUNT   = "federation.rooms.mapping.%s.count";
     private static final String PROP_MAP_REMOTE  = "federation.rooms.mapping.%s.%d.remote";
     private static final String PROP_MAP_DOMAIN  = "federation.rooms.mapping.%s.%d.domain";
+    private static final String PROP_MAP_STATE   = "federation.rooms.mapping.%s.%d.state";  // consent state
+    private static final String PROP_MAP_TOKEN   = "federation.rooms.mapping.%s.%d.token";  // shared token
+    private static final String PROP_ROOM_AUTOACCEPT = "federation.room.autoaccept."; // + roomJid → true
 
     // Virtual occupant persistence — survives plugin reloads so eviction on peer-down
     // can still send leave presences even if no join events occurred after the reload.
@@ -48,6 +55,9 @@ public class FederatedRoomManager {
 
     /** Room JIDs (room@conference.domain) tagged locally as federatable. */
     private final Set<String> localFederatedRooms = ConcurrentHashMap.newKeySet();
+
+    /** Local room JID → per-room visibility ACL (server domains allowed to see it; empty = all). */
+    private final ConcurrentHashMap<String, Set<String>> roomVisibility = new ConcurrentHashMap<>();
 
     /** peer domain → rooms that peer has advertised as federatable. */
     private final ConcurrentHashMap<String, List<FederatedRoom>> remoteRooms = new ConcurrentHashMap<>();
@@ -86,18 +96,66 @@ public class FederatedRoomManager {
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, VirtualOccupant>> virtualOccupants
         = new ConcurrentHashMap<>();
 
+    /**
+     * Transient live presence of remote (virtual) occupants for the admin "who's here" view:
+     * localRoomJid → nick → "show|status" (empty show = plain available). NOT persisted — presence
+     * is ephemeral and rebuilt from the muc-forward presence stream; keeps {@link VirtualOccupant}
+     * and its on-disk format unchanged.
+     */
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, String>> virtualOccupantPresence
+        = new ConcurrentHashMap<>();
+
+    /** Records/updates a virtual occupant's presence (called from injectPresence on join/update). */
+    public void setVirtualOccupantPresence(String localRoomJid, String nick, String show, String status) {
+        virtualOccupantPresence
+            .computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>())
+            .put(nick, (show == null ? "" : show) + "|" + (status == null ? "" : status));
+    }
+
+    /** Forgets a virtual occupant's presence (called on leave/eviction). */
+    public void clearVirtualOccupantPresence(String localRoomJid, String nick) {
+        ConcurrentHashMap<String, String> byNick = virtualOccupantPresence.get(localRoomJid);
+        if (byNick != null) {
+            byNick.remove(nick);
+            if (byNick.isEmpty()) virtualOccupantPresence.remove(localRoomJid);
+        }
+    }
+
+    /** nick → "show|status" for a room's virtual occupants (empty map if none). */
+    public Map<String, String> getVirtualOccupantPresence(String localRoomJid) {
+        ConcurrentHashMap<String, String> byNick = virtualOccupantPresence.get(localRoomJid);
+        return byNick == null ? java.util.Collections.emptyMap() : new java.util.LinkedHashMap<>(byNick);
+    }
+
     public void load() {
         // Load federated room tags
         String index = JiveGlobals.getProperty(PROP_ROOMS_INDEX, "").strip();
+        // One-time migration: before this build an empty ACL meant "visible to all". Now empty means
+        // "visible to none". Preserve existing rooms' behaviour by pinning any legacy room with no ACL
+        // property to the explicit "all" sentinel; rooms federated after this run get the new none default.
+        boolean migrated = JiveGlobals.getBooleanProperty(PROP_VIS_MIGRATED, false);
         if (!index.isEmpty()) {
             for (String jid : index.split(",")) {
                 jid = jid.strip();
                 if (!jid.isEmpty() && JiveGlobals.getBooleanProperty(PROP_ROOM_PREFIX + jid, false)) {
                     localFederatedRooms.add(jid);
-                    Log.info("Loaded federated room: {}", jid);
+                    String raw = JiveGlobals.getProperty(PROP_ROOM_VISIBLE + jid, null);
+                    Set<String> vis;
+                    if (raw != null && !raw.isBlank()) {
+                        vis = parseCsvSet(raw);
+                    } else if (!migrated) {
+                        vis = new LinkedHashSet<>(java.util.List.of(VISIBLE_ALL));   // legacy = all
+                        JiveGlobals.setProperty(PROP_ROOM_VISIBLE + jid, VISIBLE_ALL);
+                    } else {
+                        vis = Collections.emptySet();                                // explicit none
+                    }
+                    if (!vis.isEmpty()) roomVisibility.put(jid, vis);
+                    Log.info("Loaded federated room: {} (visible to {})", jid,
+                             vis.isEmpty() ? "none" : (vis.contains(VISIBLE_ALL) ? "all" : vis.size() + " server(s)"));
                 }
             }
         }
+        if (!migrated) JiveGlobals.setProperty(PROP_VIS_MIGRATED, "true");
 
         // Load room mappings — supports new count-indexed format and migrates legacy single-mapping format.
         String mapIndex = JiveGlobals.getProperty(PROP_MAP_INDEX, "").strip();
@@ -110,16 +168,29 @@ public class FederatedRoomManager {
                 if (countStr != null) {
                     try {
                         int count = Integer.parseInt(countStr);
+                        boolean rewrite = false;
                         for (int i = 0; i < count; i++) {
                             String remoteJid    = JiveGlobals.getProperty(String.format(PROP_MAP_REMOTE, localJid, i));
                             String remoteDomain = JiveGlobals.getProperty(String.format(PROP_MAP_DOMAIN, localJid, i));
                             if (remoteJid != null && remoteDomain != null) {
-                                RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain);
+                                String stateStr = JiveGlobals.getProperty(String.format(PROP_MAP_STATE, localJid, i));
+                                String token    = JiveGlobals.getProperty(String.format(PROP_MAP_TOKEN, localJid, i), "");
+                                RoomMapping.State state;
+                                if (stateStr == null) {
+                                    // Legacy mapping (pre-consent) — require re-acceptance: load inactive.
+                                    state = RoomMapping.State.PENDING_OUT;
+                                    rewrite = true;
+                                } else {
+                                    try { state = RoomMapping.State.valueOf(stateStr); }
+                                    catch (IllegalArgumentException e) { state = RoomMapping.State.PENDING_OUT; }
+                                }
+                                RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain, state, token);
                                 localMappings.computeIfAbsent(localJid, k -> new ArrayList<>()).add(m);
                                 remoteMappings.put(remoteJid, m);
-                                Log.info("Loaded room mapping: {} ↔ {} ({})", localJid, remoteJid, remoteDomain);
+                                Log.info("Loaded room mapping: {} ↔ {} ({}) [{}]", localJid, remoteJid, remoteDomain, state);
                             }
                         }
+                        if (rewrite) persistMappingsForRoom(localJid);   // persist the migrated state
                     } catch (NumberFormatException e) {
                         Log.warn("Invalid mapping count for {}: {}", localJid, countStr);
                     }
@@ -222,6 +293,10 @@ public class FederatedRoomManager {
             localFederatedRooms.add(roomJid);
         } else {
             localFederatedRooms.remove(roomJid);
+            // Drop the visibility ACL + auto-accept flag too — meaningless once not federated.
+            roomVisibility.remove(roomJid);
+            JiveGlobals.deleteProperty(PROP_ROOM_VISIBLE + roomJid);
+            JiveGlobals.deleteProperty(PROP_ROOM_AUTOACCEPT + roomJid);
         }
         JiveGlobals.setProperty(PROP_ROOM_PREFIX + roomJid, String.valueOf(federated));
         persistRoomsIndex();
@@ -230,6 +305,54 @@ public class FederatedRoomManager {
 
     public boolean isFederated(String roomJid) {
         return localFederatedRooms.contains(roomJid);
+    }
+
+    // ── Per-room visibility ACL (which destination servers may see this room) ───
+
+    /** Server domains allowed to see {@code roomJid}; empty = visible to all peers. */
+    public Set<String> getRoomVisibility(String roomJid) {
+        return roomVisibility.getOrDefault(roomJid, Collections.emptySet());
+    }
+
+    /** Replaces a room's visibility ACL and persists it. Empty/null = visible to all. */
+    public void setRoomVisibility(String roomJid, Collection<String> servers) {
+        Set<String> set = (servers == null) ? Collections.emptySet()
+                : servers.stream().filter(s -> s != null && !s.isBlank())
+                         .map(s -> s.strip().toLowerCase())
+                         .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+        if (set.isEmpty()) {
+            roomVisibility.remove(roomJid);
+            JiveGlobals.deleteProperty(PROP_ROOM_VISIBLE + roomJid);
+        } else {
+            roomVisibility.put(roomJid, set);
+            JiveGlobals.setProperty(PROP_ROOM_VISIBLE + roomJid, String.join(",", set));
+        }
+        Log.info("Room {} visibility → {}", roomJid, set.isEmpty() ? "all peers" : set);
+    }
+
+    // ── Per-room auto-accept (accept incoming mapping requests without a prompt) ──
+
+    public boolean isAutoAccept(String roomJid) {
+        return JiveGlobals.getBooleanProperty(PROP_ROOM_AUTOACCEPT + roomJid, false);
+    }
+
+    public void setAutoAccept(String roomJid, boolean autoAccept) {
+        if (autoAccept) {
+            JiveGlobals.setProperty(PROP_ROOM_AUTOACCEPT + roomJid, "true");
+        } else {
+            JiveGlobals.deleteProperty(PROP_ROOM_AUTOACCEPT + roomJid);
+        }
+        Log.info("Room {} auto-accept → {}", roomJid, autoAccept);
+    }
+
+    private static Set<String> parseCsvSet(String csv) {
+        Set<String> out = new java.util.LinkedHashSet<>();
+        if (csv != null && !csv.isBlank()) {
+            for (String s : csv.split(",")) {
+                if (!s.isBlank()) out.add(s.strip().toLowerCase());
+            }
+        }
+        return out;
     }
 
     public Set<String> getLocalFederatedRoomJids() {
@@ -256,7 +379,8 @@ public class FederatedRoomManager {
                 }
                 if (room == null) continue;
                 result.add(new FederatedRoom(jid, room.getNaturalLanguageName(),
-                                             room.getDescription(), localDomain));
+                                             room.getDescription(), localDomain,
+                                             getRoomVisibility(jid)));
             } catch (Exception e) {
                 Log.warn("Could not read room details for {}: {}", jid, e.getMessage());
             }
@@ -277,6 +401,7 @@ public class FederatedRoomManager {
                         Map<String, String> e = new LinkedHashMap<>();
                         e.put("remoteRoomJid", m.remoteRoomJid());
                         e.put("remoteDomain",  m.remoteDomain());
+                        e.put("state",         m.state().name());
                         return e;
                     })
                     .collect(Collectors.toList());
@@ -286,6 +411,8 @@ public class FederatedRoomManager {
                 entry.put("name",        room.getNaturalLanguageName());
                 entry.put("description", room.getDescription());
                 entry.put("federated",   localFederatedRooms.contains(jid));
+                entry.put("visibleTo",   new ArrayList<>(getRoomVisibility(jid)));
+                entry.put("autoAccept",  isAutoAccept(jid));
                 entry.put("occupants",   room.getOccupantsCount());
                 entry.put("mappings",    mappingsList);
                 result.add(entry);
@@ -301,6 +428,11 @@ public class FederatedRoomManager {
      * One local room can have at most one mapping per remote domain.
      */
     public void addMapping(String localJid, String remoteJid, String remoteDomain) {
+        addMapping(localJid, remoteJid, remoteDomain, RoomMapping.State.PENDING_OUT, "");
+    }
+
+    public void addMapping(String localJid, String remoteJid, String remoteDomain,
+                           RoomMapping.State state, String token) {
         List<RoomMapping> list = localMappings.computeIfAbsent(localJid, k -> new ArrayList<>());
 
         // Remove any existing mapping to the same remote domain before adding the new one.
@@ -312,13 +444,32 @@ public class FederatedRoomManager {
             return false;
         });
 
-        RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain);
+        RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain, state, token);
         list.add(m);
         remoteMappings.put(remoteJid, m);
 
         persistMappingsForRoom(localJid);
         persistMappingsIndex();
-        Log.info("Room mapping added: {} ↔ {} ({})", localJid, remoteJid, remoteDomain);
+        Log.info("Room mapping added: {} ↔ {} ({}) [{}]", localJid, remoteJid, remoteDomain, state);
+    }
+
+    /** Transitions an existing mapping to a new state/token. Returns the updated mapping, or null. */
+    public RoomMapping setMappingState(String localJid, String remoteDomain,
+                                       RoomMapping.State state, String token) {
+        List<RoomMapping> list = localMappings.get(localJid);
+        if (list == null) return null;
+        for (int i = 0; i < list.size(); i++) {
+            RoomMapping m = list.get(i);
+            if (m.remoteDomain().equals(remoteDomain)) {
+                RoomMapping updated = m.with(state, token != null ? token : m.token());
+                list.set(i, updated);
+                remoteMappings.put(updated.remoteRoomJid(), updated);
+                persistMappingsForRoom(localJid);
+                Log.info("Room mapping {} ({}) → {}", localJid, remoteDomain, state);
+                return updated;
+            }
+        }
+        return null;
     }
 
     /** Removes ALL mappings for a local room. */
@@ -356,15 +507,32 @@ public class FederatedRoomManager {
         return true;
     }
 
-    /** All mappings for a local room (empty list if none). Never null. */
+    /**
+     * The <b>live</b> mappings for a local room — only {@link RoomMapping.State#ACTIVE} ones. This is
+     * the view used by the interceptor and every forwarding/sync path, so non-active (pending/disabled/
+     * rejected) mappings never forward traffic. Use {@link #getAllMappingsForLocal} for UI/lifecycle.
+     */
     public List<RoomMapping> getMappingsForLocal(String localJid) {
+        List<RoomMapping> list = localMappings.get(localJid);
+        if (list == null) return Collections.emptyList();
+        return list.stream().filter(RoomMapping::isActive).collect(Collectors.toList());
+    }
+
+    /** All mappings for a local room regardless of state (for UI, lifecycle, unmap). Never null. */
+    public List<RoomMapping> getAllMappingsForLocal(String localJid) {
         List<RoomMapping> list = localMappings.get(localJid);
         return list != null ? Collections.unmodifiableList(list) : Collections.emptyList();
     }
 
-    /** The mapping from localJid toward a specific remoteDomain, or null. */
+    /** Every mapping (across all rooms) currently in the given state — e.g. incoming pending requests. */
+    public List<RoomMapping> getMappingsByState(RoomMapping.State state) {
+        return localMappings.values().stream().flatMap(List::stream)
+                .filter(m -> m.state() == state).collect(Collectors.toList());
+    }
+
+    /** The mapping from localJid toward a specific remoteDomain (any state), or null. */
     public RoomMapping getMappingForLocal(String localJid, String remoteDomain) {
-        return getMappingsForLocal(localJid).stream()
+        return getAllMappingsForLocal(localJid).stream()
             .filter(m -> m.remoteDomain().equals(remoteDomain))
             .findFirst().orElse(null);
     }
@@ -389,8 +557,10 @@ public class FederatedRoomManager {
      * has to guess one from the other.
      */
     public void trackVirtualOccupant(String localRoomJid, String origin, String arrivedVia, String virtualNick) {
-        virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>())
-                        .compute(virtualNick, (n, existing) -> {
+        boolean newRoom = !virtualOccupants.containsKey(localRoomJid);
+        ConcurrentHashMap<String, VirtualOccupant> byNick =
+            virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>());
+        VirtualOccupant vo = byNick.compute(virtualNick, (n, existing) -> {
             if (existing == null) {
                 Set<String> via = ConcurrentHashMap.newKeySet();
                 via.add(arrivedVia);
@@ -399,19 +569,35 @@ public class FederatedRoomManager {
             existing.arrivedVia().add(arrivedVia);   // additional reachable path for an existing occupant
             return existing;
         });
-        persistVirtualOccupantsForRoom(localRoomJid);
+        // Incremental persistence: write ONLY the changed occupant + the nicks list (and the
+        // rooms index only when this room is new), instead of rewriting every occupant entry
+        // on every track — which was N+2 DB writes per join on a room with N occupants.
+        JiveGlobals.setProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, vo.nick()), voccEntryValue(vo));
+        JiveGlobals.setProperty(String.format(PROP_VOCC_NICKS, localRoomJid), String.join(",", byNick.keySet()));
+        if (newRoom) persistVirtualOccupantRoomsIndex();
     }
 
-    public void untrackVirtualOccupant(String localRoomJid, String virtualNick) {
+    /**
+     * Removes a virtual occupant.  Returns {@code true} only when an entry was actually
+     * removed, so callers can propagate the leave exactly once: a duplicate leave (e.g.
+     * arriving via both the fan-out and the state-based leave forward) finds nothing to
+     * remove and must NOT re-forward, otherwise leaves would multiply at every hop.
+     */
+    public boolean untrackVirtualOccupant(String localRoomJid, String virtualNick) {
         ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
-        if (byNick == null) return;
-        if (byNick.remove(virtualNick) == null) return;
+        if (byNick == null) return false;
+        if (byNick.remove(virtualNick) == null) return false;
+        // Incremental persistence: drop only this occupant's entry and rewrite the nicks list,
+        // instead of rewriting every remaining occupant entry.
+        JiveGlobals.deleteProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, virtualNick));
         if (byNick.isEmpty()) {
             virtualOccupants.remove(localRoomJid, byNick);
-            clearPersistedVirtualOccupantsForRoom(localRoomJid);
+            JiveGlobals.deleteProperty(String.format(PROP_VOCC_NICKS, localRoomJid));
+            persistVirtualOccupantRoomsIndex();
         } else {
-            persistVirtualOccupantsForRoom(localRoomJid);
+            JiveGlobals.setProperty(String.format(PROP_VOCC_NICKS, localRoomJid), String.join(",", byNick.keySet()));
         }
+        return true;
     }
 
     /**
@@ -468,6 +654,47 @@ public class FederatedRoomManager {
      */
     public Set<String> clearAllVirtualOccupants(String localRoomJid) {
         return removeMatching(localRoomJid, vo -> true);
+    }
+
+    /**
+     * Removes the {@code arrivedViaDomain} path from every occupant in the room and returns the
+     * FULL {@link VirtualOccupant} objects that thereby became unreachable (their LAST path was
+     * this domain).  Like {@link #clearVirtualOccupantsByArrivedVia} but returns objects, not
+     * just nicks, so the caller can propagate each leave with the occupant's real origin.  Used
+     * by mapping-disable eviction: arrivedVia is the MAPPED server an occupant entered through,
+     * so this drops exactly the occupants the disabled mapping brought in — including hub-relayed
+     * cross-spoke users — while occupants still reachable via another mapping keep that path.
+     */
+    /**
+     * Removes and returns the FULL {@link VirtualOccupant} objects in a room whose ORIGIN (home)
+     * domain is {@code originDomain}.  Object-returning sibling of {@link #clearVirtualOccupantsByOrigin}
+     * so a route-loss eviction can propagate each leave to the occupant's other spokes (its real
+     * arrivedVia is preserved on the returned object, since this removes wholesale).
+     */
+    public List<VirtualOccupant> removeVirtualOccupantsByOrigin(String localRoomJid, String originDomain) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return Collections.emptyList();
+        List<VirtualOccupant> removed = new ArrayList<>();
+        for (VirtualOccupant vo : new ArrayList<>(byNick.values())) {
+            if (originDomain.equals(vo.origin()) && byNick.remove(vo.nick(), vo)) removed.add(vo);
+        }
+        if (removed.isEmpty()) return Collections.emptyList();
+        afterRemoval(localRoomJid, byNick);
+        return removed;
+    }
+
+    public List<VirtualOccupant> removeVirtualOccupantsArrivedVia(String localRoomJid, String arrivedViaDomain) {
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        if (byNick == null) return Collections.emptyList();
+        List<VirtualOccupant> removed = new ArrayList<>();
+        boolean changed = false;
+        for (VirtualOccupant vo : new ArrayList<>(byNick.values())) {
+            if (!vo.arrivedVia().remove(arrivedViaDomain)) continue;   // didn't arrive via this mapping
+            changed = true;
+            if (vo.arrivedVia().isEmpty() && byNick.remove(vo.nick(), vo)) removed.add(vo);
+        }
+        if (changed) afterRemoval(localRoomJid, byNick);
+        return removed;
     }
 
     /** Removes occupants matching {@code pred}; returns their nicks and rewrites persistence. */
@@ -562,6 +789,19 @@ public class FederatedRoomManager {
         return Collections.unmodifiableMap(remoteRooms);
     }
 
+    /**
+     * Rooms advertised TO us via a specific neighbour (the immediate relay), regardless of
+     * their origin. Used by the admin UI to show, per untrusted link, what that peer is
+     * exposing inbound — the right-hand column opposite the rooms we expose outbound.
+     */
+    public List<FederatedRoom> getRemoteRoomsViaPeer(String peerDomain) {
+        List<FederatedRoom> out = new ArrayList<>();
+        for (Map.Entry<String, List<FederatedRoom>> e : remoteRooms.entrySet()) {
+            if (peerDomain.equals(roomRelaySource.get(e.getKey()))) out.addAll(e.getValue());
+        }
+        return out;
+    }
+
     // ── Persistence helpers ───────────────────────────────────────────────────
 
     private void persistRoomsIndex() {
@@ -578,8 +818,15 @@ public class FederatedRoomManager {
         if (list == null || list.isEmpty()) return;
         JiveGlobals.setProperty(String.format(PROP_MAP_COUNT, localJid), String.valueOf(list.size()));
         for (int i = 0; i < list.size(); i++) {
-            JiveGlobals.setProperty(String.format(PROP_MAP_REMOTE, localJid, i), list.get(i).remoteRoomJid());
-            JiveGlobals.setProperty(String.format(PROP_MAP_DOMAIN, localJid, i), list.get(i).remoteDomain());
+            RoomMapping m = list.get(i);
+            JiveGlobals.setProperty(String.format(PROP_MAP_REMOTE, localJid, i), m.remoteRoomJid());
+            JiveGlobals.setProperty(String.format(PROP_MAP_DOMAIN, localJid, i), m.remoteDomain());
+            JiveGlobals.setProperty(String.format(PROP_MAP_STATE,  localJid, i), m.state().name());
+            if (m.token() != null && !m.token().isEmpty()) {
+                JiveGlobals.setProperty(String.format(PROP_MAP_TOKEN, localJid, i), m.token());
+            } else {
+                JiveGlobals.deleteProperty(String.format(PROP_MAP_TOKEN, localJid, i));
+            }
         }
     }
 
@@ -591,6 +838,8 @@ public class FederatedRoomManager {
                 for (int i = 0; i < count; i++) {
                     JiveGlobals.deleteProperty(String.format(PROP_MAP_REMOTE, localJid, i));
                     JiveGlobals.deleteProperty(String.format(PROP_MAP_DOMAIN, localJid, i));
+                    JiveGlobals.deleteProperty(String.format(PROP_MAP_STATE,  localJid, i));
+                    JiveGlobals.deleteProperty(String.format(PROP_MAP_TOKEN,  localJid, i));
                 }
             } catch (NumberFormatException ignored) {}
             JiveGlobals.deleteProperty(String.format(PROP_MAP_COUNT, localJid));
@@ -613,9 +862,14 @@ public class FederatedRoomManager {
                                 String.join(",", byNick.keySet()));
         for (VirtualOccupant vo : byNick.values()) {
             JiveGlobals.setProperty(String.format(PROP_VOCC_ENTRY, localRoomJid, vo.nick()),
-                                    vo.origin() + "|" + String.join(";", vo.arrivedVia()));
+                                    voccEntryValue(vo));
         }
         persistVirtualOccupantRoomsIndex();
+    }
+
+    /** Serialised persistence value for one occupant: "origin|via1;via2;...". */
+    private static String voccEntryValue(VirtualOccupant vo) {
+        return vo.origin() + "|" + String.join(";", vo.arrivedVia());
     }
 
     /** Deletes all persisted state for one room and refreshes the rooms index. */

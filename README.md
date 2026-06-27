@@ -21,7 +21,11 @@ that have no direct link. End users do nothing special — they just join their 
 - **Live activation** — peers, mappings and settings take effect immediately; no Openfire restart.
 - **Self‑healing S2S** — automatic reconnect with exponential back‑off, keepalives, and idle‑reaper handling
   so links stay up and rosters re‑sync without users rejoining.
-- **Ghost‑occupant cleanup** — when a peer or route drops, remote users are cleanly removed from local rooms.
+- **Ghost‑occupant cleanup** — when a peer or route drops, *or a remote user disconnects (including several
+  hops away)*, that user is cleanly removed from every local room across the federation.
+- **Access control** — federation traffic only ever touches rooms you explicitly enable; an optional peer
+  allowlist restricts who may federate at all; **untrusted peers** see only the servers you expose to them
+  (ideal for an edge server fronting a partner network); the admin API is CSRF‑protected. See [Security](#security).
 - **Admin console UI** — manage peers, watch the routing table and S2S sessions, and federate rooms from a
   dedicated **Federation** tab.
 
@@ -97,6 +101,7 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.keepaliveSeconds` | `240` | Interval for lightweight keepalive pings to reachable peers. Min 30. Auto‑clamped below Openfire's S2S idle timeout. |
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
+| `plugin.federation.peerAllowlist` | `true` | Secure‑by‑default trust mode. Only configured peers may drive federation; every action from any other peer is rejected. Set `false` for open federation. See [Security](#security). |
 
 ### Note on `disableS2SIdle`
 
@@ -109,6 +114,68 @@ often the keepalive fires — producing repeated `Connection has been idle` reco
 Because the plugin manages liveness itself (poll + reconnect back‑off), it disables that reaper on startup.
 This is **server‑wide** — it affects *all* S2S connections, not just federation peers. Set the property to
 `false` to leave Openfire's idle timeout untouched.
+
+---
+
+## Security
+
+The federation trust boundary is enforced at several points:
+
+- **Rooms are opt‑in.** A remote peer can only map — or inject presence/messages into — a local room an admin
+  has explicitly toggled **Federated**. Forwarded traffic aimed at any non‑federated room is dropped and logged
+  with a `SECURITY:` tag. This stops a peer from siphoning the roster of, or injecting into, a room it was never
+  granted (injection otherwise bypasses MUC's own non‑occupant check).
+- **Peer allowlist (default on).** `plugin.federation.peerAllowlist` defaults to `true`: only configured peers
+  (those you **Add** in the admin console) may drive federation; every action from any other server is rejected.
+  A peer is "configured" if you added it, so **both ends must add each other** — with the allowlist on,
+  auto‑registration of unknown peers is suppressed. Set it to `false` (or use the **Security** toggle on the
+  Peer Servers tab) for open federation, where any server that can connect is accepted and auto‑registered.
+- **Untrusted peers (filtered exposure).** Mark a peer **Untrusted** (the checkbox next to *Add peer*, or the
+  *Make untrusted* button on its row) and it receives **no** routing updates and **no** room advertisements at
+  all. You then pick — per peer, via its *Servers* editor — exactly which **servers** it may see, chosen from
+  this server itself (its federated local rooms) *and* any server reachable through it. The untrusted peer is sent
+  only the federated rooms homed on those servers, plus a route to each, so it learns nothing about the rest of
+  your topology. Enforcement is two‑way: inbound `room-mapping`/`muc-forward` from an untrusted peer aimed at a
+  room homed on a server it was **not** exposed to is dropped and logged with a `SECURITY:` tag. This is the
+  **edge‑server** pattern: federate with a partner organisation through one gateway that exposes only a curated
+  set of servers.
+  - **Trust is a property of the link.** Each end announces its stance (trusted/untrusted) in `peer-announce`;
+    if the two disagree, the link is **blocked** (status *Trust mismatch*) and no federation flows until **both**
+    admins set the same trust level. It then comes up automatically — no reconnect needed. The *Servers* editor
+    shows both directions: on the left, the servers you expose to that peer (editable); on the right, the servers
+    that peer is **advertising through** to you (read‑only).
+  - **Untrusted by default for foreign peers.** When you add a peer whose **parent domain** differs from this
+    server's (the last two DNS labels, e.g. `example.net`; adjustable via `plugin.federation.trustDomainLabels`),
+    the *Untrusted* box is ticked automatically — a stranger shares nothing until you choose what it may see.
+    Same‑parent peers default trusted.
+- **S2S certificate pinning (trust‑on‑first‑use).** The first time a peer's S2S link comes up, the plugin pins the
+  SHA‑256 of the top‑of‑chain certificate it presents. If that certificate later **changes** — e.g. a server is
+  re‑created under the same domain name and presents a different cert/CA — the peer is **auto‑marked untrusted** and
+  flagged in the Peers list (*⚠ cert changed*); federation toward it is blocked until you review and click
+  *Trust new cert* to pin the new one. Requires a TLS‑secured S2S link (a plain server‑dialback link presents no
+  certificate, so nothing is pinned).
+- **Per‑room visibility.** Each federated room has a **Visible** control (next to its toggle) listing the servers
+  allowed to see it — chosen from the routable peers, plus servers you can **add manually before they're reachable**
+  (the room advertises to them automatically once a route appears). A newly‑federated room defaults to **visible to
+  no one** — pick specific servers, or tick **Visible to all peers** to share with everyone. The visibility set
+  travels with the advertisement, so every relay confines the room to the path toward its allowed destinations —
+  off‑path servers never learn it exists. The ACL is persisted and **survives a listed server being offline**.
+  (Enforcement assumes on‑path servers run this plugin version or newer. Rooms that were already federated when you
+  upgraded are migrated to *visible to all* so existing federation keeps working.)
+- **Mapping consent.** Mapping onto a remote room now sends a **request** the other admin must **Accept** (shown in
+  a *Pending mapping requests* panel and inline on the room) before any traffic flows; **Reject** declines it. On
+  accept, a per‑mapping **token** is shared and re‑checked on every later lifecycle message, so a third party can't
+  forge one and a remove+re‑add forces a fresh acceptance. A mapping can be **Disabled** instead of removed — the
+  peer shows *"disabled by peer"* and it can be re‑enabled later. A per‑room **Auto‑accept** toggle makes a room
+  free to join — incoming requests are accepted automatically (still subject to the federation/untrusted/visibility
+  gates). **On upgrade, existing mappings drop to pending and must be re‑accepted** (the lower‑domain side
+  auto‑re‑requests on reconnect; the other side just accepts).
+- **Admin API CSRF.** The Federation tab's API uses a double‑submit token (a `fed-csrf` cookie echoed back as a
+  request parameter), so a forged request from another site cannot trigger peer/room changes in a logged‑in
+  admin's browser. After upgrading, reload an already‑open Federation tab once so its scripts pick up the token.
+- **Identity.** Remote users are injected under their home‑qualified nick, and the plugin drops any forwarded
+  stanza claiming to originate from a **local** user (anti‑spoofing). As with any federation, peers are trusted
+  to represent **their own** users honestly — a compromised peer can still misrepresent users of domains it relays.
 
 ---
 
@@ -126,10 +193,23 @@ The plugin exchanges control messages with peers using IQ stanzas in the `urn:xm
 | `room-advertisement` | Announce a federated local room (relayed multi‑hop). |
 | `room-mapping` / `room-unmap` | Link / unlink a local room to a remote room (relayed multi‑hop). |
 | `muc-forward` | Carries the actual MUC presence/message traffic between mapped rooms. |
+| `direct-forward` | Carries 1:1 chat messages to a multi‑hop contact (and message‑embedded XEPs: typing, receipts, reactions, OOB/upload links). |
+| `presence-forward` | Carries 1:1 presence and subscription stanzas to a multi‑hop contact. |
+| `iq-forward` | Carries user‑addressed IQs to a multi‑hop contact — **vCard/avatar (XEP‑0054/0153)**, plus disco/version/ping when answered by the contact's client. The vCard reply is built at the contact's server and relayed back, correlated by `id`. |
+| `user-directory` | Opt‑in gossip of online users reachable on a domain. |
+| `bookmark-push` | Opt‑in advertisement of a server's connected clients, injected into each peer user's bookmark storage as **XEP‑0048** `<url>` bookmarks so they appear in a normal chat client. |
 
 Remote users appear in local rooms as **virtual occupants**, tracked by their home origin (for reachability
 cleanup) and by the neighbour they arrived through (for per‑mapping teardown). Loop prevention uses a
 `fed-origin` marker so forwarded traffic doesn't bounce.
+
+**vCard, avatar, disco and caps over the overlay (1.6.0).** For multi‑hop contacts (no direct S2S link),
+the plugin relays user‑addressed IQs so a contact's avatar and profile load, service discovery resolves,
+and entity capabilities are learned. Forwarded presence now carries its full extension set — the avatar
+hash (`vcard-temp:x:update`) and entity‑caps `<c/>` — so clients know there is an avatar to fetch and what
+the contact supports. Adjacent (directly‑linked) peers continue to use native S2S for all of this.
+**Jingle audio/video and file transfer (0166/0167/0176/0234) remain out of scope** — they need a separate
+media/TURN path.
 
 ---
 

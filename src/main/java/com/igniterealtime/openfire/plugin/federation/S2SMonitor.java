@@ -30,7 +30,14 @@ import java.util.concurrent.TimeUnit;
 public class S2SMonitor {
 
     private static final Logger Log = LoggerFactory.getLogger(S2SMonitor.class);
-    private static final int    POLL_SECONDS           = 30;
+    // Liveness detection cadence: how quickly a peer flips to UNREACHABLE after its S2S
+    // route drops. Kept short because the check is just in-memory routing-table/session
+    // lookups; the heavier per-peer work (cert TOFU, keepalive reschedule) is throttled
+    // to CERT_SWEEP_SECONDS so it does not run at this fast cadence.
+    private static final int    POLL_SECONDS           = 10;
+    // How often to re-observe each live peer's S2S certificate (TOFU pin + change detection).
+    // A freshly-up link is always checked immediately on its REACHABLE transition.
+    private static final int    CERT_SWEEP_SECONDS     = 30;
     static final         String KEEPALIVE_JIVE_KEY     = "plugin.federation.keepaliveSeconds";
     static final         int    KEEPALIVE_DEFAULT       = 240;
     static final         int    KEEPALIVE_MINIMUM       = 30;
@@ -60,6 +67,8 @@ public class S2SMonitor {
     private ScheduledFuture<?>       reconnectFuture;
     /** The interval the keepalive task is currently scheduled at (effective, post-clamp). */
     private volatile int            scheduledKeepaliveSeconds = -1;
+    /** Epoch-ms of the last periodic certificate sweep, throttling cert checks to CERT_SWEEP_SECONDS. */
+    private volatile long           lastCertSweepMs = 0L;
 
     /** How many reconnect attempts have been made per peer since it last went UNREACHABLE. */
     private final ConcurrentHashMap<String, Integer> peerRetryCount  = new ConcurrentHashMap<>();
@@ -162,10 +171,13 @@ public class S2SMonitor {
                 Log.debug("S2S idle reaper already disabled — nothing to do");
                 return;
             }
-            ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.setValue(Duration.ZERO);
-            Log.info("Disabled Openfire's S2S idle reaper (was {}s) — federation manages liveness "
-                     + "via poll/reconnect; one-way S2S sockets would otherwise be reaped every {}s. "
-                     + "Set {}=false to restore Openfire's timeout.",
+            // -1ms is Openfire's documented "never time out" sentinel for
+            // xmpp.server.session.idle (it is also the property's minimum value).
+            // Do NOT use Duration.ZERO — 0ms can be read as an immediate-timeout.
+            ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.setValue(Duration.ofMillis(-1));
+            Log.info("Disabled Openfire's S2S idle reaper (was {}s, set to -1=never) — federation "
+                     + "manages liveness via poll/reconnect; one-way S2S sockets would otherwise be "
+                     + "reaped every {}s. Set {}=false to restore Openfire's timeout.",
                      current, current, DISABLE_IDLE_JIVE_KEY);
         } catch (Exception e) {
             Log.warn("Could not disable S2S idle timeout: {}", e.getMessage());
@@ -244,6 +256,12 @@ public class S2SMonitor {
         SessionManager sm             = XMPPServer.getInstance().getSessionManager();
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
+        // Cert TOFU is expensive relative to the liveness check, so only sweep live peers
+        // every CERT_SWEEP_SECONDS rather than on every (now fast) liveness poll. A link that
+        // just came up is still checked immediately below, on its REACHABLE transition.
+        long now = System.currentTimeMillis();
+        boolean certSweep = (now - lastCertSweepMs) >= CERT_SWEEP_SECONDS * 1000L;
+
         for (PeerServer peer : peerRegistry.getPeers()) {
             // WITHDRAWN peers intentionally disconnected — skip until admin reconnects.
             // DISABLED / REMOTE_DISABLED are administrative blocks — never auto-poll them.
@@ -268,6 +286,13 @@ public class S2SMonitor {
             PeerServer.Status prev = peer.getStatus();
             PeerServer.Status next = s2sUp ? PeerServer.Status.REACHABLE : PeerServer.Status.UNREACHABLE;
 
+            // Trust-on-first-use cert check: immediately when a link comes up (so a new/changed
+            // cert is pinned at once), and periodically thereafter (catches a cert swapped under
+            // a steady link). Skipped on the fast liveness ticks in between.
+            if (s2sUp && (prev != PeerServer.Status.REACHABLE || certSweep)) {
+                federationManager.observePeerCertificate(domain);
+            }
+
             if (prev == next) continue;   // no transition — nothing to do
 
             peerRegistry.updateStatus(domain, next);
@@ -279,8 +304,20 @@ public class S2SMonitor {
             }
         }
 
+        if (certSweep) lastCertSweepMs = now;
+
         // Adapt the keepalive cadence if the admin changed the S2S idle timeout at runtime.
+        // (Idempotent and cheap — early-returns when the effective interval is unchanged.)
         rescheduleKeepalive();
+
+        // Refresh the published user directory so login/logout churn propagates (only when the
+        // admin has enabled publishing — otherwise we'd resend empty lists every poll).
+        if (FederationProperties.DIRECTORY_PUBLISH.getValue()) {
+            federationManager.publishDirectory();
+        }
+        if (FederationProperties.BOOKMARK_PUSH.getValue()) {
+            federationManager.pushBookmarks();
+        }
     }
 
     private void sendKeepalives() {
@@ -331,9 +368,22 @@ public class S2SMonitor {
         routingTable.addDirectPeer(domain);
         // Send our full state (peer-announce + routing table + room list) to the new peer.
         federationManager.sendFullGossip(domain);
+        // PULL the peer's state too.  sendFullGossip only pushes ours; if the link flapped
+        // asymmetrically (the peer never saw us drop), the peer treats our peer-announce as a
+        // steady-state keepalive and replies WITHOUT a routing-update — so we would never
+        // re-learn the destinations reachable through it, and would never re-advertise them
+        // onward.  A solicit forces the peer to re-send its routing table + room cache.
+        federationManager.solicitRouting(domain);
         // Re-sync occupant rosters for any room mapped to this peer so users that
         // were already in those rooms become visible again without rejoining.
         federationManager.resyncMappedDestinations(Set.of(domain));
+        // Revive any pending mapping requests toward this peer (e.g. legacy mappings awaiting
+        // re-acceptance, or requests queued while it was down).
+        federationManager.resendPendingRequests(domain);
+        // Publish our online-user directory to the freshly-reachable peer (no-op unless enabled).
+        federationManager.publishDirectory();
+        // Advertise our connected clients as XEP-0048 bookmarks (no-op unless enabled).
+        federationManager.pushBookmarks();
     }
 
     private void onPeerDown(String domain) {

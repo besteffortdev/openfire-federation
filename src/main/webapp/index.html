@@ -142,14 +142,42 @@
         .badge-fed    { background: #fff3cd; color: #664d03; margin-left: 4px; }
         .badge-tls    { background: #f8d7da; color: #58151c; margin-left: 4px; }
         .badge-tls-ok { background: #d1e7dd; color: #0a3622; margin-left: 4px; }
+        .badge-untrusted { background: #f8d7da; color: #58151c; margin-left: 8px; }
+
+        /* ── Untrusted peer: exposed-room editor ──────────────────── */
+        .exposed-editor-row td { background: #fbfcfd; }
+        .exposed-cols { display: flex; gap: 18px; padding: 4px 2px 6px; }
+        .exposed-col { flex: 1 1 0; min-width: 0; }
+        .exposed-col + .exposed-col { border-left: 1px solid #e9ecef; padding-left: 18px; }
+        .exposed-col-h { font-weight: 600; font-size: 12px; margin-bottom: 6px; }
+        .exposed-col-sub { display: block; font-weight: 400; color: #6c757d; font-size: 11px; margin-top: 2px; }
+        .exposed-room {
+            display: flex; align-items: center; gap: 8px;
+            padding: 4px 6px; border-bottom: 1px solid #f0f0f0; font-size: 13px;
+        }
+        .exposed-room:last-of-type { border-bottom: none; }
+        .exposed-room input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
+        .exposed-room small { color: #6c757d; }
 
         /* ── Mapping connection state ─────────────────────────────── */
         .mapping-state          { font-size: 11px; font-weight: 600; margin-left: 6px; }
         .mapping-connected      { color: #28a745; }
         .mapping-disconnected   { color: #dc3545; }
+
+        /* ── Saved toast (uniform "change applied" confirmation) ──── */
+        #fed-toast {
+            position: fixed; top: 16px; right: 16px; z-index: 9999;
+            background: #d4edda; color: #155724; border: 1px solid #b7dfc1;
+            padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;
+            box-shadow: 0 2px 8px rgba(0,0,0,.12);
+            opacity: 0; transform: translateY(-8px); pointer-events: none;
+            transition: opacity .15s ease, transform .15s ease;
+        }
+        #fed-toast.show { opacity: 1; transform: translateY(0); }
     </style>
 </head>
 <body>
+<div id="fed-toast"></div>
 <div id="fed-root">
 
     <div class="fed-header">
@@ -163,7 +191,8 @@
     <div class="fed-tabs">
         <button class="fed-tab active" data-tab="peers">Peer Servers</button>
         <button class="fed-tab"        data-tab="routing">Routing Table</button>
-        <button class="fed-tab"        data-tab="rooms">Rooms</button>
+        <button class="fed-tab"        data-tab="rooms">Rooms <span id="rooms-tab-badge" class="badge badge-untrusted" style="display:none"></span></button>
+        <button class="fed-tab"        data-tab="users">Users</button>
     </div>
 
     <!-- ── Peers panel ──────────────────────────────────────────────────────── -->
@@ -176,11 +205,20 @@
                     <input type="text" id="input-peer-domain"
                            placeholder="xmpp.example.com"
                            required autocomplete="off">
+                    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#495057;white-space:nowrap">
+                        <input type="checkbox" id="input-peer-untrusted"
+                               style="width:15px;height:15px;cursor:pointer">
+                        Untrusted
+                    </label>
                     <button type="submit" class="btn btn-primary">Add peer</button>
                 </form>
                 <small style="color:#999">
                     Enter the XMPP domain of the other Openfire server.
                     An S2S connection will be established automatically.
+                    Tick <strong>Untrusted</strong> for a peer that should see nothing until you
+                    explicitly expose specific servers to it (e.g. a partner reached via an edge server).
+                    Peers under a different parent domain are ticked automatically. The S2S certificate
+                    is pinned on first contact; if it later changes, the peer is auto-untrusted and flagged.
                 </small>
             </div>
         </div>
@@ -280,6 +318,129 @@
                 </table>
             </div>
         </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Security</div>
+            <div class="section-box-body">
+                <table class="settings-table">
+                    <tr>
+                        <td>
+                            <label for="allowlist-toggle" style="font-weight:600;font-size:13px">
+                                Restrict federation to approved peers
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When enabled, only peers you have explicitly added here may federate;
+                                federation actions from any other server are rejected. Disable for open
+                                federation (accept any server that can connect). Existing peers stay
+                                approved when this is turned on.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="allowlist-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveAllowlist()">
+                            <span id="allowlist-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="allowlist-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <label for="blockdirect-toggle" style="font-weight:600;font-size:13px">
+                                Force federation for remote room access
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When enabled, a user on another server cannot join or post to a local
+                                MUC room directly over S2S — the room is only reachable through a
+                                federation mapping. Federation's own traffic is unaffected. Disable to
+                                also allow direct cross-server room access.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="blockdirect-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveBlockDirect()">
+                            <span id="blockdirect-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="blockdirect-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <label for="directrelay-toggle" style="font-weight:600;font-size:13px">
+                                Relay 1:1 messages over federation
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When enabled, a private message a local user sends to a user on an
+                                overlay-reachable peer is relayed hop-by-hop through federation (so it
+                                works even across untrusted edges with no direct S2S). Replies route
+                                back the same way. Disable to use Openfire's native S2S for 1:1 chat.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="directrelay-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveDirectRelay()">
+                            <span id="directrelay-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="directrelay-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <label for="probesub-toggle" style="font-weight:600;font-size:13px">
+                                Probe federated contacts on subscription
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When a local user adds a contact on a multi-hop peer, Openfire's own
+                                presence probe leaks to native S2S and fails (no direct link), so the
+                                contact never shows online. With this on, the probe is re-issued over the
+                                federation overlay so the contact's presence is pulled. Recommended on.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="probesub-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveProbeOnSubscribe()">
+                            <span id="probesub-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="probesub-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <label for="dirpublish-toggle" style="font-weight:600;font-size:13px">
+                                Publish my user directory to peers
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:480px">
+                                When enabled, this server gossips its list of currently-online users so
+                                peers can see who is reachable here (expand a row in the Routing Table).
+                                Off by default for privacy; untrusted peers never receive it. Messaging
+                                by typed JID still works when this is off.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="dirpublish-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveDirectoryPublish()">
+                            <span id="dirpublish-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="dirpublish-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
     </div>
 
     <!-- ── Routing table panel ──────────────────────────────────────────────── -->
@@ -304,11 +465,18 @@
             A hop count of 1 means directly connected via S2S.
             Routes are learned automatically through gossip when peers connect.
             Stale routes are removed when a peer goes offline.
+            See the <strong>Users</strong> tab for the clients each server has published.
         </p>
     </div>
 
     <!-- ── Rooms panel ──────────────────────────────────────────────────────── -->
     <div id="panel-rooms" class="fed-panel">
+
+        <div class="section-box" id="pending-requests-box" style="display:none">
+            <div class="section-box-header">Pending mapping requests</div>
+            <div class="section-box-body" id="pending-requests">
+            </div>
+        </div>
 
         <div class="section-box">
             <div class="section-box-header">Local rooms — enable federation per room</div>
@@ -337,6 +505,90 @@
                 <p class="empty">Loading…</p>
             </div>
         </div>
+    </div>
+
+    <!-- ── Users panel ───────────────────────────────────────────────────────── -->
+    <div id="panel-users" class="fed-panel">
+
+        <div class="section-box">
+            <div class="section-box-header">Advertise connected clients as bookmarks (XEP-0048)</div>
+            <div class="section-box-body">
+                <table class="settings-table">
+                    <tr>
+                        <td>
+                            <label for="bookmarkpush-toggle" style="font-weight:600;font-size:13px">
+                                Auto-push my connected clients to peers
+                            </label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:520px">
+                                When enabled, this server's currently-connected clients are advertised
+                                to every trusted peer and injected into each peer user's bookmark
+                                storage as XEP-0048 <code style="font-size:11px">&lt;url&gt;</code>
+                                bookmarks — so they appear in a normal chat client. Re-pushes
+                                automatically as users come and go. Untrusted peers never receive it.
+                                Bookmarks are read at login, so a peer user sees changes on their next
+                                sign-in. Turning this off withdraws the bookmarks this server pushed.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle">
+                            <input type="checkbox" id="bookmarkpush-toggle"
+                                   style="vertical-align:middle;width:16px;height:16px;cursor:pointer"
+                                   onchange="saveBookmarkPush()">
+                            <span id="bookmarkpush-state" style="font-size:13px;margin-left:6px">…</span>
+                            <span id="bookmarkpush-saved"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Saved ✓
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top:16px">
+                            <label style="font-weight:600;font-size:13px">Push once now</label>
+                            <div style="color:#6c757d;font-size:11px;margin-top:4px;max-width:520px">
+                                Advertise the current connected clients a single time, without enabling
+                                automatic re-pushing.
+                            </div>
+                        </td>
+                        <td style="padding-left:24px;white-space:nowrap;vertical-align:middle;padding-top:16px">
+                            <button class="btn btn-primary" onclick="pushBookmarks()">Push bookmarks to peers</button>
+                            <span id="bookmarkpush-pushed"
+                                  style="display:none;color:#28a745;font-size:12px;margin-left:8px">
+                                Pushed ✓
+                            </span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Connected clients on this server</div>
+            <table class="fed-table">
+                <thead>
+                    <tr>
+                        <th>User</th>
+                        <th>Presence</th>
+                    </tr>
+                </thead>
+                <tbody id="local-users-tbody">
+                    <tr><td colspan="2" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Bookmarks advertised by peers (XEP-0048)</div>
+            <div class="section-box-body" id="advertised-bookmarks-container">
+                <p class="empty">Loading…</p>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Users on peer servers (advertised directory)</div>
+            <div class="section-box-body" id="remote-users-container">
+                <p class="empty">Loading…</p>
+            </div>
+        </div>
+
     </div>
 
 </div>
