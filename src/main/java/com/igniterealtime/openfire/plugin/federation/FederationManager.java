@@ -1287,7 +1287,17 @@ public class FederationManager {
      * false if there is no route (the caller leaves Openfire to handle it normally).
      */
     public boolean forwardDirectMessage(Message msg) {
-        String destDomain  = msg.getTo().getDomain();
+        return forwardDirectMessage(msg, msg.getTo().getDomain());
+    }
+
+    /**
+     * As {@link #forwardDirectMessage(Message)} but routes toward an explicit destination SERVER
+     * domain while the embedded payload keeps its real {@code to}.  Used to carry a MUC message
+     * (addressed to {@code room@conference.<server>}) over the overlay: the wrapper is routed on the
+     * host server domain ({@code <server>}), which the routing table knows, and the destination hands
+     * the unwrapped message to its local MUC.
+     */
+    public boolean forwardDirectMessage(Message msg, String destDomain) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
         if (nextHop == null) return false;
@@ -1295,10 +1305,10 @@ public class FederationManager {
             Message copy = new Message(msg.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.directForward(nextHop, destDomain, localDomain, copy));
-            Log.debug("direct-forward: 1:1 {} -> {} via {}", msg.getFrom(), msg.getTo(), nextHop);
+            Log.debug("direct-forward: {} -> {} via {} (dest {})", msg.getFrom(), msg.getTo(), nextHop, destDomain);
             return true;
         } catch (Exception e) {
-            Log.warn("Failed to forward 1:1 message to {}: {}", destDomain, e.getMessage());
+            Log.warn("Failed to forward message to {}: {}", destDomain, e.getMessage());
             return false;
         }
     }
@@ -1310,7 +1320,15 @@ public class FederationManager {
      * Returns true if handed to a next hop (caller suppresses native S2S), false if no route.
      */
     public boolean forwardDirectPresence(Presence pres) {
-        String destDomain  = pres.getTo().getDomain();
+        return forwardDirectPresence(pres, pres.getTo().getDomain());
+    }
+
+    /**
+     * As {@link #forwardDirectPresence(Presence)} but routes toward an explicit destination SERVER
+     * domain while the embedded payload keeps its real {@code to}.  Used to carry a MUC join/leave
+     * presence (addressed to {@code room@conference.<server>/nick}) over the overlay.
+     */
+    public boolean forwardDirectPresence(Presence pres, String destDomain) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
         if (nextHop == null) return false;
@@ -1318,11 +1336,11 @@ public class FederationManager {
             Presence copy = new Presence(pres.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.presenceForward(nextHop, destDomain, localDomain, copy));
-            Log.debug("presence-forward: 1:1 {} {} -> {} via {}",
-                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), nextHop);
+            Log.debug("presence-forward: {} {} -> {} via {} (dest {})",
+                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), nextHop, destDomain);
             return true;
         } catch (Exception e) {
-            Log.warn("Failed to forward 1:1 presence to {}: {}", destDomain, e.getMessage());
+            Log.warn("Failed to forward presence to {}: {}", destDomain, e.getMessage());
             return false;
         }
     }
@@ -1334,7 +1352,15 @@ public class FederationManager {
      * native S2S), false if no route.
      */
     public boolean forwardDirectIq(IQ iq) {
-        String destDomain  = iq.getTo().getDomain();
+        return forwardDirectIq(iq, iq.getTo().getDomain());
+    }
+
+    /**
+     * As {@link #forwardDirectIq(IQ)} but routes toward an explicit destination SERVER domain while
+     * the embedded payload keeps its real {@code to}.  Used to carry a MUC IQ (disco/config addressed
+     * to {@code room@conference.<server>}) over the overlay; the result relays back the same way.
+     */
+    public boolean forwardDirectIq(IQ iq, String destDomain) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
         if (nextHop == null) return false;
@@ -1342,10 +1368,10 @@ public class FederationManager {
             IQ copy = new IQ(iq.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.iqForward(nextHop, destDomain, localDomain, copy));
-            Log.debug("iq-forward: 1:1 {} {} -> {} via {}", iq.getType(), iq.getFrom(), iq.getTo(), nextHop);
+            Log.debug("iq-forward: {} {} -> {} via {} (dest {})", iq.getType(), iq.getFrom(), iq.getTo(), nextHop, destDomain);
             return true;
         } catch (Exception e) {
-            Log.warn("Failed to forward 1:1 IQ to {}: {}", destDomain, e.getMessage());
+            Log.warn("Failed to forward IQ to {}: {}", destDomain, e.getMessage());
             return false;
         }
     }

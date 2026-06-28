@@ -70,6 +70,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // multi-hop peer user so profile/avatar/discovery work across the overlay.
         relayDirectIq(packet, session);
 
+        // Remote MUC: relay a stanza addressed to a room on a MULTI-HOP peer's conference service
+        // (join/leave presence, groupchat/PM, MUC IQ) over the overlay so a user can reach a remote
+        // room directly — even an ad-hoc/private one that was never advertised as a mapping.
+        relayRemoteMuc(packet, session);
+
         if (packet instanceof Message msg && incoming && processed) {
             handleMessage(msg);
         } else if (packet instanceof Presence pres && incoming && processed) {
@@ -170,21 +175,31 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (!(packet instanceof Message msg)) return;
         if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
 
-        // Only genuine 1:1 chat. groupchat is MUC (handled below); error/result are left alone so
-        // we never bounce-loop a delivery failure.
+        // Leave error stanzas alone so we never bounce-loop a delivery failure.
         Message.Type type = msg.getType();
-        if (type == Message.Type.groupchat || type == Message.Type.error) return;
+        if (type == Message.Type.error) return;
 
         JID to = msg.getTo();
         if (to == null || to.getNode() == null) return;                 // must address a real user
         String toDomain = to.getDomain();
-        if (isConferenceDomain(toDomain)) return;                       // MUC service, not a user
+        if (isConferenceDomain(toDomain)) return;                       // to a LOCAL room — not this path
         if (XMPPServer.getInstance().isLocal(to)) return;               // local delivery — not ours
         if (!isMultiHopPeer(toDomain)) return;                          // direct peers use native S2S
 
+        // groupchat on this (user-addressed) path is the room→occupant leg of a federated remote-room
+        // join: a local MUC broadcasting to a remote occupant who joined directly across the overlay.
+        // Relay only those — and only for UNMAPPED rooms, so we never double up with the mapping
+        // (mucForward) path that owns propagation for mapped rooms.
+        if (type == Message.Type.groupchat) {
+            JID from = msg.getFrom();
+            if (from == null || from.getNode() == null || !isConferenceDomain(from.getDomain())) return;
+            String roomJid = from.getNode() + "@" + from.getDomain();
+            if (!manager.getRoomManager().getMappingsForLocal(roomJid).isEmpty()) return;
+        }
+
         stampFrom(msg, session);
         if (manager.forwardDirectMessage(msg)) {
-            Log.info("Relayed 1:1 message {} -> {} over overlay (multi-hop)", msg.getFrom(), to);
+            Log.info("Relayed message {} -> {} over overlay (multi-hop)", msg.getFrom(), to);
             throw new PacketRejectedException("Relayed over federation overlay to " + toDomain);
         }
     }
@@ -247,6 +262,63 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             Log.info("Relayed 1:1 IQ {} {} -> {} over overlay (multi-hop)", iq.getType(), iq.getFrom(), to);
             throw new PacketRejectedException("Relayed IQ over federation overlay to " + toDomain);
         }
+    }
+
+    /**
+     * Relays a stanza addressed to a room on a MULTI-HOP peer's conference service over the overlay,
+     * then rejects it to suppress native S2S.  This is what lets a local user reach a remote MUC room
+     * directly across federation (join/leave presence, groupchat/PM, room IQ) without a per-room
+     * mapping — including ad-hoc and members-only rooms that were never advertised.  A no-op when the
+     * feature is disabled, when the target is not a remote room JID, or when the room's host server is
+     * local or only a direct peer (native S2S already reaches it).  Replies (the room's presence and
+     * IQ results back to the user) are user-addressed and ride the existing 1:1 relay home.
+     */
+    private void relayRemoteMuc(Packet packet, Session session) throws PacketRejectedException {
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+
+        JID to = packet.getTo();
+        if (to == null || to.getNode() == null) return;                 // must be a room JID room@conf[/nick]
+        String toDomain = to.getDomain();
+        if (XMPPServer.getInstance().isLocal(to)) return;               // local target — not ours
+        if (isConferenceDomain(toDomain)) return;                       // a LOCAL conference — handled elsewhere
+        if (manager.getRoutingTable().findNextHop(toDomain).isPresent()) return; // a known server (user JID) — 1:1 relay owns it
+
+        String serverDomain = mucServerDomain(toDomain);
+        if (serverDomain == null) return;
+        if (!isMultiHopPeer(serverDomain)) return;                      // unknown, or a direct peer (native S2S)
+
+        stampFrom(packet, session);
+        boolean relayed;
+        if (packet instanceof Presence pres) {
+            if (to.getResource() == null) return;                       // MUC join/leave/status carries a nick
+            relayed = manager.forwardDirectPresence(pres, serverDomain);
+        } else if (packet instanceof Message msg) {
+            if (msg.getType() == Message.Type.error) return;
+            relayed = manager.forwardDirectMessage(msg, serverDomain);
+        } else if (packet instanceof IQ iq) {
+            relayed = manager.forwardDirectIq(iq, serverDomain);
+        } else {
+            return;
+        }
+        if (relayed) {
+            Log.info("Relayed remote-MUC {} {} -> {} over overlay (host {} multi-hop)",
+                     packet.getClass().getSimpleName(), packet.getFrom(), to, serverDomain);
+            throw new PacketRejectedException("Relayed remote MUC stanza over federation overlay to " + serverDomain);
+        }
+    }
+
+    /**
+     * Maps a remote conference domain to its host SERVER domain by stripping the service label
+     * (e.g. {@code conference.2503-xmpp.example.net} → {@code 2503-xmpp.example.net}), or null if there is
+     * no parent label.  The federation routing table is keyed on server domains; if the stripped
+     * domain is not actually a known peer the caller's {@link #isMultiHopPeer} guard rejects it, so a
+     * non-standard MUC subdomain simply falls back to native S2S (no behaviour change).
+     */
+    private String mucServerDomain(String confDomain) {
+        if (confDomain == null) return null;
+        int dot = confDomain.indexOf('.');
+        if (dot <= 0 || dot >= confDomain.length() - 1) return null;
+        return confDomain.substring(dot + 1);
     }
 
     /**
