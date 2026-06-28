@@ -11,6 +11,7 @@ import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFa
 import org.jivesoftware.openfire.SessionManager;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.interceptor.InterceptorManager;
+import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
@@ -58,12 +59,14 @@ public class FederationManager {
     private final PeerRegistry           peerRegistry    = new PeerRegistry();
     private final FederationRoutingTable routingTable    = new FederationRoutingTable();
     private final FederatedRoomManager   roomManager     = new FederatedRoomManager();
+    private final RoomDefaultsManager    roomDefaults    = new RoomDefaultsManager();
     private final UserDirectory          userDirectory   = new UserDirectory();
     private final BookmarkInjector       bookmarkInjector = new BookmarkInjector();
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
     private       FederationPacketInterceptor interceptor;
     private       PresenceEventListener  presenceListener;
+    private       RoomCreationListener   roomListener;
 
     public void start() {
         Log.info("Federation plugin starting…");
@@ -71,6 +74,7 @@ public class FederationManager {
         FederationProperties.register();   // expose all plugin properties under the Federation plugin
         peerRegistry.load();
         roomManager.load();
+        roomDefaults.load();
 
         iqHandler   = new FederationIQHandler(this);
         interceptor = new FederationPacketInterceptor(this);
@@ -102,6 +106,10 @@ public class FederationManager {
             @Override public void unsubscribedToPresence(JID a, JID b) { }
         };
         PresenceEventDispatcher.addListener(presenceListener);
+
+        // Apply default federation settings to rooms as they are created (by name pattern).
+        roomListener = new RoomCreationListener(this);
+        MUCEventDispatcher.addListener(roomListener);
 
         Log.info("Federation plugin started — {} peer(s) configured", peerRegistry.getPeers().size());
     }
@@ -285,6 +293,9 @@ public class FederationManager {
 
         if (presenceListener != null)
             PresenceEventDispatcher.removeListener(presenceListener);
+
+        if (roomListener != null)
+            MUCEventDispatcher.removeListener(roomListener);
 
         if (iqHandler != null)
             XMPPServer.getInstance().getIQRouter().removeHandler(iqHandler);
@@ -1498,6 +1509,86 @@ public class FederationManager {
             || vis.contains(destDomain.toLowerCase());
     }
 
+    /**
+     * Applies the most-specific matching default-settings rule to a (typically just-created) room.
+     * No-op when no rule matches the room name, or the matching rule is non-federated (rules with
+     * {@code federated=false} are used to <em>exclude</em> a name pattern from a broader rule).
+     */
+    public void applyDefaultsTo(String roomJid) {
+        if (roomJid == null) return;
+        int at = roomJid.indexOf('@');
+        if (at <= 0 || at == roomJid.length() - 1) return;
+        String node    = roomJid.substring(0, at);
+        String service = roomJid.substring(at + 1);
+
+        RoomDefaultsManager.Rule rule = roomDefaults.bestMatch(node);
+        if (rule == null || !rule.federated()) return;
+
+        roomManager.setFederated(roomJid, true);
+
+        // Visibility ACL: "*" → visible to all peers, else the explicit domain list.
+        List<String> vis = rule.visible();
+        if (vis.contains(RoomDefaultsManager.VISIBLE_ALL)) {
+            roomManager.setRoomVisibility(roomJid, List.of(FederatedRoomManager.VISIBLE_ALL));
+        } else {
+            roomManager.setRoomVisibility(roomJid, vis);
+        }
+
+        roomManager.setAutoAccept(roomJid, rule.autoAccept());
+
+        Log.info("Applied room-default rule '{}' to {} (federated, visible={}, autoAccept={}, autoMap={})",
+                 rule.pattern(), roomJid,
+                 vis.contains(RoomDefaultsManager.VISIBLE_ALL) ? "all peers" : vis,
+                 rule.autoAccept(), rule.autoMap());
+
+        if (rule.autoMap()) autoMapRoom(roomJid, node, service, vis);
+    }
+
+    /** Re-applies the default-settings rules to every existing local room. Returns how many matched. */
+    public int applyDefaultsToAllRooms() {
+        int applied = 0;
+        for (Map<String, Object> room : roomManager.getAllLocalRoomsWithTag()) {
+            String jid = (String) room.get("jid");
+            if (jid == null) continue;
+            int at = jid.indexOf('@');
+            if (at <= 0) continue;
+            if (roomDefaults.bestMatch(jid.substring(0, at)) != null) {
+                applyDefaultsTo(jid);
+                applied++;
+            }
+        }
+        Log.info("Applied room-default rules to {} existing room(s)", applied);
+        return applied;
+    }
+
+    /**
+     * Auto-requests a same-named mapping ({@code node@<mucService>.<peer>}) toward each target peer.
+     * Targets are the room's visibility list, or every routing destination when visibility is "*".
+     * Skips peers the room isn't actually shared with, or where a mapping already exists.
+     */
+    private void autoMapRoom(String localJid, String node, String localService, List<String> visible) {
+        Set<String> targets = new LinkedHashSet<>();
+        if (visible.contains(RoomDefaultsManager.VISIBLE_ALL)) {
+            targets.addAll(routableServers());
+        } else {
+            targets.addAll(visible);
+        }
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        // Derive the MUC subdomain (e.g. "conference") from the local service domain so the
+        // remote room JID is node@<sameSubdomain>.<peerDomain>.
+        String mucSub = localService.endsWith("." + localDomain)
+                ? localService.substring(0, localService.length() - localDomain.length() - 1)
+                : "conference";
+
+        for (String dest : targets) {
+            if (dest == null || dest.isBlank() || dest.equalsIgnoreCase(localDomain)) continue;
+            if (!roomSharedWith(localJid, dest)) continue;
+            if (roomManager.getMappingForLocal(localJid, dest) != null) continue;   // already mapped
+            String remoteJid = node + "@" + mucSub + "." + dest;
+            requestMapping(localJid, remoteJid, dest);
+        }
+    }
+
     /** Distinct routing-table destinations — the candidate servers for a room's visibility ACL. */
     public Set<String> routableServers() {
         Set<String> out = new LinkedHashSet<>();
@@ -1795,6 +1886,7 @@ public class FederationManager {
     public PeerRegistry           getPeerRegistry()  { return peerRegistry;  }
     public FederationRoutingTable getRoutingTable()  { return routingTable;  }
     public FederatedRoomManager   getRoomManager()   { return roomManager;   }
+    public RoomDefaultsManager    getRoomDefaults()  { return roomDefaults;  }
     public UserDirectory          getUserDirectory() { return userDirectory; }
     public BookmarkInjector       getBookmarkInjector() { return bookmarkInjector; }
 }

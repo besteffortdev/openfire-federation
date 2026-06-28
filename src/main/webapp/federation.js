@@ -25,6 +25,7 @@ const editedRoomVis = {};
 document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
     bindPeerForm();
+    bindRoomDefaultForm();
     bindRoomSearch();
     bindFilters();
     refresh();
@@ -63,6 +64,7 @@ function refresh() {
             renderUsersTab(data.localUsers || [], data.directory || {}, data.advertisedBookmarks || {});
             renderPendingRequests(data.pendingRequests || []);
             renderLocalRooms(localRooms);
+            renderRoomDefaults(data.roomDefaults || []);
             renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
             updateStatusBadge(data.peers || []);
             updateKeepaliveInput(data.keepaliveSeconds);
@@ -720,6 +722,96 @@ function pushBookmarks() {
                 flashSaved('Pushed ✓');
             }
         });
+}
+
+// ── Room default-settings rules (Rooms tab) ────────────────────────────────────
+
+function renderRoomDefaults(rules) {
+    const tbody = document.getElementById('room-defaults-tbody');
+    if (!tbody) return;
+    if (!rules.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No rules — new rooms get no automatic federation settings.</td></tr>';
+        return;
+    }
+    // Server provides rules most-specific first (evaluation order); keep that order.
+    tbody.innerHTML = rules.map(r => {
+        const vis = (r.visible && r.visible.length)
+            ? (r.visible.includes('*') ? 'all peers' : r.visible.join(', '))
+            : '—';
+        const yn = v => v ? '✓' : '—';
+        const p = escHtml(r.pattern);
+        return `<tr>
+            <td><code>${p}</code></td>
+            <td>${yn(r.federated)}</td>
+            <td>${yn(r.autoAccept)}</td>
+            <td>${escHtml(vis)}</td>
+            <td>${yn(r.autoMap)}</td>
+            <td style="text-align:right">
+                <button class="btn btn-small" onclick="editRoomDefault('${p}')">Edit</button>
+                <button class="btn btn-small btn-danger" onclick="deleteRoomDefault('${p}')">Delete</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function bindRoomDefaultForm() {
+    const form = document.getElementById('form-room-default');
+    if (!form) return;
+    form.addEventListener('submit', e => {
+        e.preventDefault();
+        const pattern = document.getElementById('rd-pattern').value.trim();
+        if (!pattern) return;
+        post({
+            action:     'save-room-default',
+            pattern,
+            federated:  document.getElementById('rd-federated').checked,
+            autoAccept: document.getElementById('rd-autoaccept').checked,
+            autoMap:    document.getElementById('rd-automap').checked,
+            visible:    document.getElementById('rd-visible').value.trim()
+        }).then(result => {
+            if (result && result.ok) {
+                document.getElementById('rd-pattern').value = '';
+                document.getElementById('rd-visible').value = '';
+                document.getElementById('rd-federated').checked = true;
+                document.getElementById('rd-autoaccept').checked = false;
+                document.getElementById('rd-automap').checked = false;
+                flashSaved('Rule saved ✓');
+                refresh();
+            } else if (result && result.error) {
+                alert(result.error);
+            }
+        });
+    });
+}
+
+// Load an existing rule back into the form for editing (saving re-upserts by pattern).
+function editRoomDefault(pattern) {
+    const r = (lastData.roomDefaults || []).find(x => x.pattern === pattern);
+    if (!r) return;
+    document.getElementById('rd-pattern').value = r.pattern;
+    document.getElementById('rd-federated').checked = !!r.federated;
+    document.getElementById('rd-autoaccept').checked = !!r.autoAccept;
+    document.getElementById('rd-automap').checked = !!r.autoMap;
+    document.getElementById('rd-visible').value =
+        (r.visible && r.visible.length) ? r.visible.join(', ') : '';
+    document.getElementById('rd-pattern').focus();
+}
+
+function deleteRoomDefault(pattern) {
+    if (!confirm('Delete the rule for "' + pattern + '"?')) return;
+    post({ action: 'delete-room-default', pattern }).then(result => {
+        if (result && result.ok) { flashSaved('Rule deleted ✓'); refresh(); }
+    });
+}
+
+function applyRoomDefaultsNow() {
+    if (!confirm('Apply the default-settings rules to every existing room now?')) return;
+    post({ action: 'apply-room-defaults-now' }).then(result => {
+        if (result && result.ok) {
+            flashSaved('Applied to ' + (result.applied || 0) + ' room(s) ✓');
+            refresh();
+        }
+    });
 }
 
 // A small colored presence dot. show: '' (available), away/xa, dnd, chat; 'offline' = grey.

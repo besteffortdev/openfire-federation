@@ -588,6 +588,66 @@
 
         <div class="section-box">
             <div class="section-box-header">
+                Default settings for new rooms (by name pattern)
+                <span class="count-chip" data-count-for="room-defaults-tbody"></span>
+            </div>
+            <div class="section-box-body">
+                <p class="hint" style="margin-top:0">
+                    When a room is created, the matching rule below is applied automatically.
+                    Patterns use shell-style globs — <code>*</code> matches any text, <code>?</code>
+                    one character (e.g. <code>*_ext</code> matches <code>mychat_ext</code>;
+                    <code>*</code> matches every room). When several rules match a name the
+                    <strong>most specific</strong> one wins (most literal characters), so <code>*</code>
+                    acts as a catch-all. A non-federated rule excludes a name pattern from a broader rule.
+                    <em>Auto-map</em> requests a same-named room link on each visible peer; combined with
+                    the peer's auto-accept, two servers using the same naming rule auto-link with no clicks.
+                </p>
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Name pattern</th>
+                            <th>Federated</th>
+                            <th>Auto-accept</th>
+                            <th>Visible to</th>
+                            <th>Auto-map</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="room-defaults-tbody">
+                        <tr><td colspan="6" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="section-box-body" style="border-top:1px solid #e5e7eb">
+                <form id="form-room-default" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
+                        Name pattern
+                        <input type="text" id="rd-pattern" placeholder="*_ext" style="margin-top:3px">
+                    </label>
+                    <label style="display:flex;align-items:center;gap:5px;font-size:13px">
+                        <input type="checkbox" id="rd-federated" checked> Federated
+                    </label>
+                    <label style="display:flex;align-items:center;gap:5px;font-size:13px">
+                        <input type="checkbox" id="rd-autoaccept"> Auto-accept
+                    </label>
+                    <label style="display:flex;align-items:center;gap:5px;font-size:13px">
+                        <input type="checkbox" id="rd-automap"> Auto-map
+                    </label>
+                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
+                        Visible to (<code>*</code> or csv of servers)
+                        <input type="text" id="rd-visible" placeholder="*" style="margin-top:3px;min-width:180px">
+                    </label>
+                    <button type="submit" class="btn btn-primary btn-small">Save rule</button>
+                </form>
+                <div style="margin-top:12px">
+                    <button class="btn btn-small" onclick="applyRoomDefaultsNow()">Apply to existing rooms now</button>
+                    <span class="hint">Re-runs the rules against every room that already exists.</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">
                 Remote rooms (advertised by peers)
                 <input class="filter-input" data-target="remote-rooms-container" placeholder="Filter servers…">
             </div>
