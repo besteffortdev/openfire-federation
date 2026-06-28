@@ -43,6 +43,18 @@ function setupTabs() {
             document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
         });
     });
+
+    // In-panel sub-tab bars (e.g. Rooms → Room Sharing / Rooms config)
+    document.querySelectorAll('.fed-subtab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const bar = btn.closest('.fed-subtabs');
+            const scope = bar.parentElement;
+            bar.querySelectorAll('.fed-subtab').forEach(b => b.classList.remove('active'));
+            scope.querySelectorAll('.fed-subpanel').forEach(p => p.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById('subpanel-' + btn.dataset.subtab).classList.add('active');
+        });
+    });
 }
 
 // ── Data refresh ──────────────────────────────────────────────────────────────
