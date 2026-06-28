@@ -75,6 +75,22 @@
         .fed-panel.active { display: block; }
         @keyframes fedfade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 
+        /* ══ Sub-tabs (in-panel bar menu) ════════════════════════════ */
+        .fed-subtabs {
+            display: inline-flex; gap: 3px; padding: 3px;
+            background: var(--surface-2); border-radius: 999px; margin-bottom: 20px;
+        }
+        .fed-subtab {
+            padding: 7px 16px; cursor: pointer; border: none; background: none;
+            font: inherit; font-size: 13px; font-weight: 600; color: var(--muted);
+            border-radius: 999px; transition: color .12s ease, background .12s ease;
+        }
+        .fed-subtab:hover  { color: var(--fg); }
+        .fed-subtab.active { color: var(--primary); background: #fff; box-shadow: var(--shadow); }
+
+        .fed-subpanel { display: none; animation: fedfade .18s ease; }
+        .fed-subpanel.active { display: block; }
+
         /* ══ Section cards ═══════════════════════════════════════════ */
         .section-box {
             border: 1px solid var(--line); border-radius: var(--radius);
@@ -554,6 +570,14 @@
     <!-- ── Rooms panel ──────────────────────────────────────────────────────── -->
     <div id="panel-rooms" class="fed-panel">
 
+        <div class="fed-subtabs">
+            <button class="fed-subtab active" data-subtab="room-sharing">Room Sharing</button>
+            <button class="fed-subtab"        data-subtab="rooms-config">Rooms config</button>
+        </div>
+
+        <!-- ·· Room Sharing ·············································· -->
+        <div id="subpanel-room-sharing" class="fed-subpanel active">
+
         <div class="section-box" id="pending-requests-box" style="display:none">
             <div class="section-box-header">Pending mapping requests</div>
             <div class="section-box-body" id="pending-requests">
@@ -585,6 +609,21 @@
                 </table>
             </div>
         </div>
+
+        <div class="section-box">
+            <div class="section-box-header">
+                Remote rooms (advertised by peers)
+                <input class="filter-input" data-target="remote-rooms-container" placeholder="Filter servers…">
+            </div>
+            <div class="section-box-body" id="remote-rooms-container">
+                <p class="empty">Loading…</p>
+            </div>
+        </div>
+
+        </div><!-- /subpanel-room-sharing -->
+
+        <!-- ·· Rooms config ············································· -->
+        <div id="subpanel-rooms-config" class="fed-subpanel">
 
         <div class="section-box">
             <div class="section-box-header">
@@ -646,15 +685,7 @@
             </div>
         </div>
 
-        <div class="section-box">
-            <div class="section-box-header">
-                Remote rooms (advertised by peers)
-                <input class="filter-input" data-target="remote-rooms-container" placeholder="Filter servers…">
-            </div>
-            <div class="section-box-body" id="remote-rooms-container">
-                <p class="empty">Loading…</p>
-            </div>
-        </div>
+        </div><!-- /subpanel-rooms-config -->
     </div>
 
     <!-- ── Users panel ───────────────────────────────────────────────────────── -->
