@@ -82,7 +82,7 @@ function refresh() {
             updateKeepaliveInput(data.keepaliveSeconds);
             updateReconnectInput(data.reconnectSeconds);
             updateAllowlistToggle(data.peerAllowlist);
-            updateBlockDirectToggle(data.blockDirectMuc);
+            updateTraversalToggle(data.allowRemoteRoomTraversal);
             updateDirectRelayToggle(data.directMsgRelay);
             updateProbeOnSubscribeToggle(data.probeOnSubscribe);
             updateDirectoryPublishToggle(data.directoryPublish);
@@ -514,20 +514,20 @@ function saveAllowlist() {
         });
 }
 
-// ── Security: force-federation (block direct S2S room access) toggle ────────────
+// ── Security: remote-room traversal (allow direct S2S room access) toggle ───────
 
-function updateBlockDirectToggle(enabled) {
-    const cb = document.getElementById('blockdirect-toggle');
-    const lbl = document.getElementById('blockdirect-state');
+function updateTraversalToggle(enabled) {
+    const cb = document.getElementById('traversal-toggle');
+    const lbl = document.getElementById('traversal-state');
     if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Federation required' : 'Direct S2S allowed';
+    if (lbl) lbl.textContent = enabled ? 'Remote rooms reachable' : 'Mapping required';
 }
 
-function saveBlockDirect() {
-    const cb = document.getElementById('blockdirect-toggle');
+function saveTraversal() {
+    const cb = document.getElementById('traversal-toggle');
     if (!cb) return;
     const enabled = cb.checked;
-    post({ action: 'set-block-direct-muc', enabled })
+    post({ action: 'set-allow-traversal', enabled })
         .then(result => {
             if (result && result.ok) {
                 flashSaved('Saved ✓');

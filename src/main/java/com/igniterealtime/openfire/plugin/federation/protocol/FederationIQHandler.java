@@ -671,6 +671,16 @@ public class FederationIQHandler extends IQHandler {
             // We are the destination — deliver to the local recipient (bypasses interceptors, so the
             // recipient's reply is a fresh outbound message caught and relayed back symmetrically).
             Message msg = new Message(payloadEl.createCopy());
+            JID mto = msg.getTo();
+            if (mto != null && isLocalConferenceDomain(mto.getDomain())) {
+                // groupchat/PM from a remote occupant to a LOCAL room (federated remote-room join) —
+                // route to the MUC service unmarked so the room broadcasts it and the re-broadcast to
+                // other remote occupants stays clean for relay back.  No re-relay risk: a stanza
+                // addressed to a local conference hits the interceptor's local-conference early-returns.
+                XMPPServer.getInstance().getPacketRouter().route(msg);
+                Log.info("direct-forward: delivered MUC message {} -> {} (from {})", msg.getFrom(), mto, fromDomain);
+                return;
+            }
             FederationStanzaFactory.markAsForwarded(msg);
             FederationStanzaFactory.directDeliver(msg);
             Log.info("direct-forward: delivered 1:1 {} -> {} (from {})", msg.getFrom(), msg.getTo(), fromDomain);
@@ -725,6 +735,16 @@ public class FederationIQHandler extends IQHandler {
                 manager.answerPresenceProbe(pres.getFrom(), pres.getTo());
                 Log.info("presence-forward: answered probe {} -> {} (from {})",
                          pres.getFrom(), pres.getTo(), fromDomain);
+                return;
+            }
+            JID pto = pres.getTo();
+            if (pto != null && isLocalConferenceDomain(pto.getDomain())) {
+                // A remote user joining/leaving a LOCAL room directly over the overlay — hand it to
+                // the MUC service unmarked so the room's reflected presences stay clean and get
+                // relayed back to the occupant.  No re-relay risk (local-conference early-returns).
+                XMPPServer.getInstance().getPacketRouter().route(pres);
+                Log.info("presence-forward: delivered MUC {} {} -> {} (from {})",
+                         pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pto, fromDomain);
                 return;
             }
             FederationStanzaFactory.markAsForwarded(pres);
@@ -811,6 +831,14 @@ public class FederationIQHandler extends IQHandler {
                 () -> Log.warn("iq-forward: no route to {}, dropping", finalDest)
             );
         }
+    }
+
+    /** True if {@code domain} is one of this server's local MUC service domains. */
+    private boolean isLocalConferenceDomain(String domain) {
+        if (domain == null) return false;
+        return XMPPServer.getInstance().getMultiUserChatManager()
+                         .getMultiUserChatServices().stream()
+                         .anyMatch(svc -> svc.getServiceDomain().equals(domain));
     }
 
     /**

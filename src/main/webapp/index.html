@@ -461,20 +461,22 @@
                 </div>
                 <div class="setting">
                     <div class="setting-main">
-                        <div class="setting-title">Force federation for remote room access</div>
+                        <div class="setting-title">Allow users to reach remote rooms across federation</div>
                         <div class="setting-desc">
-                            When enabled, a user on another server cannot join or post to a local
-                            MUC room directly over S2S — the room is only reachable through a
-                            federation mapping. Federation's own traffic is unaffected. Disable to
-                            also allow direct cross-server room access.
+                            When enabled (default), a user on another server may traverse the
+                            federation network to join or post to a local MUC room directly over S2S,
+                            even when no federation mapping exists — so ad-hoc and private rooms that
+                            are never advertised stay reachable. Federation's own traffic is
+                            unaffected. Disable to lock rooms down so they are only reachable through
+                            an explicit federation mapping.
                         </div>
                     </div>
                     <div class="setting-ctl">
                         <label class="toggle">
-                            <input type="checkbox" id="blockdirect-toggle" onchange="saveBlockDirect()">
+                            <input type="checkbox" id="traversal-toggle" onchange="saveTraversal()">
                             <span class="slider"></span>
                         </label>
-                        <span id="blockdirect-state" class="setting-state">…</span>
+                        <span id="traversal-state" class="setting-state">…</span>
                     </div>
                 </div>
                 <div class="setting">
