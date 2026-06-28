@@ -255,7 +255,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
         sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds()).append(",");
         sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue()).append(",");
-        sb.append("\"blockDirectMuc\":").append(FederationProperties.BLOCK_DIRECT_MUC.getValue()).append(",");
+        sb.append("\"allowRemoteRoomTraversal\":").append(FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()).append(",");
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
         sb.append("\"directoryPublish\":").append(FederationProperties.DIRECTORY_PUBLISH.getValue()).append(",");
         sb.append("\"bookmarkPush\":").append(FederationProperties.BOOKMARK_PUSH.getValue()).append(",");
@@ -606,14 +606,14 @@ public class FederationApiServlet extends HttpServlet {
                 out.print("{\"ok\":true,\"peerAllowlist\":" + FederationProperties.PEER_ALLOWLIST.getValue() + "}");
                 return;
             }
-            case "set-block-direct-muc": {
+            case "set-allow-traversal": {
                 String enabled = req.getParameter("enabled");
                 if (enabled == null) {
                     out.print("{\"error\":\"enabled required\"}");
                     return;
                 }
-                FederationProperties.BLOCK_DIRECT_MUC.setValue(Boolean.parseBoolean(enabled.strip()));
-                out.print("{\"ok\":true,\"blockDirectMuc\":" + FederationProperties.BLOCK_DIRECT_MUC.getValue() + "}");
+                FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"allowRemoteRoomTraversal\":" + FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue() + "}");
                 return;
             }
             case "set-direct-relay": {

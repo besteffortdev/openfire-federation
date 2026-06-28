@@ -31,12 +31,12 @@ public class FederationPacketInterceptor implements PacketInterceptor {
     private static final Logger Log = LoggerFactory.getLogger(FederationPacketInterceptor.class);
 
     /**
-     * When true (default), a remote user cannot join or address a local MUC room
-     * directly over a raw S2S connection — they must go through a federation room
-     * mapping. Federation's own traffic is unaffected: virtual occupants are injected
-     * via {@code directDeliver} (and are marked-forwarded), never as real S2S presence,
-     * so this gate only catches genuine direct cross-server room access.
-     * Toggle via the Federation admin console, or {@link FederationProperties#BLOCK_DIRECT_MUC}.
+     * By default (see {@link FederationProperties#ALLOW_REMOTE_ROOM_TRAVERSAL}) a remote user may
+     * traverse federation to join or address a local MUC room directly over S2S, so ad-hoc / private
+     * rooms that are never advertised stay reachable. Federation's own traffic is unaffected either
+     * way: virtual occupants are injected via {@code directDeliver} (and are marked-forwarded), never
+     * as real S2S presence, so the lock-down only ever catches genuine direct cross-server room access.
+     * Toggle via the Federation admin console.
      */
     private final FederationManager manager;
 
@@ -52,10 +52,10 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (packet.getTo() == null) return;
         if (FederationStanzaFactory.isMarkedAsForwarded(packet)) return;
 
-        // Force federation: reject any direct remote-origin packet aimed at a local
-        // MUC room. Done as early as possible (before the room processes it) so a
-        // remote join never takes effect.
-        enforceFederationOnly(packet);
+        // Room lock-down (opt-in): when remote-room traversal is disabled, reject any direct
+        // remote-origin packet aimed at a local MUC room. Done as early as possible (before the
+        // room processes it) so a remote join never takes effect.
+        enforceRoomTraversalPolicy(packet);
 
         // 1:1 private messaging: relay an outbound message bound for a MULTI-HOP peer user
         // through the federation overlay (and suppress native S2S). Runs before the MUC
@@ -136,13 +136,13 @@ public class FederationPacketInterceptor implements PacketInterceptor {
     // ── Force-federation gate ──────────────────────────────────────────────────
 
     /**
-     * Rejects a packet that originates on a remote server and targets a local MUC
-     * room, so the only way for a remote user to participate is through a federation
-     * room mapping. A no-op when the feature is disabled, when the target is not a
-     * local conference domain, or when the sender is local.
+     * When remote-room traversal is disabled, rejects a packet that originates on a remote server
+     * and targets a local MUC room, so the only way for a remote user to participate is through a
+     * federation room mapping. A no-op when traversal is allowed (the default), when the target is
+     * not a local conference domain, or when the sender is local.
      */
-    private void enforceFederationOnly(Packet packet) throws PacketRejectedException {
-        if (!FederationProperties.BLOCK_DIRECT_MUC.getValue()) return;
+    private void enforceRoomTraversalPolicy(Packet packet) throws PacketRejectedException {
+        if (FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()) return;  // traversal permitted
 
         String toDomain = packet.getTo().getDomain();
         if (!isConferenceDomain(toDomain)) return;
@@ -151,7 +151,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (from == null) return;
         if (!XMPPServer.getInstance().isRemote(from)) return;  // local users are allowed
 
-        Log.info("Blocking direct S2S MUC access from {} to {} — federation required",
+        Log.info("Blocking direct S2S MUC access from {} to {} — remote-room traversal disabled",
                  from, packet.getTo());
         throw new PacketRejectedException(
                 "Direct cross-server access to this room is disabled; use federation.");

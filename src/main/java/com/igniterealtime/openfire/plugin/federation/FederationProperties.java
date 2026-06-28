@@ -32,13 +32,15 @@ public final class FederationProperties {
         .build();
 
     /**
-     * Force-federation gate (on by default). When true, a remote user cannot join or address a
-     * local MUC room directly over a raw S2S connection — they must go through a federation room
-     * mapping. Federation's own virtual occupants are injected locally (never as real S2S presence)
-     * and are unaffected. Set false to allow direct cross-server room access alongside federation.
+     * Remote-room traversal gate (ON by default — permissive). When true, a user on another server
+     * may traverse the federation network to join or address a local MUC room directly over S2S,
+     * even when no federation room mapping exists — which is what lets users reach ad-hoc / private
+     * rooms that are never advertised. Federation's own virtual occupants are injected locally
+     * (never as real S2S presence) and are unaffected either way. Set false to lock rooms down so
+     * they are only reachable through an explicit federation mapping.
      */
-    public static final SystemProperty<Boolean> BLOCK_DIRECT_MUC = SystemProperty.Builder.ofType(Boolean.class)
-        .setKey("plugin.federation.directRemoteMucBlocked")
+    public static final SystemProperty<Boolean> ALLOW_REMOTE_ROOM_TRAVERSAL = SystemProperty.Builder.ofType(Boolean.class)
+        .setKey("plugin.federation.allowRemoteRoomTraversal")
         .setPlugin(PLUGIN)
         .setDefaultValue(true)
         .setDynamic(true)
