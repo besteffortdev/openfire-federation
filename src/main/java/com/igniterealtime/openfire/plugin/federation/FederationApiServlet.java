@@ -308,7 +308,28 @@ public class FederationApiServlet extends HttpServlet {
             }
             sb.append("]");
         }
-        sb.append("}");
+        sb.append("},");
+
+        // ── default-settings rules for newly-created rooms (by name pattern) ───
+        sb.append("\"roomDefaults\":[");
+        first = true;
+        for (com.igniterealtime.openfire.plugin.federation.RoomDefaultsManager.Rule r
+                : mgr.getRoomDefaults().getRules()) {
+            if (!first) sb.append(",");
+            first = false;
+            sb.append("{\"pattern\":\"").append(esc(r.pattern()))
+              .append("\",\"federated\":").append(r.federated())
+              .append(",\"autoAccept\":").append(r.autoAccept())
+              .append(",\"autoMap\":").append(r.autoMap())
+              .append(",\"visible\":[");
+            boolean fv = true;
+            for (String d : r.visible()) {
+                if (!fv) sb.append(","); fv = false;
+                sb.append("\"").append(esc(d)).append("\"");
+            }
+            sb.append("]}");
+        }
+        sb.append("]");
 
         sb.append("}");
         out.print(sb.toString());
@@ -446,6 +467,41 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 mgr.getRoomManager().setAutoAccept(jid.strip(), Boolean.parseBoolean(enable.strip()));
                 out.print("{\"ok\":true}");
+                return;
+            }
+            case "save-room-default": {
+                String pattern = req.getParameter("pattern");
+                if (pattern == null || pattern.isBlank()) {
+                    out.print("{\"error\":\"pattern required\"}");
+                    return;
+                }
+                boolean federated  = Boolean.parseBoolean(req.getParameter("federated"));
+                boolean autoAccept = Boolean.parseBoolean(req.getParameter("autoAccept"));
+                boolean autoMap    = Boolean.parseBoolean(req.getParameter("autoMap"));
+                java.util.List<String> visible = new java.util.ArrayList<>();
+                String vis = req.getParameter("visible");          // csv of domains, or "*" = all
+                if (vis != null) {
+                    for (String s : vis.split(",")) {
+                        if (!s.isBlank()) visible.add(s.strip().toLowerCase());
+                    }
+                }
+                mgr.getRoomDefaults().save(pattern.strip(), federated, autoAccept, visible, autoMap);
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "delete-room-default": {
+                String pattern = req.getParameter("pattern");
+                if (pattern == null || pattern.isBlank()) {
+                    out.print("{\"error\":\"pattern required\"}");
+                    return;
+                }
+                mgr.getRoomDefaults().delete(pattern.strip());
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "apply-room-defaults-now": {
+                int applied = mgr.applyDefaultsToAllRooms();
+                out.print("{\"ok\":true,\"applied\":" + applied + "}");
                 return;
             }
             case "unmap-room": {

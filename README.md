@@ -14,6 +14,9 @@ that have no direct link. End users do nothing special — they just join their 
 ## Features
 
 - **Per‑room federation** — flip a toggle to federate any local MUC room; no client changes.
+- **Room defaults by name** — define glob rules (e.g. `*_ext`) that auto-apply federation, visibility,
+  auto-accept and same-name auto-mapping to a room the moment it's created; most-specific pattern wins,
+  `*` is the catch-all. Two servers sharing a naming rule auto-link with zero clicks.
 - **Room mapping** — connect a local room to a room advertised by a peer; occupants and messages merge.
 - **Multi‑hop forwarding** — rooms federate across servers that aren't directly connected, relayed hop‑by‑hop.
 - **Dynamic routing** — a distance‑vector (Bellman‑Ford) routing table is learned automatically via gossip
