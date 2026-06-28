@@ -40,8 +40,55 @@ public class FederationPacketInterceptor implements PacketInterceptor {
      */
     private final FederationManager manager;
 
+    /**
+     * Suppresses the spurious local {@code not-allowed} (405) error that Openfire's IQ/Presence router
+     * synchronously bounces back to the sender whenever we relay-and-reject a stanza aimed at an
+     * overlay-reachable peer. The genuine reply arrives later over the overlay; without this, the
+     * client matches the faster local 405 first and the request fails (e.g. a multi-hop MUC-join
+     * disco surfacing as "not allowed" / "you do not have permission to create room").
+     *
+     * We record each relayed IQ/presence as {@code id|from|to} with a short expiry, then drop the
+     * first matching error bounce (which swaps from/to and keeps the id). Consume-once: any genuine
+     * error the room sends afterwards over the overlay is not matched and reaches the client normally.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> pendingBounces =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long BOUNCE_TTL_MS = 30_000L;
+
     public FederationPacketInterceptor(FederationManager manager) {
         this.manager = manager;
+    }
+
+    /** Records a just-relayed IQ/presence so its imminent local not-allowed bounce can be swallowed. */
+    private void rememberRelayedForBounce(Packet packet) {
+        if (!(packet instanceof IQ) && !(packet instanceof Presence)) return;
+        JID from = packet.getFrom();
+        JID to   = packet.getTo();
+        String id = packet.getID();
+        if (id == null || from == null || to == null) return;
+        long now = System.currentTimeMillis();
+        if (pendingBounces.size() > 256) {
+            pendingBounces.values().removeIf(exp -> exp < now);
+        }
+        pendingBounces.put(bounceKey(id, from.toString(), to.toString()), now + BOUNCE_TTL_MS);
+    }
+
+    /** True if {@code packet} is the local not-allowed bounce for a stanza we just relayed (consumed once). */
+    private boolean consumeSpuriousBounce(Packet packet) {
+        boolean isError = (packet instanceof IQ iq && iq.getType() == IQ.Type.error)
+                       || (packet instanceof Presence pr && pr.getType() == Presence.Type.error);
+        if (!isError) return false;
+        JID from = packet.getFrom();
+        JID to   = packet.getTo();
+        String id = packet.getID();
+        if (id == null || from == null || to == null) return false;
+        // The bounce swaps from/to relative to the relayed stanza but keeps the same id.
+        Long exp = pendingBounces.remove(bounceKey(id, to.toString(), from.toString()));
+        return exp != null && exp >= System.currentTimeMillis();
+    }
+
+    private String bounceKey(String id, String from, String to) {
+        return id + '|' + from + '|' + to;
     }
 
     @Override
@@ -51,6 +98,13 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         if (packet.getTo() == null) return;
         if (FederationStanzaFactory.isMarkedAsForwarded(packet)) return;
+
+        // Swallow the spurious local not-allowed bounce Openfire generates for a stanza we relayed over
+        // the overlay (the real reply rides the overlay home). Done first so the bounce never reaches
+        // the client. The error type means the router does not bounce again for this rejection.
+        if (consumeSpuriousBounce(packet)) {
+            throw new PacketRejectedException("Suppressed spurious not-allowed bounce for an overlay-relayed stanza");
+        }
 
         // Room lock-down (opt-in): when remote-room traversal is disabled, reject any direct
         // remote-origin packet aimed at a local MUC room. Done as early as possible (before the
@@ -235,6 +289,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             } else if (pres.getType() == Presence.Type.unsubscribed) {
                 manager.removeRemoteSubscriber(pres.getFrom(), to);
             }
+            rememberRelayedForBounce(pres);
             throw new PacketRejectedException("Relayed presence over federation overlay to " + toDomain);
         }
     }
@@ -260,6 +315,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         stampFrom(iq, session);
         if (manager.forwardDirectIq(iq)) {
             Log.info("Relayed 1:1 IQ {} {} -> {} over overlay (multi-hop)", iq.getType(), iq.getFrom(), to);
+            rememberRelayedForBounce(iq);
             throw new PacketRejectedException("Relayed IQ over federation overlay to " + toDomain);
         }
     }
@@ -277,12 +333,18 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
 
         JID to = packet.getTo();
-        if (to == null || to.getNode() == null) return;                 // must be a room JID room@conf[/nick]
+        if (to == null) return;
         String toDomain = to.getDomain();
         if (XMPPServer.getInstance().isLocal(to)) return;               // local target — not ours
         if (isConferenceDomain(toDomain)) return;                       // a LOCAL conference — handled elsewhere
         if (manager.getRoutingTable().findNextHop(toDomain).isPresent()) return; // a known server (user JID) — 1:1 relay owns it
 
+        // Map the target component domain (e.g. conference.<peer>) to its host server and relay ANYTHING
+        // aimed at a multi-hop peer's component over the overlay — room-addressed (room@conf[/nick]) AND
+        // service-addressed (the bare conf domain, e.g. a client's disco#info on the MUC service before
+        // it joins) AND bare-room directed presence (no nick). Native S2S cannot reach a multi-hop peer's
+        // subdomain in a chain topology, so an un-relayed stanza just stalls there (the client then sees
+        // "No response from server" and never gets to send its join presence).
         String serverDomain = mucServerDomain(toDomain);
         if (serverDomain == null) return;
         if (!isMultiHopPeer(serverDomain)) return;                      // unknown, or a direct peer (native S2S)
@@ -290,7 +352,6 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         stampFrom(packet, session);
         boolean relayed;
         if (packet instanceof Presence pres) {
-            if (to.getResource() == null) return;                       // MUC join/leave/status carries a nick
             relayed = manager.forwardDirectPresence(pres, serverDomain);
         } else if (packet instanceof Message msg) {
             if (msg.getType() == Message.Type.error) return;
@@ -303,6 +364,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (relayed) {
             Log.info("Relayed remote-MUC {} {} -> {} over overlay (host {} multi-hop)",
                      packet.getClass().getSimpleName(), packet.getFrom(), to, serverDomain);
+            rememberRelayedForBounce(packet);
             throw new PacketRejectedException("Relayed remote MUC stanza over federation overlay to " + serverDomain);
         }
     }
