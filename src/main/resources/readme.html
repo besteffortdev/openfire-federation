@@ -180,6 +180,11 @@
         <em>Trust new cert</em>. Renewals that reuse the key pass silently; a key rotation raises the flag. Needs a
         TLS‑secured S2S link — a plain dialback link presents no certificate and is not pinned. Pre‑1.7.13 pins
         (top‑of‑chain cert hashes) upgrade in place on the next sighting.</li>
+    <li><strong>Sender‑identity (anti‑spoofing) checks.</strong> Every stanza forwarded over the overlay has its
+        claimed <code>from</code> validated at each hop: no peer may deliver a stanza pretending to come from
+        <em>this server's own users</em>, and an untrusted peer may only speak for itself or for servers reached
+        <em>through</em> it — a forged identity from the wrong direction is dropped and logged with a
+        <code>SECURITY:</code> tag.</li>
     <li><strong>Per‑room visibility.</strong> Each federated room has a <em>Visible</em> control listing the servers
         allowed to see it — pick from the routable peers, or add a server manually before it is reachable (the room
         advertises to it automatically once a route appears). A newly‑federated room defaults to <strong>visible to

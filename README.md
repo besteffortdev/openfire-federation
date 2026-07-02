@@ -160,6 +160,10 @@ The federation trust boundary is enforced at several points:
   silently, while a key rotation raises the flag for review. Requires a TLS‑secured S2S link (a plain
   server‑dialback link presents no certificate, so nothing is pinned). Pins made by versions before 1.7.13
   (top‑of‑chain cert hashes) are upgraded in place on the next sighting.
+- **Sender‑identity (anti‑spoofing) checks.** Every stanza forwarded over the overlay has its claimed `from`
+  validated at each hop: no peer may deliver a stanza pretending to come from **this server's own users**, and an
+  **untrusted** peer may only speak for itself or for servers reached *through* it — a forged identity from the
+  wrong direction is dropped and logged with a `SECURITY:` tag.
 - **Per‑room visibility.** Each federated room has a **Visible** control (next to its toggle) listing the servers
   allowed to see it — chosen from the routable peers, plus servers you can **add manually before they're reachable**
   (the room advertises to them automatically once a route appears). A newly‑federated room defaults to **visible to
