@@ -173,11 +173,13 @@
         <br><strong>Untrusted by default:</strong> adding a peer under a different parent domain (last two DNS
         labels, e.g. <code>example.net</code>; adjust with <code>plugin.federation.trustDomainLabels</code>) ticks
         <em>Untrusted</em> automatically; same‑parent peers default trusted.</li>
-    <li><strong>S2S certificate pinning (trust‑on‑first‑use).</strong> The first time a peer's S2S link comes up,
-        the SHA‑256 of the top‑of‑chain certificate it presents is pinned. If it later changes (a server re‑created
-        under the same domain name presents a different cert/CA), the peer is auto‑marked untrusted and flagged
-        <em>⚠ cert changed</em>; federation toward it is blocked until you click <em>Trust new cert</em>. Needs a
-        TLS‑secured S2S link — a plain dialback link presents no certificate and is not pinned.</li>
+    <li><strong>S2S key pinning (trust‑on‑first‑use).</strong> The first time a peer's S2S link comes up,
+        the SHA‑256 of the leaf certificate's <strong>public key</strong> (SPKI) is pinned. If the key later
+        changes (a server re‑created under the same domain name — even with a cert from the same CA), the peer is
+        auto‑marked untrusted and flagged <em>⚠ cert changed</em>; federation toward it is blocked until you click
+        <em>Trust new cert</em>. Renewals that reuse the key pass silently; a key rotation raises the flag. Needs a
+        TLS‑secured S2S link — a plain dialback link presents no certificate and is not pinned. Pre‑1.7.13 pins
+        (top‑of‑chain cert hashes) upgrade in place on the next sighting.</li>
     <li><strong>Per‑room visibility.</strong> Each federated room has a <em>Visible</em> control listing the servers
         allowed to see it — pick from the routable peers, or add a server manually before it is reachable (the room
         advertises to it automatically once a route appears). A newly‑federated room defaults to <strong>visible to

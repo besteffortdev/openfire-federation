@@ -587,6 +587,10 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
 
+        // Origin (from-spoofing) gate. rejectLocalClaim=false: trusted diamond/hub echoes of our
+        // own users are legitimate here and neutralized by inject's self-echo guards instead.
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "muc-forward", false)) return;
+
         // Untrusted-peer exposure gate: an untrusted peer may only move traffic toward a server
         // it has been exposed to, whether we inject the room here or relay it onward. The target
         // room is homed on finalDest (or on us when finalDest is absent/local).
@@ -677,6 +681,9 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
 
+        // Origin (from-spoofing) gate — see payloadOriginOk. Applied per hop (relay AND deliver).
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "direct-forward", true)) return;
+
         if (finalDest == null || localDomain.equals(finalDest)) {
             // We are the destination — deliver to the local recipient (bypasses interceptors, so the
             // recipient's reply is a fresh outbound message caught and relayed back symmetrically).
@@ -736,6 +743,10 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("presence-forward from {} has no presence payload", fromDomain);
             return;
         }
+
+        // Origin (from-spoofing) gate — the critical one: a forged `subscribed`/presence here
+        // would flow straight into Openfire's roster engine at the destination.
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "presence-forward", true)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             Presence pres = new Presence(payloadEl.createCopy());
@@ -804,6 +815,10 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("iq-forward from {} has no iq payload", fromDomain);
             return;
         }
+
+        // Origin (from-spoofing) gate — a forged `set` IQ delivered to the router could mutate
+        // server-side state (roster, vCard) as the claimed user.
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "iq-forward", true)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             IQ iq = new IQ(payloadEl.createCopy());
@@ -1296,6 +1311,80 @@ public class FederationIQHandler extends IQHandler {
      */
     private boolean isFederatedLocalRoom(String roomJid) {
         return roomJid != null && manager.getRoomManager().isFederated(roomJid);
+    }
+
+    /**
+     * Origin check for overlay-forwarded payloads — the overlay's substitute for native S2S's
+     * stream-level {@code from} validation (a real S2S stream may only carry stanzas from its
+     * authenticated domain; the overlay would otherwise deliver any embedded {@code from} as-is).
+     *
+     * <p>Two tiers:
+     * <ul>
+     *   <li><b>Local claim (any sender, when {@code rejectLocalClaim}):</b> a payload claiming to
+     *       originate from THIS server's domain or one of its MUC services is dropped — no
+     *       legitimate inbound 1:1 forward carries our own users as sender. Not enforced for
+     *       trusted muc-forward ({@code rejectLocalClaim=false}): on cyclic/diamond topologies a
+     *       local user's own room traffic can legitimately echo back through a hub fan-out, and
+     *       the self-echo guards in injectMessage/injectPresence already neutralize it silently.</li>
+     *   <li><b>Route-back (untrusted senders only):</b> the claimed origin's host domain must be
+     *       the peer itself, a destination routed THROUGH that peer, or not routable here at all
+     *       (cross-edge traffic where routes are exposure-filtered — unverifiable by design and
+     *       bounded by the exposure gates). An origin we route via a DIFFERENT neighbour is a
+     *       forged our-side identity and is dropped. NOT applied to trusted peers: asymmetric DV
+     *       routes (diamonds) and hub fan-out make legitimate trusted traffic arrive off the
+     *       origin's route, so a strict check there would break real flows — the trusted mesh
+     *       remains a documented trust boundary.</li>
+     * </ul>
+     */
+    private boolean payloadOriginOk(String fromDomain, String payloadFrom, String what,
+                                    boolean rejectLocalClaim) {
+        if (payloadFrom == null || payloadFrom.isEmpty()) return true;   // no identity claimed
+        boolean untrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
+        String domain;
+        try { domain = new JID(payloadFrom).getDomain(); } catch (Exception e) { domain = null; }
+        if (domain == null || domain.isEmpty()) {
+            if (!untrusted) return true;                                 // preserve trusted behaviour
+            Log.warn("SECURITY: dropping {} from untrusted peer {} — unparseable payload from '{}'",
+                     what, fromDomain, payloadFrom);
+            return false;
+        }
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String host = originHost(domain, fromDomain, localDomain);
+        if (host.equals(localDomain) || isLocalConferenceDomain(domain)) {
+            if (rejectLocalClaim || untrusted) {
+                Log.warn("SECURITY: dropping {} from {} — payload from '{}' claims to originate on "
+                       + "THIS server; a peer never speaks for our own users", what, fromDomain, payloadFrom);
+                return false;
+            }
+            return true;   // trusted muc-forward echo — inject's self-echo guard handles it
+        }
+        if (!untrusted) return true;
+        if (host.equals(fromDomain)) return true;                        // the peer's own users
+        java.util.Optional<String> hop = manager.getRoutingTable().findNextHop(host);
+        if (hop.isEmpty()) return true;   // not routable here (exposure-filtered edge) — unverifiable
+        if (hop.get().equals(fromDomain)) return true;                   // origin is behind the sender
+        Log.warn("SECURITY: dropping {} from untrusted peer {} — payload from '{}' claims origin {} "
+               + "which routes via {} (forged identity from the wrong direction)",
+                 what, fromDomain, payloadFrom, host, hop.get());
+        return false;
+    }
+
+    /**
+     * The host SERVER a payload origin domain belongs to: the domain itself when it is the
+     * sender, local, or a known routing destination; else its parent label-stripped domain
+     * ({@code conference.X} → {@code X}) when THAT is known — components are never routing
+     * destinations themselves. Falls back to the domain unchanged (then unroutable → allowed).
+     */
+    private String originHost(String domain, String fromDomain, String localDomain) {
+        if (domain.equals(fromDomain) || domain.equals(localDomain)
+                || manager.getRoutingTable().isReachable(domain)) return domain;
+        int dot = domain.indexOf('.');
+        if (dot > 0 && dot < domain.length() - 1) {
+            String parent = domain.substring(dot + 1);
+            if (parent.equals(fromDomain) || parent.equals(localDomain)
+                    || manager.getRoutingTable().isReachable(parent)) return parent;
+        }
+        return domain;
     }
 
     /**

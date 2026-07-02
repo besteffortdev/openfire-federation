@@ -1707,12 +1707,22 @@ public class FederationManager {
         return out;
     }
 
-    // ── Trust-on-first-use: foreign-domain default + S2S cert pinning ───────────
+    // ── Trust-on-first-use: foreign-domain default + S2S key pinning ────────────
     //
     // A peer whose PARENT domain differs from ours is treated as a stranger and defaults to
-    // untrusted on add. Separately, the top-of-chain cert each peer presents on the S2S link is
-    // pinned on first sighting; if it later changes (a server re-created under the same domain
-    // name presents a different cert/CA) the peer is auto-untrusted and the admin is alerted.
+    // untrusted on add. Separately, the PUBLIC KEY of the leaf cert each peer presents on the
+    // S2S link (its SPKI, stored as "spki:<sha256>") is pinned on first sighting; if it later
+    // changes (a server re-created under the same domain name presents a different key) the
+    // peer is auto-untrusted and the admin is alerted.
+    //
+    // Why the leaf SPKI and not the top-of-chain cert (the pre-1.7.13 scheme): pinning the
+    // chain top pins the CA — any impersonator with a cert from the SAME public CA (e.g.
+    // Let's Encrypt) passes unnoticed, which defeats the check's purpose. The leaf's public
+    // key identifies the actual server: it survives renewals that reuse the key, and a
+    // re-created server (new key) trips the alarm even under the same CA. Trade-off: a
+    // renewal that ROTATES the key (certbot's default) also trips it — the admin clears it
+    // with the existing "Trust new cert" button. Legacy cert-hash pins are upgraded in place
+    // on the next sighting when the old hash still matches.
 
     /** Number of trailing DNS labels that define the "parent" (registrable) domain. */
     private int trustDomainLabels() {
@@ -1733,14 +1743,36 @@ public class FederationManager {
         return !parentDomain(peerDomain).equals(parentDomain(local));
     }
 
-    /** SHA-256 (lowercase hex) of a certificate's encoded form, or null on failure. */
-    private static String sha256Hex(java.security.cert.Certificate cert) {
+    /** SHA-256 (lowercase hex) of arbitrary bytes, or null on failure. */
+    private static String sha256Hex(byte[] data) {
         try {
-            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(cert.getEncoded());
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(data);
             StringBuilder sb = new StringBuilder(d.length * 2);
             for (byte b : d) sb.append(Character.forDigit((b >> 4) & 0xF, 16))
                                .append(Character.forDigit(b & 0xF, 16));
             return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** SHA-256 (lowercase hex) of a certificate's encoded form (legacy pin format), or null. */
+    private static String sha256Hex(java.security.cert.Certificate cert) {
+        try {
+            return sha256Hex(cert.getEncoded());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Prefix marking a pin in the leaf-SPKI format (vs a legacy bare top-of-chain cert hash). */
+    private static final String SPKI_PREFIX = "spki:";
+
+    /** {@code "spki:<sha256>"} of the LEAF certificate's SubjectPublicKeyInfo, or null on failure. */
+    private static String leafSpkiFp(java.security.cert.Certificate[] chain) {
+        try {
+            String hex = sha256Hex(chain[0].getPublicKey().getEncoded());
+            return hex == null ? null : SPKI_PREFIX + hex;
         } catch (Exception e) {
             return null;
         }
@@ -1767,15 +1799,17 @@ public class FederationManager {
     }
 
     /**
-     * Observes the peer's current S2S cert and applies TOFU pinning: pins on first sighting,
-     * accepts a matching cert, and on a CHANGED cert auto-untrusts the peer and raises an alert.
-     * Called from the poll loop for each REACHABLE peer. No-op when no certificate is available
-     * (e.g. a plain server-dialback link with no TLS).
+     * Observes the peer's current S2S identity and applies TOFU pinning on the LEAF cert's
+     * public key (SPKI): pins on first sighting, accepts a matching key, and on a CHANGED key
+     * auto-untrusts the peer and raises an alert. A legacy (pre-1.7.13) top-of-chain cert-hash
+     * pin that still matches is upgraded to the SPKI format in place — same server, new scheme,
+     * no alarm. Called from the poll loop for each REACHABLE peer. No-op when no certificate is
+     * available (e.g. a plain server-dialback link with no TLS).
      */
     public void observePeerCertificate(String domain) {
         java.security.cert.Certificate[] chain = peerCertChain(domain);
-        if (chain == null) return;                       // no TLS cert visible — nothing to pin
-        String fp = sha256Hex(chain[chain.length - 1]);  // top-of-chain (closest to root presented)
+        if (chain == null || chain.length == 0) return;   // no TLS cert visible — nothing to pin
+        String fp = leafSpkiFp(chain);
         if (fp == null) return;
         peerRegistry.setLastSeenCertFp(domain, fp);
 
@@ -1783,20 +1817,30 @@ public class FederationManager {
         if (pinned == null || pinned.isBlank()) {
             peerRegistry.setPinnedCertFp(domain, fp);
             peerRegistry.setCertMismatch(domain, false);
-            Log.info("Pinned S2S cert for {} ({}…)", domain, fp.substring(0, Math.min(12, fp.length())));
+            Log.info("Pinned S2S leaf key for {} ({}…)", domain, abbrevFp(fp));
             return;
         }
         if (pinned.equals(fp)) {
             peerRegistry.setCertMismatch(domain, false);
             return;
         }
-        // Cert changed under the same domain name — possible impersonation. Act once on transition.
+        // Legacy pin (bare SHA-256 of the top-of-chain CERT): if it still matches what the peer
+        // presents, this is the same server observed under the new scheme — upgrade the pin.
+        if (!pinned.startsWith(SPKI_PREFIX)) {
+            String legacy = sha256Hex(chain[chain.length - 1]);
+            if (pinned.equals(legacy)) {
+                peerRegistry.setPinnedCertFp(domain, fp);
+                peerRegistry.setCertMismatch(domain, false);
+                Log.info("Upgraded S2S pin for {} from legacy cert-hash to leaf-SPKI ({}…)",
+                         domain, abbrevFp(fp));
+                return;
+            }
+        }
+        // Key changed under the same domain name — possible impersonation. Act once on transition.
         if (!peerRegistry.isCertMismatch(domain)) {
             peerRegistry.setCertMismatch(domain, true);
-            Log.warn("SECURITY: S2S cert for {} changed (pinned={}…, seen={}…) — auto-untrusting; "
-                   + "admin must accept the new cert to restore", domain,
-                     pinned.substring(0, Math.min(12, pinned.length())),
-                     fp.substring(0, Math.min(12, fp.length())));
+            Log.warn("SECURITY: S2S identity key for {} changed (pinned={}…, seen={}…) — auto-untrusting; "
+                   + "admin must accept the new key to restore", domain, abbrevFp(pinned), abbrevFp(fp));
             if (!peerRegistry.isUntrusted(domain)) {
                 peerRegistry.setUntrusted(domain, true);
                 applyLocalTrustChange(domain);
@@ -1804,7 +1848,13 @@ public class FederationManager {
         }
     }
 
-    /** Admin accepted a changed cert: re-pin the last observed fingerprint and clear the alert. */
+    /** First 12 hex chars of a fingerprint for logging, with the format prefix stripped. */
+    private static String abbrevFp(String fp) {
+        String hex = fp.startsWith(SPKI_PREFIX) ? fp.substring(SPKI_PREFIX.length()) : fp;
+        return hex.substring(0, Math.min(12, hex.length()));
+    }
+
+    /** Admin accepted a changed key: re-pin the last observed fingerprint and clear the alert. */
     public void acceptNewCertificate(String domain) {
         String fp = peerRegistry.getPeer(domain).map(PeerServer::getLastSeenCertFp).orElse(null);
         if (fp == null || fp.isBlank()) {
@@ -1813,7 +1863,7 @@ public class FederationManager {
         }
         peerRegistry.setPinnedCertFp(domain, fp);
         peerRegistry.setCertMismatch(domain, false);
-        Log.info("Admin accepted new S2S cert for {} ({}…)", domain, fp.substring(0, Math.min(12, fp.length())));
+        Log.info("Admin accepted new S2S identity key for {} ({}…)", domain, abbrevFp(fp));
     }
 
     // ── Link-level trust negotiation ────────────────────────────────────────────

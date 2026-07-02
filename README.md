@@ -151,12 +151,15 @@ The federation trust boundary is enforced at several points:
     server's (the last two DNS labels, e.g. `example.net`; adjustable via `plugin.federation.trustDomainLabels`),
     the *Untrusted* box is ticked automatically — a stranger shares nothing until you choose what it may see.
     Same‑parent peers default trusted.
-- **S2S certificate pinning (trust‑on‑first‑use).** The first time a peer's S2S link comes up, the plugin pins the
-  SHA‑256 of the top‑of‑chain certificate it presents. If that certificate later **changes** — e.g. a server is
-  re‑created under the same domain name and presents a different cert/CA — the peer is **auto‑marked untrusted** and
-  flagged in the Peers list (*⚠ cert changed*); federation toward it is blocked until you review and click
-  *Trust new cert* to pin the new one. Requires a TLS‑secured S2S link (a plain server‑dialback link presents no
-  certificate, so nothing is pinned).
+- **S2S key pinning (trust‑on‑first‑use).** The first time a peer's S2S link comes up, the plugin pins the
+  SHA‑256 of the **public key** (SPKI) of the leaf certificate it presents. If that key later **changes** — e.g. a
+  server is re‑created under the same domain name with a new key, even one signed by the same CA — the peer is
+  **auto‑marked untrusted** and flagged in the Peers list (*⚠ cert changed*); federation toward it is blocked until
+  you review and click *Trust new cert* to pin the new one. Pinning the key (rather than the CA chain) means an
+  impersonator with a certificate from the same public CA is still caught; renewals that reuse the key pass
+  silently, while a key rotation raises the flag for review. Requires a TLS‑secured S2S link (a plain
+  server‑dialback link presents no certificate, so nothing is pinned). Pins made by versions before 1.7.13
+  (top‑of‑chain cert hashes) are upgraded in place on the next sighting.
 - **Per‑room visibility.** Each federated room has a **Visible** control (next to its toggle) listing the servers
   allowed to see it — chosen from the routable peers, plus servers you can **add manually before they're reachable**
   (the room advertises to them automatically once a route appears). A newly‑federated room defaults to **visible to
