@@ -431,5 +431,19 @@ public final class FederationStanzaFactory {
         return packet.getElement().element(NS_ORIGIN_ELEMENT) != null;
     }
 
+    /**
+     * True when {@code domain} appears as an ELEMENT of the comma-separated {@code via} trail.
+     * A plain {@code String.contains} false-positives when one server's domain is a substring
+     * of another's (e.g. {@code xmpp.example.net} inside {@code 2503-xmpp.example.net}), which
+     * would silently drop legitimate traffic or skip a peer during relay.
+     */
+    public static boolean viaContains(String via, String domain) {
+        if (via == null || via.isEmpty() || domain == null) return false;
+        for (String d : via.split(",")) {
+            if (domain.equals(d.strip())) return true;
+        }
+        return false;
+    }
+
     private static final String NS_ORIGIN_ELEMENT = "fed-origin";
 }

@@ -1133,7 +1133,7 @@ public class FederationManager {
                                        List<FederatedRoom> rooms, String via) {
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getDomain().equals(excludeDomain)) continue;
-            if (via != null && via.contains(peer.getDomain())) continue;
+            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 // Untrusted-peer exposure + per-room visibility: relay only the allowed subset.
                 // Always send the filtered list, EVEN WHEN EMPTY: a peer that was previously on the
@@ -1159,26 +1159,60 @@ public class FederationManager {
     // ── User directory + 1:1 message relay ─────────────────────────────────────
 
     /**
+     * Snapshot of the last directory broadcast to ALL peers (sorted by JID for stable equality),
+     * so presence events and the S2S poll tick don't re-gossip an unchanged directory — each
+     * broadcast is relayed onward by every receiving hop, so redundant sends amplify across the
+     * mesh. Null = nothing broadcast yet (always send once). A peer that (re)connects is caught
+     * up via {@link #publishDirectoryTo}, which bypasses this guard.
+     */
+    private volatile List<UserDirectory.UserPresence> lastPublishedDirectory = null;
+    /** Same guard for {@link #pushBookmarks} broadcasts. */
+    private volatile List<UserDirectory.UserPresence> lastPushedBookmarks = null;
+
+    /** The current directory payload: online users when {@code enabled}, else an empty (withdrawal) list. */
+    private List<UserDirectory.UserPresence> directorySnapshot(boolean enabled) {
+        if (!enabled) return Collections.emptyList();
+        List<UserDirectory.UserPresence> users = new ArrayList<>(userDirectory.localOnlineUsers());
+        users.sort(java.util.Comparator.comparing(UserDirectory.UserPresence::jid));
+        return users;
+    }
+
+    /**
      * Publishes our online-user directory to every trusted, reachable peer when publishing is
      * enabled (default OFF). When publishing is disabled we send an EMPTY list once so peers that
      * previously cached our users withdraw them. Untrusted peers never receive the directory.
-     * Cheap and idempotent — safe to call from the S2S poll tick and on peer-up.
+     * Skips the broadcast entirely when nothing changed since the last one, so it is safe (and
+     * cheap) to call from every presence event and the S2S poll tick.
      */
     public void publishDirectory() {
-        boolean publish = FederationProperties.DIRECTORY_PUBLISH.getValue();
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        Collection<UserDirectory.UserPresence> users =
-                publish ? userDirectory.localOnlineUsers() : Collections.emptyList();
+        List<UserDirectory.UserPresence> users =
+                directorySnapshot(FederationProperties.DIRECTORY_PUBLISH.getValue());
+        if (users.equals(lastPublishedDirectory)) return;   // unchanged since last broadcast
+        lastPublishedDirectory = users;
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
-            if (isUntrusted(peer.getDomain())) continue;   // never expose our user list to an untrusted edge
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.userDirectory(
-                              peer.getDomain(), users, localDomain, null));
-            } catch (Exception e) {
-                Log.warn("Failed to send user-directory to {}: {}", peer.getDomain(), e.getMessage());
-            }
+            sendDirectoryTo(peer.getDomain(), users);
+        }
+    }
+
+    /**
+     * Sends the current directory to ONE peer regardless of the change guard — used on peer-up,
+     * where the peer's cache is empty even though our directory hasn't changed. No-op unless
+     * publishing is enabled (a fresh peer has nothing to withdraw).
+     */
+    public void publishDirectoryTo(String toDomain) {
+        if (!FederationProperties.DIRECTORY_PUBLISH.getValue()) return;
+        sendDirectoryTo(toDomain, directorySnapshot(true));
+    }
+
+    private void sendDirectoryTo(String toDomain, Collection<UserDirectory.UserPresence> users) {
+        if (isUntrusted(toDomain)) return;   // never expose our user list to an untrusted edge
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        try {
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.userDirectory(toDomain, users, localDomain, null));
+        } catch (Exception e) {
+            Log.warn("Failed to send user-directory to {}: {}", toDomain, e.getMessage());
         }
     }
 
@@ -1201,7 +1235,7 @@ public class FederationManager {
             if (peer.getDomain().equals(fromDomain)) continue;
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
             if (isUntrusted(peer.getDomain())) continue;
-            if (via != null && via.contains(peer.getDomain())) continue;
+            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.userDirectory(
@@ -1218,34 +1252,67 @@ public class FederationManager {
      * Pushes this server's connected clients to every trusted, reachable peer as a {@code
      * bookmark-push} when {@link FederationProperties#BOOKMARK_PUSH} is enabled. When disabled we
      * send an EMPTY list once so peers withdraw the bookmarks they previously injected for us.
-     * Untrusted peers never receive it. Cheap and idempotent — safe from the S2S tick and on peer-up.
+     * Untrusted peers never receive it. Skips the broadcast when nothing changed since the last
+     * one (same guard as {@link #publishDirectory}), so it is safe from every presence event and
+     * the S2S poll tick.
      */
     public void pushBookmarks() {
-        boolean enabled = FederationProperties.BOOKMARK_PUSH.getValue();
-        sendBookmarks(enabled ? userDirectory.localOnlineUsers() : Collections.emptyList());
+        List<UserDirectory.UserPresence> users =
+                bookmarkSnapshot(FederationProperties.BOOKMARK_PUSH.getValue());
+        if (users.equals(lastPushedBookmarks)) return;   // unchanged since last broadcast
+        lastPushedBookmarks = users;
+        sendBookmarks(users);
+    }
+
+    /**
+     * Bookmark payloads are consumed by JID only (receivers inject one bookmark per JID and ignore
+     * presence), so strip show/status before comparing/sending — otherwise every status change of
+     * any local user would re-broadcast the whole bookmark set across the mesh.
+     */
+    private List<UserDirectory.UserPresence> bookmarkSnapshot(boolean enabled) {
+        return directorySnapshot(enabled).stream()
+                .map(u -> new UserDirectory.UserPresence(u.jid(), "", ""))
+                .collect(Collectors.toList());
     }
 
     /**
      * One-shot advertisement of our current connected clients regardless of the auto-push toggle —
      * backs the admin "Push now" button. Peers inject the bookmarks; nothing is withdrawn.
+     * Bypasses the change guard (that is the point of a manual push) but refreshes its snapshot so
+     * the next automatic push compares against what peers actually hold.
      */
     public void pushBookmarksNow() {
-        sendBookmarks(userDirectory.localOnlineUsers());
+        List<UserDirectory.UserPresence> users = bookmarkSnapshot(true);
+        lastPushedBookmarks = users;
+        sendBookmarks(users);
+    }
+
+    /**
+     * Sends the current bookmark set to ONE peer regardless of the change guard — used on peer-up,
+     * where the peer holds nothing for us even though our client list hasn't changed. No-op unless
+     * auto-push is enabled (a fresh peer has nothing to withdraw).
+     */
+    public void pushBookmarksTo(String toDomain) {
+        if (!FederationProperties.BOOKMARK_PUSH.getValue()) return;
+        sendBookmarksTo(toDomain, bookmarkSnapshot(true));
     }
 
     /** Sends a bookmark-push (the given user set; empty = withdrawal) to every trusted, reachable peer. */
     private void sendBookmarks(Collection<UserDirectory.UserPresence> users) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
-            if (isUntrusted(peer.getDomain())) continue;   // never advertise our clients to an untrusted edge
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.bookmarkPush(
-                              peer.getDomain(), users, localDomain, null));
-            } catch (Exception e) {
-                Log.warn("Failed to send bookmark-push to {}: {}", peer.getDomain(), e.getMessage());
-            }
+            sendBookmarksTo(peer.getDomain(), users);
+        }
+    }
+
+    private void sendBookmarksTo(String toDomain, Collection<UserDirectory.UserPresence> users) {
+        if (isUntrusted(toDomain)) return;   // never advertise our clients to an untrusted edge
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        try {
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.bookmarkPush(toDomain, users, localDomain, null));
+        } catch (Exception e) {
+            Log.warn("Failed to send bookmark-push to {}: {}", toDomain, e.getMessage());
         }
     }
 
@@ -1269,7 +1336,7 @@ public class FederationManager {
             if (peer.getDomain().equals(fromDomain)) continue;
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
             if (isUntrusted(peer.getDomain())) continue;
-            if (via != null && via.contains(peer.getDomain())) continue;
+            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.bookmarkPush(

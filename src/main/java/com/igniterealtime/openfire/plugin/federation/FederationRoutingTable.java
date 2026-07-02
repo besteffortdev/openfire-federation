@@ -58,6 +58,10 @@ public class FederationRoutingTable {
 
             String dest = remote.destination();
             if (dest.equals(localDomain)) continue;
+            // A peer never legitimately advertises a route to ITSELF (split-horizon omits it);
+            // accepting one would let a misbehaving peer overwrite its own direct entry, which
+            // is owned by addDirectPeer/removePeer.
+            if (dest.equals(fromPeer)) continue;
             inUpdate.add(dest);
             RouteEntry current = table.get(dest);
 
@@ -66,6 +70,18 @@ public class FederationRoutingTable {
                 learnedSet.add(dest);
                 changed.add(dest);
                 Log.debug("Routing: {} via {} in {} hop(s)", dest, fromPeer, candidate);
+            } else if (current.nextHop().equals(fromPeer)) {
+                // The route's CURRENT next hop is authoritative for its own metric: accept even a
+                // WORSE hop count (the path behind it lengthened). Without this the table keeps the
+                // stale better metric forever, so a genuinely shorter alternate via another peer can
+                // never win the `candidate < current.hops()` comparison. An unchanged metric still
+                // rewrites the entry so updatedAt stays fresh, but is not gossiped as a change.
+                table.put(dest, new RouteEntry(dest, fromPeer, candidate));
+                learnedSet.add(dest);
+                if (candidate != current.hops()) {
+                    changed.add(dest);
+                    Log.debug("Routing: {} via {} metric {} → {} hop(s)", dest, fromPeer, current.hops(), candidate);
+                }
             }
         }
 

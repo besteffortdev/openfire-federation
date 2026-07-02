@@ -186,6 +186,16 @@ public class FederationIQHandler extends IQHandler {
             // are only known to us — no one else learns about them until the next triggered
             // update fires (which requires the new peer to have something new to offer us).
             manager.propagateRoutingToAll(fromDomain);
+            // Run the SAME peer-up sequence as S2SMonitor.onPeerUp. Marking the peer REACHABLE
+            // here means the monitor's poll sees no transition and onPeerUp never fires, so
+            // without these the side that learns of the link via an inbound announce (a ~10s
+            // race it loses about half the time) would never pull the peer's state, re-sync
+            // mapped room rosters, or revive PENDING_OUT mapping requests toward it.
+            manager.solicitRouting(fromDomain);
+            manager.resyncMappedDestinations(Set.of(fromDomain));
+            manager.resendPendingRequests(fromDomain);
+            manager.publishDirectoryTo(fromDomain);
+            manager.pushBookmarksTo(fromDomain);
         } else if (!isReply) {
             // Steady-state keepalive: send one reply back so the reverse S2S socket —
             // which our own keepalive timer cannot reach (separate per-direction sockets,
@@ -293,7 +303,7 @@ public class FederationIQHandler extends IQHandler {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         // Drop if this server already forwarded this advertisement (loop guard).
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.debug("room-advertisement loop detected (via={}), dropping", via);
             return;
         }
@@ -566,7 +576,7 @@ public class FederationIQHandler extends IQHandler {
         String src         = el.attributeValue("src", fromDomain);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("muc-forward loop detected (via={}), dropping", via);
             return;
         }
@@ -656,7 +666,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("direct-forward loop detected (via={}), dropping", via);
             return;
         }
@@ -716,7 +726,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("presence-forward loop detected (via={}), dropping", via);
             return;
         }
@@ -784,7 +794,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("iq-forward loop detected (via={}), dropping", via);
             return;
         }
@@ -891,7 +901,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.debug("user-directory loop detected (via={}), dropping", via);
             return;
         }
@@ -925,7 +935,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.debug("bookmark-push loop detected (via={}), dropping", via);
             return;
         }

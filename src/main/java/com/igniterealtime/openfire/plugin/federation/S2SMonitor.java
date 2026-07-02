@@ -381,9 +381,11 @@ public class S2SMonitor {
         // re-acceptance, or requests queued while it was down).
         federationManager.resendPendingRequests(domain);
         // Publish our online-user directory to the freshly-reachable peer (no-op unless enabled).
-        federationManager.publishDirectory();
+        // Per-peer variant: the broadcast form skips when our directory is unchanged, but this
+        // peer's cache is empty and needs the current state regardless.
+        federationManager.publishDirectoryTo(domain);
         // Advertise our connected clients as XEP-0048 bookmarks (no-op unless enabled).
-        federationManager.pushBookmarks();
+        federationManager.pushBookmarksTo(domain);
     }
 
     private void onPeerDown(String domain) {
