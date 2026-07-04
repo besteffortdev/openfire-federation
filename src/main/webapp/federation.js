@@ -15,7 +15,7 @@ let lastData = {};
 const expandedPeerRooms = new Set();
 // In-flight exposed-server edits per domain (server -> checked) so a 5 s refresh doesn't clobber them.
 const editedExposed = {};
-// Federated rooms whose per-room visibility editor is expanded (persisted across refreshes).
+// Federated rooms whose settings panel (visibility + mappings + sharing) is expanded (persisted across refreshes).
 const expandedRoomVis = new Set();
 // In-flight visibility edits per room jid (server -> checked) so a 5 s refresh doesn't clobber them.
 const editedRoomVis = {};
@@ -936,8 +936,10 @@ function presenceDot(show) {
 function bindRoomSearch() {
     document.getElementById('room-search').addEventListener('input', e => {
         roomFilter = e.target.value.toLowerCase();
-        document.querySelectorAll('#local-rooms-tbody tr[data-jid]').forEach(row => {
-            row.style.display = row.dataset.jid.toLowerCase().includes(roomFilter) ? '' : 'none';
+        // Detail rows (settings panel, occupants) carry data-parent-jid and follow their room row.
+        document.querySelectorAll('#local-rooms-tbody tr[data-jid], #local-rooms-tbody tr[data-parent-jid]').forEach(row => {
+            const jid = row.dataset.jid || row.dataset.parentJid;
+            row.style.display = jid.toLowerCase().includes(roomFilter) ? '' : 'none';
         });
     });
 }
@@ -1027,23 +1029,7 @@ function renderLocalRooms(rooms) {
     expandedRoomVis.forEach(jid => captureRoomVisEdits(jid));
 
     tbody.innerHTML = rooms.map(r => {
-        let mappedCell;
-        if (r.mappings && r.mappings.length > 0) {
-            mappedCell = r.mappings.map(m => renderMappingRow(r.jid, m)).join('');
-        } else {
-            mappedCell = '<span style="color:#999;font-size:11px">not mapped</span>';
-        }
-        // Per-room visibility control (only meaningful while the room is federated).
-        const visList = r.visibleTo || [];
-        const visExpanded = expandedRoomVis.has(r.jid);
-        const visLabel = visList.includes('*') ? 'all'
-                       : (visList.length ? visList.length + ' server(s)' : 'none');
-        const visCtl = r.federated
-            ? `<div style="margin-top:6px">
-                   <button class="btn-small" style="background:#e2e3e5;color:#383d41"
-                           onclick="toggleRoomVis('${escHtml(r.jid)}')">Visible: ${visLabel} ${visExpanded ? '▾' : '▸'}</button>
-               </div>`
-            : '';
+        const expanded = r.federated && expandedRoomVis.has(r.jid);
         const visible = r.jid.toLowerCase().includes(roomFilter) ? '' : 'display:none';
         // Occupant roster expander (local + remote virtual occupants, with live presence).
         const occList = r.occupantList || [];
@@ -1051,6 +1037,19 @@ function renderLocalRooms(rooms) {
         const occCell = occList.length > 0
             ? `<span style="cursor:pointer" title="show occupants" onclick="toggleRoomOccupants('${escHtml(r.jid)}')">${occList.length} ${occExpanded ? '▾' : '▸'}</span>`
             : `${r.occupants}`;
+        // Once federated, all per-room settings live behind the expand arrow on the right.
+        let settingsCell = '';
+        if (r.federated) {
+            const visList = r.visibleTo || [];
+            const visLabel = visList.includes('*') ? 'all peers'
+                           : (visList.length ? visList.length + ' server(s)' : 'nobody');
+            const mapCount = (r.mappings || []).length;
+            settingsCell = `
+                <span class="room-detail-sum">${mapCount ? mapCount + ' mapped' : 'not mapped'} · visible: ${visLabel}</span>
+                <button class="room-expand-btn ${expanded ? 'open' : ''}"
+                        title="${expanded ? 'Hide' : 'Show'} federation settings for this room"
+                        onclick="toggleRoomDetail('${escHtml(r.jid)}')">▸</button>`;
+        }
         let row = `
         <tr data-jid="${escHtml(r.jid)}" style="${visible}">
             <td><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small></td>
@@ -1062,15 +1061,10 @@ function renderLocalRooms(rooms) {
                            onchange="setRoomFederated('${escHtml(r.jid)}', this.checked)">
                     <span class="slider"></span>
                 </label>
-                ${visCtl}
-                ${r.federated ? `<label style="display:block;margin-top:6px;font-size:11px;color:#495057">
-                    <input type="checkbox" ${r.autoAccept ? 'checked' : ''}
-                           onchange="setRoomAutoAccept('${escHtml(r.jid)}', this.checked)">
-                    auto-accept requests</label>` : ''}
             </td>
-            <td>${mappedCell}</td>
+            <td class="room-detail-cell">${settingsCell}</td>
         </tr>`;
-        if (r.federated && visExpanded) row += renderRoomVisEditor(r);
+        if (expanded) row += renderRoomDetailRow(r);
         if (occExpanded && occList.length > 0) row += renderRoomOccupants(r);
         return row;
     }).join('');
@@ -1094,7 +1088,7 @@ function renderRoomOccupants(r) {
         return `<span style="display:inline-block;margin:2px 14px 2px 0;font-family:monospace;font-size:12px">`
              + `${presenceDot(o.show)}${escHtml(o.name)}${kind}${st}</span>`;
     }).join('') || '<span style="color:#999">no occupants</span>';
-    return `<tr class="route-detail"><td colspan="5" style="background:#fafafa;padding:8px 24px">
+    return `<tr class="route-detail" data-parent-jid="${escHtml(r.jid)}"><td colspan="5" style="background:#fafafa;padding:8px 24px">
         <div style="font-size:12px;color:#555;margin-bottom:4px">Occupants in ${escHtml(r.name || r.jid)} (local + federated):</div>
         ${items}
     </td></tr>`;
@@ -1193,9 +1187,47 @@ function renderPendingRequests(reqs) {
         </div>`).join('');
 }
 
-// ── Per-room visibility ACL editor ─────────────────────────────────────────────
+// ── Per-room federation settings panel (sharing + visibility + mappings) ──────
 
-function renderRoomVisEditor(r) {
+/** Full-width detail row behind the expand arrow: every federation setting for one room in one view. */
+function renderRoomDetailRow(r) {
+    const jid = escHtml(r.jid);
+    const mappings = (r.mappings && r.mappings.length > 0)
+        ? r.mappings.map(m => renderMappingRow(r.jid, m)).join('')
+        : '<p class="empty" style="margin:6px 0">Not mapped yet — pick this room next to a remote room in the “Remote rooms” list below.</p>';
+    return `
+    <tr class="exposed-editor-row room-detail-row" data-parent-jid="${jid}">
+        <td colspan="5">
+            <div class="exposed-cols">
+                <div class="exposed-col" style="flex:0 0 230px">
+                    <div class="exposed-col-h">Sharing
+                        <span class="exposed-col-sub">how ${escHtml(r.name || r.jid)} handles incoming requests</span>
+                    </div>
+                    <label class="exposed-room">
+                        <input type="checkbox" ${r.autoAccept ? 'checked' : ''}
+                               onchange="setRoomAutoAccept('${jid}', this.checked)">
+                        <span>Auto-accept mapping requests</span>
+                    </label>
+                </div>
+                <div class="exposed-col">
+                    <div class="exposed-col-h">Visibility
+                        <span class="exposed-col-sub">none selected = visible to nobody; a checked server with no route yet is pending</span>
+                    </div>
+                    ${renderRoomVisSection(r)}
+                </div>
+                <div class="exposed-col">
+                    <div class="exposed-col-h">Mappings
+                        <span class="exposed-col-sub">remote rooms bridged to this one</span>
+                    </div>
+                    ${mappings}
+                </div>
+            </div>
+        </td>
+    </tr>`;
+}
+
+/** The visibility ACL editor section (used inside the room settings panel). */
+function renderRoomVisSection(r) {
     const id = jidToElemId(r.jid);
     const curSet = editedRoomVis[r.jid] || new Set(r.visibleTo || []);
     const allOn = curSet.has('*');
@@ -1230,11 +1262,6 @@ function renderRoomVisEditor(r) {
     }
 
     return `
-    <tr class="exposed-editor-row">
-        <td colspan="5">
-            <div class="exposed-col-h">Servers allowed to see <strong>${escHtml(r.name || r.jid)}</strong>
-                <span class="exposed-col-sub">none selected = visible to nobody; tick “all peers” to share with everyone; a checked server with no route yet is pending</span>
-            </div>
             <label class="exposed-room" style="font-weight:600">
                 <input type="checkbox" ${allOn ? 'checked' : ''} onchange="setRoomVisAll('${escHtml(r.jid)}', this.checked)">
                 <span>Visible to all peers</span>
@@ -1243,9 +1270,7 @@ function renderRoomVisEditor(r) {
             <div style="margin-top:8px">
                 <button class="btn-small btn-primary" onclick="saveRoomVis('${escHtml(r.jid)}')">Save</button>
                 <span id="roomvis-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:6px">Saved ✓</span>
-            </div>
-        </td>
-    </tr>`;
+            </div>`;
 }
 
 function roomVisibleToSet(jid) {
@@ -1270,7 +1295,7 @@ function captureRoomVisEdits(jid) {
     editedRoomVis[jid] = set;
 }
 
-function toggleRoomVis(jid) {
+function toggleRoomDetail(jid) {
     if (expandedRoomVis.has(jid)) { captureRoomVisEdits(jid); expandedRoomVis.delete(jid); }
     else expandedRoomVis.add(jid);
     renderLocalRooms(lastData.localRooms || []);
