@@ -149,6 +149,11 @@ public class FederationIQHandler extends IQHandler {
             Log.info("Auto-registered federation peer via incoming connection: {}", fromDomain);
         }
 
+        // A peer-announce is proof the remote's federation plugin has us configured as a peer
+        // (mutual add) — this is what flips a PENDING link to REACHABLE on the next transition.
+        manager.getPeerRegistry().getPeer(fromDomain)
+               .ifPresent(p -> p.setRemoteConfirmed(true));
+
         // Link-level trust negotiation: record the remote's declared stance and block the link
         // if it disagrees with ours. Trust is a property of the LINK — both admins must agree;
         // a one-sided change blocks (TRUST_MISMATCH) rather than silently changing behaviour.
@@ -220,6 +225,9 @@ public class FederationIQHandler extends IQHandler {
         // through it; clients see leave presences and stale rooms disappear.
         manager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(fromDomain) : removed);
         manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.WITHDRAWN);
+        // The remote no longer has us configured — require a fresh announce (mutual re-add)
+        // before a future link shows REACHABLE again.
+        manager.getPeerRegistry().getPeer(fromDomain).ifPresent(p -> p.setRemoteConfirmed(false));
         // doPoll skips WITHDRAWN peers so onPeerDown never fires as a fallback —
         // propagate the withdrawal here while we still know what was removed.
         if (!removed.isEmpty()) {
@@ -242,6 +250,8 @@ public class FederationIQHandler extends IQHandler {
         Set<String> removed = manager.getRoutingTable().removePeer(fromDomain);
         manager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(fromDomain) : removed);
         manager.getPeerRegistry().setControlStatus(fromDomain, PeerServer.Status.REMOTE_DISABLED);
+        // The remote blocked us — require a fresh announce (it re-enabling) before REACHABLE.
+        manager.getPeerRegistry().getPeer(fromDomain).ifPresent(p -> p.setRemoteConfirmed(false));
         if (!removed.isEmpty()) {
             manager.propagateTopologyChange(fromDomain);
         }
@@ -261,6 +271,13 @@ public class FederationIQHandler extends IQHandler {
                 hops = 99;
             }
             if (dest != null && via != null) {
+                // Admin-denied advertisement: never install this destination when it is
+                // advertised by THIS peer. Leaving it out of `received` also lets the
+                // stale-withdrawal logic drop a previously-installed route via this peer.
+                if (manager.getPeerRegistry().isRouteDenied(fromDomain, dest)) {
+                    Log.debug("routing-update from {}: destination {} is denied by admin — skipping", fromDomain, dest);
+                    continue;
+                }
                 received.add(new RouteEntry(dest, via, hops));
             }
         }
@@ -313,6 +330,13 @@ public class FederationIQHandler extends IQHandler {
         // Ignore advertisements about our own rooms bouncing back from peers.
         if (localDomain.equals(sourceDomain)) {
             Log.debug("room-advertisement origin is our own domain, ignoring");
+            return;
+        }
+
+        // Admin denied this origin's advertisements from this peer — drop without caching
+        // or relaying (mirrors the routing-update filter, so rooms and routes stay in step).
+        if (manager.getPeerRegistry().isRouteDenied(fromDomain, sourceDomain)) {
+            Log.debug("room-advertisement from {} for denied origin {} — dropping", fromDomain, sourceDomain);
             return;
         }
 

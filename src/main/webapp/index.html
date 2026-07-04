@@ -553,10 +553,11 @@
                             <th>Next hop</th>
                             <th>Hops</th>
                             <th>Last updated</th>
+                            <th></th>
                         </tr>
                     </thead>
                     <tbody id="routing-tbody">
-                        <tr><td colspan="4" class="empty">Loading…</td></tr>
+                        <tr><td colspan="5" class="empty">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -565,6 +566,8 @@
             A hop count of 1 means directly connected via S2S.
             Routes are learned automatically through gossip when peers connect.
             Stale routes are removed when a peer goes offline.
+            <strong>Deny</strong> refuses a destination whenever its next-hop peer advertises it
+            (per-link; lift it from that peer's <em>Servers</em> panel on the Peers tab).
             See the <strong>Users</strong> tab for the clients each server has published.
         </p>
     </div>

@@ -1707,6 +1707,41 @@ public class FederationManager {
         return out;
     }
 
+    // ── Per-peer route advertisement deny ───────────────────────────────────────
+
+    /**
+     * Denies {@code destination}'s route/room advertisements arriving from {@code peerDomain}.
+     * Future advertisements are filtered on receive; any route currently installed via that
+     * peer is torn down immediately (with ghost/room clean-up and topology re-propagation),
+     * while a route to the same destination via a DIFFERENT peer is left intact.
+     */
+    public void denyRouteFromPeer(String peerDomain, String destination) {
+        peerRegistry.setRouteDenied(peerDomain, destination, true);
+        boolean removed = routingTable.removeRouteVia(destination, peerDomain);
+        if (removed) {
+            handleUnreachableDestinations(Set.of(destination));
+            propagateTopologyChange(peerDomain);
+        } else if (!routingTable.isReachable(destination)) {
+            // No live route, but cached rooms/directory entries may have arrived via this peer.
+            handleUnreachableDestinations(Set.of(destination));
+        }
+        Log.info("Denied route advertisements for {} from peer {}{}", destination, peerDomain,
+                 removed ? " (installed route removed)" : "");
+    }
+
+    /**
+     * Lifts a route-advertisement deny and asks the peer to re-send its routing table and
+     * room cache so the destination is re-learned without waiting for the next gossip.
+     */
+    public void allowRouteFromPeer(String peerDomain, String destination) {
+        peerRegistry.setRouteDenied(peerDomain, destination, false);
+        PeerServer.Status st = peerRegistry.getPeer(peerDomain).map(PeerServer::getStatus).orElse(null);
+        if (st == PeerServer.Status.REACHABLE) {
+            solicitRouting(peerDomain);
+        }
+        Log.info("Allowed route advertisements for {} from peer {}", destination, peerDomain);
+    }
+
     // ── Trust-on-first-use: foreign-domain default + S2S key pinning ────────────
     //
     // A peer whose PARENT domain differs from ours is treated as a stranger and defaults to

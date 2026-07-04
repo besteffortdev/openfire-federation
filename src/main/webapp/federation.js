@@ -154,7 +154,8 @@ function renderPeers(peers) {
         const isUnreachable    = p.status === 'UNREACHABLE';
         const isDisabled       = p.status === 'DISABLED';
         const isRemoteDisabled = p.status === 'REMOTE_DISABLED';
-        const needsRetry = isWithdrawn || isUnreachable || p.status === 'UNKNOWN';
+        const isPending        = p.status === 'PENDING';
+        const needsRetry = isWithdrawn || isUnreachable || isPending || p.status === 'UNKNOWN';
 
         let actionBtns = '';
         if (isDisabled) {
@@ -180,15 +181,23 @@ function renderPeers(peers) {
             : `<button class="btn-small btn-warn" style="margin-right:4px"
                        onclick="setUntrusted('${escHtml(p.domain)}', true)">Make untrusted</button>`;
         const expanded = expandedPeerRooms.has(p.domain);
+        const deniedCount = (p.deniedRoutes || []).length;
+        // Untrusted peers get the full Servers editor; a trusted peer with denied routes
+        // still needs somewhere to lift a deny made from the Routing tab.
         const roomsBtn = p.untrusted
             ? `<button class="btn-small" style="margin-right:4px;background:#e2e3e5;color:#383d41"
                        onclick="togglePeerRooms('${escHtml(p.domain)}')">Servers ${expanded ? '▾' : '▸'}</button>`
-            : '';
+            : (deniedCount > 0
+                ? `<button class="btn-small" style="margin-right:4px;background:#e2e3e5;color:#383d41"
+                           onclick="togglePeerRooms('${escHtml(p.domain)}')">Denied routes (${deniedCount}) ${expanded ? '▾' : '▸'}</button>`
+                : '');
 
         let statusLabel;
         if (isWithdrawn)               statusLabel = 'Disconnected by remote';
         else if (isDisabled)           statusLabel = 'Disabled';
         else if (isRemoteDisabled)     statusLabel = 'Disabled by remote';
+        else if (isPending)
+            statusLabel = 'Pending <span class="retry-countdown">waiting for the remote to add this server as a peer</span>';
         else if (p.status === 'TRUST_MISMATCH')
             statusLabel = 'Trust mismatch — both ends must set the same trust level';
         else                           statusLabel = p.status;
@@ -242,9 +251,30 @@ function renderPeers(peers) {
 
         if (p.untrusted && expanded) {
             row += renderExposedServerEditor(p);
+        } else if (expanded && deniedCount > 0) {
+            row += renderDeniedRoutesRow(p);
         }
         return row;
     }).join('');
+}
+
+/** Denied-routes panel for a TRUSTED peer (untrusted peers manage denies in the Servers editor). */
+function renderDeniedRoutesRow(p) {
+    const rows = (p.deniedRoutes || []).slice().sort().map(s => `
+        <div class="exposed-room"><span style="text-decoration:line-through;color:#999">${escHtml(s)}</span>
+            <span class="badge badge-untrusted">denied</span>
+            <button class="btn-small btn-primary" style="margin-left:8px"
+                    onclick="allowRoute('${escHtml(p.domain)}','${escHtml(s)}')">Allow</button>
+        </div>`).join('');
+    return `
+        <tr class="exposed-editor-row">
+            <td colspan="4">
+                <div class="exposed-col-h">Denied advertisements from ${escHtml(p.domain)}
+                    <span class="exposed-col-sub">destinations refused whenever this peer advertises them</span>
+                </div>
+                ${rows}
+            </td>
+        </tr>`;
 }
 
 // ── Untrusted peers: exposed-server editor ─────────────────────────────────────
@@ -278,12 +308,26 @@ function renderExposedServerEditor(p) {
             </label>`;
         }).join('');
 
-    // ── Right: SERVERS this peer advertises through to us (read-only). ──
-    const adv = p.advertisedVia || [];
-    const rightList = adv.length === 0
+    // ── Right: SERVERS this peer advertises through to us, each deniable per-link. ──
+    const denied = (p.deniedRoutes || []).slice().sort();
+    const advSet = new Set([...(p.advertisedVia || []), ...(p.advertisedRoutes || [])]);
+    denied.forEach(s => advSet.delete(s));
+    const adv = Array.from(advSet).sort();
+    const advRows = adv.map(s => `
+            <div class="exposed-room"><span>${escHtml(s)}</span>
+                <button class="btn-small btn-warn" style="margin-left:8px"
+                        title="Refuse this server's routes and rooms when ${escHtml(p.domain)} advertises them"
+                        onclick="denyRoute('${escHtml(p.domain)}','${escHtml(s)}')">Deny</button>
+            </div>`).join('');
+    const deniedRows = denied.map(s => `
+            <div class="exposed-room"><span style="text-decoration:line-through;color:#999">${escHtml(s)}</span>
+                <span class="badge badge-untrusted">denied</span>
+                <button class="btn-small btn-primary" style="margin-left:8px"
+                        onclick="allowRoute('${escHtml(p.domain)}','${escHtml(s)}')">Allow</button>
+            </div>`).join('');
+    const rightList = (adv.length === 0 && denied.length === 0)
         ? '<p class="empty" style="margin:4px 0">This peer is not advertising any servers to us yet.</p>'
-        : adv.map(s => `
-            <div class="exposed-room"><span>${escHtml(s)}</span></div>`).join('');
+        : advRows + deniedRows;
 
     return `
         <tr class="exposed-editor-row">
@@ -301,7 +345,7 @@ function renderExposedServerEditor(p) {
                     </div>
                     <div class="exposed-col">
                         <div class="exposed-col-h">↓ Servers ${escHtml(p.domain)} advertises through
-                            <span class="exposed-col-sub">what the remote is exposing inbound (read-only)</span>
+                            <span class="exposed-col-sub">what the remote is exposing inbound — Deny one to refuse its routes and rooms from this peer</span>
                         </div>
                         ${rightList}
                     </div>
@@ -420,15 +464,31 @@ function renderS2SSessions(sessions) {
              </button>`
         ).join('');
 
+        // Non-federated S2S session: offer to turn it into a federation peer in one click.
+        const addPeerBtn = !isFed
+            ? `<button class="btn-small btn-primary"
+                       onclick="addPeerFromSession('${escHtml(domain)}')">Add peer</button>`
+            : '';
+
         return `
         <tr>
             <td><strong>${escHtml(domain)}</strong>${fedBadge}</td>
             <td>${dirBadges}</td>
             <td class="ts">${new Date(earliest).toLocaleString()}</td>
             <td>${tlsBadge}</td>
-            <td style="white-space:nowrap">${killBtns}</td>
+            <td style="white-space:nowrap">${addPeerBtn}${killBtns}</td>
         </tr>`;
     }).join('');
+}
+
+/** Adds a peer straight from an active (non-federated) S2S session row. */
+function addPeerFromSession(domain) {
+    const untrusted = isForeignDomain(domain);
+    if (!confirm('Add ' + domain + ' as a federation peer?'
+        + (untrusted ? '\n\nIt is under a different parent domain, so it will be added as UNTRUSTED '
+                     + '(it sees nothing until you expose servers to it).' : ''))) return;
+    post({ action: 'add-peer', domain, untrusted })
+        .then(() => { flashSaved('Peer added ✓'); refresh(); });
 }
 
 // ── Connection settings ───────────────────────────────────────────────────────
@@ -610,6 +670,7 @@ function removePeer(domain) {
 function statusClass(s) {
     if (s === 'REACHABLE')  return 'green';
     if (s === 'UNREACHABLE') return 'red';
+    if (s === 'PENDING')     return 'orange';
     if (s === 'WITHDRAWN')   return 'orange';
     if (s === 'TRUST_MISMATCH') return 'orange';
     if (s === 'DISABLED' || s === 'REMOTE_DISABLED') return 'red';
@@ -621,17 +682,50 @@ function statusClass(s) {
 function renderRouting(entries) {
     const tbody = document.getElementById('routing-tbody');
     if (entries.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
         return;
     }
     entries.sort((a, b) => a.hops - b.hops);
-    tbody.innerHTML = entries.map(r => `
+    tbody.innerHTML = entries.map(r => {
+        // A learned (indirect) route was advertised to us by its next hop — the admin can
+        // deny that advertisement. A direct route IS the peer; use Disable/Remove instead.
+        const denyBtn = r.destination !== r.nextHop
+            ? `<button class="btn-small btn-warn"
+                       onclick="denyRoute('${escHtml(r.nextHop)}','${escHtml(r.destination)}')">Deny</button>`
+            : '';
+        return `
         <tr>
             <td>${escHtml(r.destination)}</td>
             <td>${escHtml(r.nextHop)}</td>
             <td>${r.hops}</td>
             <td class="ts">${new Date(r.updatedAt).toLocaleTimeString()}</td>
-        </tr>`).join('');
+            <td>${denyBtn}</td>
+        </tr>`;
+    }).join('');
+}
+
+/** Denies a destination's route/room advertisements arriving from a specific peer. */
+function denyRoute(peerDomain, destination) {
+    if (!confirm('Deny the route to ' + destination + ' advertised by ' + peerDomain + '?\n\n'
+        + 'This server will refuse that destination (and its rooms) whenever ' + peerDomain
+        + ' advertises it. A route to the same destination via another peer is not affected. '
+        + 'You can lift the deny from the peer’s "Servers" panel.')) return;
+    post({ action: 'deny-route', domain: peerDomain, destination })
+        .then(result => {
+            if (result && result.error) alert(result.error);
+            else flashSaved('Route denied ✓');
+            refresh();
+        });
+}
+
+/** Lifts a route deny; the peer is asked to re-advertise so the route re-appears. */
+function allowRoute(peerDomain, destination) {
+    post({ action: 'allow-route', domain: peerDomain, destination })
+        .then(result => {
+            if (result && result.error) alert(result.error);
+            else flashSaved('Route allowed ✓');
+            refresh();
+        });
 }
 
 // ── Users tab ──────────────────────────────────────────────────────────────────

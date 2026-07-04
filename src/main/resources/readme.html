@@ -66,9 +66,12 @@
     domain (for example <code>chat.example.com</code>) and click <em>Add peer</em>. Do this on each server for
     its neighbours. Watch the status dot:
     <span class="dot green"></span>reachable,
-    <span class="dot orange"></span>connecting/retrying,
+    <span class="dot orange"></span>pending / connecting / retrying,
     <span class="dot red"></span>unreachable,
     <span class="dot grey"></span>disabled.
+    A peer stays <strong>Pending</strong> until the other side adds this server back — federation only starts
+    once both ends have added each other. A server already talking plain S2S to you appears under
+    <em>Active S2S sessions</em> with an <em>Add peer</em> button, so you can federate it in one click.
 </div>
 
 <div class="step"><strong>2. Turn on federation for a room.</strong>
@@ -169,10 +172,18 @@
         untrusted and the other leaves it trusted, the link shows <em>Trust mismatch</em> and carries no
         federation until they agree — then it comes up on its own. The <em>Servers</em> editor has two columns: on
         the left the servers you expose to that peer (editable), on the right the servers that peer is
-        <em>advertising through</em> to you (read‑only).
+        <em>advertising through</em> to you — each with a <em>Deny</em> button (see below).
         <br><strong>Untrusted by default:</strong> adding a peer under a different parent domain (last two DNS
         labels, e.g. <code>example.net</code>; adjust with <code>plugin.federation.trustDomainLabels</code>) ticks
         <em>Untrusted</em> automatically; same‑parent peers default trusted.</li>
+    <li><strong>Deny a route advertisement (per‑link).</strong> Exposure controls what you <em>send</em>; each side
+        can also refuse what it <em>receives</em>. If a peer advertises a route to a server you don't want, click
+        <em>Deny</em> — on the Routing Table row, or next to that server in the peer's <em>Servers</em> editor. The
+        destination is refused whenever <strong>that</strong> peer advertises it: any installed route via that peer
+        is removed at once (rooms and ghost occupants cleaned up) and later advertisements are dropped. A route to
+        the same destination via a different peer is unaffected, and nothing is negotiated with the peer — the deny
+        is entirely yours. <em>Allow</em> lifts it (for a trusted peer, the denied list appears via a
+        <em>Denied routes</em> button on its row).</li>
     <li><strong>S2S key pinning (trust‑on‑first‑use).</strong> The first time a peer's S2S link comes up,
         the SHA‑256 of the leaf certificate's <strong>public key</strong> (SPKI) is pinned. If the key later
         changes (a server re‑created under the same domain name — even with a cert from the same CA), the peer is

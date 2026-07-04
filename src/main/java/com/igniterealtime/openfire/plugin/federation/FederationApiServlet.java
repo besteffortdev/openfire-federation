@@ -94,6 +94,23 @@ public class FederationApiServlet extends HttpServlet {
                     sb.append("\"").append(esc(srv)).append("\"");
                 }
             }
+            // Destinations currently routed THROUGH this peer, and the destinations whose
+            // advertisements from this peer the admin has denied (per-link inbound filter).
+            sb.append("],\"advertisedRoutes\":[");
+            boolean fr2 = true;
+            for (RouteEntry r : mgr.getRoutingTable().getAll()) {
+                if (!r.nextHop().equals(p.getDomain()) || r.destination().equals(p.getDomain())) continue;
+                if (!fr2) sb.append(",");
+                fr2 = false;
+                sb.append("\"").append(esc(r.destination())).append("\"");
+            }
+            sb.append("],\"deniedRoutes\":[");
+            boolean fd = true;
+            for (String srv : p.getDeniedRoutes()) {
+                if (!fd) sb.append(",");
+                fd = false;
+                sb.append("\"").append(esc(srv)).append("\"");
+            }
             sb.append("]}");
         }
         sb.append("],");
@@ -711,6 +728,29 @@ public class FederationApiServlet extends HttpServlet {
                 mgr.getPeerRegistry().setExposedServers(d, list);
                 // Re-advertise the new exposed set + matching routes immediately.
                 if (isReachable(mgr, d)) { mgr.sendRoutingUpdate(d); mgr.sendRoomState(d); }
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "deny-route": case "allow-route": {
+                String domain      = req.getParameter("domain");        // the advertising peer
+                String destination = req.getParameter("destination");   // the advertised server
+                if (domain == null || domain.isBlank() || destination == null || destination.isBlank()) {
+                    out.print("{\"error\":\"domain and destination required\"}");
+                    return;
+                }
+                String d    = domain.strip().toLowerCase();
+                String dest = destination.strip().toLowerCase();
+                if (!mgr.getPeerRegistry().contains(d)) {
+                    out.print("{\"error\":\"not a configured peer\"}");
+                    return;
+                }
+                String localDomain2 = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+                if (dest.equals(localDomain2) || dest.equals(d)) {
+                    out.print("{\"error\":\"cannot deny the peer itself or this server\"}");
+                    return;
+                }
+                if ("deny-route".equals(action)) mgr.denyRouteFromPeer(d, dest);
+                else                             mgr.allowRouteFromPeer(d, dest);
                 out.print("{\"ok\":true}");
                 return;
             }

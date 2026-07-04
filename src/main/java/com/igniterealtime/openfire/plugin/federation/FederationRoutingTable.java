@@ -130,6 +130,21 @@ public class FederationRoutingTable {
     }
 
     /**
+     * Removes the route to {@code destination} only if its current next hop is {@code viaPeer}.
+     * Used when the admin denies that peer's advertisement of the destination; a route via a
+     * different peer is left untouched. Returns true if a route was removed.
+     */
+    public boolean removeRouteVia(String destination, String viaPeer) {
+        RouteEntry entry = table.get(destination);
+        if (entry == null || !entry.nextHop().equals(viaPeer)) return false;
+        table.remove(destination);
+        Set<String> learned = routesLearnedFrom.get(viaPeer);
+        if (learned != null) learned.remove(destination);
+        Log.info("Routing: removed {} via {} (advertisement denied by admin)", destination, viaPeer);
+        return true;
+    }
+
+    /**
      * Returns the next-hop domain for reaching destination, or empty if unreachable.
      */
     public Optional<String> findNextHop(String destination) {

@@ -67,9 +67,12 @@ Install the plugin on **every** server you want to participate in the federation
 ## Quick start
 
 1. **Install** the plugin on each server and open **Admin Console → Federation**.
-2. **Add a peer** (Peer Servers tab → *Add peer server*): enter the other server's XMPP domain. The status
-   dot turns green once S2S is up. Repeat so every server knows its neighbours — they don't all need to be
-   directly connected; routes propagate.
+2. **Add a peer** (Peer Servers tab → *Add peer server*): enter the other server's XMPP domain. The peer
+   shows **Pending** while it waits for the other side to add you back; the dot turns green (*Reachable*)
+   only once the remote's federation plugin confirms the mutual add. Repeat so every server knows its
+   neighbours — they don't all need to be directly connected; routes propagate. A non‑federated server
+   appearing under *Active S2S sessions* can be added as a peer directly from that list (**Add peer**
+   button on its row).
 3. **Federate a room** (Rooms tab → *Local rooms*): toggle **Federated** on for a room. It is now advertised
    to your peers and appears in their *Remote rooms* list.
 4. **Map a room**: on another server, find that room under *Remote rooms* (or map your local room to it) to
@@ -87,8 +90,8 @@ The **Federation** tab has three sub‑views:
 
 | Tab | What it shows |
 |-----|----------------|
-| **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen, live S2S sessions, and connection settings (keepalive & reconnect). |
-| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. |
+| **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
+| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link; lift it from that peer's row on the Peers tab). |
 | **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers. |
 
 The page auto‑refreshes every 5 seconds.
@@ -151,6 +154,18 @@ The federation trust boundary is enforced at several points:
     server's (the last two DNS labels, e.g. `example.net`; adjustable via `plugin.federation.trustDomainLabels`),
     the *Untrusted* box is ticked automatically — a stranger shares nothing until you choose what it may see.
     Same‑parent peers default trusted.
+- **Deniable route advertisements (per‑link inbound filter).** The exposure controls above govern what you *send*;
+  each side can also refuse what it *receives*. If a peer advertises a route (and rooms) for a destination you
+  don't want, click **Deny** — on the Routing Table row, or next to that server in the peer's *Servers* editor
+  (right column). The destination is refused whenever **that** peer advertises it: any installed route via that
+  peer is torn down immediately (with room/ghost clean‑up) and future advertisements are dropped on receive. A
+  route to the same destination via a *different* peer is unaffected, and the deny is one‑sided — nothing is
+  negotiated with the peer. **Allow** lifts it and re‑solicits the peer so the route re‑appears. Denies are
+  persisted per peer (`federation.peer.deniedroutes.<domain>`).
+- **Mutual‑add handshake (Pending status).** A configured peer whose S2S link is up shows **Pending** — not
+  *Reachable* — until its federation plugin sends us a `peer-announce`, i.e. until the remote has added us back
+  (instantly, in open‑federation mode, via auto‑registration). No routes or gossip flow toward a pending peer;
+  we keep announcing ourselves on the reconnect back‑off so the link confirms promptly once the remote adds us.
 - **S2S key pinning (trust‑on‑first‑use).** The first time a peer's S2S link comes up, the plugin pins the
   SHA‑256 of the **public key** (SPKI) of the leaf certificate it presents. If that key later **changes** — e.g. a
   server is re‑created under the same domain name with a new key, even one signed by the same CA — the peer is

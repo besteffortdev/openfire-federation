@@ -284,12 +284,22 @@ public class S2SMonitor {
             }
 
             PeerServer.Status prev = peer.getStatus();
-            PeerServer.Status next = s2sUp ? PeerServer.Status.REACHABLE : PeerServer.Status.UNREACHABLE;
+            // An S2S link that is up but whose remote federation plugin has not confirmed us
+            // (no peer-announce received) is PENDING, not REACHABLE — the admin sees the peer
+            // is waiting to be added back on the other side, and no gossip/routes flow yet.
+            PeerServer.Status next;
+            if (s2sUp) {
+                next = peer.isRemoteConfirmed() ? PeerServer.Status.REACHABLE : PeerServer.Status.PENDING;
+            } else {
+                next = PeerServer.Status.UNREACHABLE;
+            }
 
             // Trust-on-first-use cert check: immediately when a link comes up (so a new/changed
             // cert is pinned at once), and periodically thereafter (catches a cert swapped under
             // a steady link). Skipped on the fast liveness ticks in between.
-            if (s2sUp && (prev != PeerServer.Status.REACHABLE || certSweep)) {
+            boolean prevUp = prev == PeerServer.Status.REACHABLE || prev == PeerServer.Status.PENDING;
+            boolean nextUp = next == PeerServer.Status.REACHABLE || next == PeerServer.Status.PENDING;
+            if (s2sUp && (!prevUp || certSweep)) {
                 federationManager.observePeerCertificate(domain);
             }
 
@@ -297,11 +307,21 @@ public class S2SMonitor {
 
             peerRegistry.updateStatus(domain, next);
 
-            if (next == PeerServer.Status.REACHABLE) {
-                onPeerUp(domain);
-            } else {
+            if (nextUp && !prevUp) {
+                if (next == PeerServer.Status.REACHABLE) {
+                    onPeerUp(domain);
+                } else {
+                    // Link up but unconfirmed: only announce ourselves. The full peer-up
+                    // sequence (direct route, gossip exchange, room sync) runs when the
+                    // remote's own peer-announce arrives and confirms the mutual add.
+                    Log.info("Federation peer link up, awaiting remote confirmation: {}", domain);
+                    federationManager.sendPeerAnnounce(domain);
+                }
+            } else if (!nextUp && prevUp) {
                 onPeerDown(domain);
             }
+            // PENDING → REACHABLE (confirmation) is driven by handlePeerAnnounce, which runs
+            // the full gossip exchange itself — no extra work on the poll side.
         }
 
         if (certSweep) lastCertSweepMs = now;
@@ -324,7 +344,10 @@ public class S2SMonitor {
         try {
             int count = 0;
             for (PeerServer peer : peerRegistry.getPeers()) {
-                if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                // PENDING peers get the keepalive announce too — it doubles as a periodic
+                // handshake attempt so the link confirms once the remote adds us back.
+                if (peer.getStatus() == PeerServer.Status.REACHABLE
+                        || peer.getStatus() == PeerServer.Status.PENDING) {
                     federationManager.sendPeerAnnounce(peer.getDomain());
                     count++;
                 }
@@ -340,7 +363,10 @@ public class S2SMonitor {
             long now   = System.currentTimeMillis();
             int  count = 0;
             for (PeerServer peer : peerRegistry.getPeers()) {
-                if (peer.getStatus() != PeerServer.Status.UNREACHABLE) continue;
+                // PENDING = link up but the remote hasn't added us back yet: keep announcing
+                // on the same back-off so the handshake completes quickly once it does.
+                if (peer.getStatus() != PeerServer.Status.UNREACHABLE
+                        && peer.getStatus() != PeerServer.Status.PENDING) continue;
                 String domain  = peer.getDomain();
                 long   retryAt = peerNextRetryAt.getOrDefault(domain, 0L);
                 if (now < retryAt) continue;   // back-off not yet elapsed

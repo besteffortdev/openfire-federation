@@ -14,6 +14,9 @@ public final class PeerServer {
 
     /**
      * UNKNOWN/REACHABLE/UNREACHABLE — live S2S state maintained by S2SMonitor.
+     * PENDING — the S2S link is up but the remote's federation plugin has not confirmed us
+     *            as a peer yet (no peer-announce received). Shown until the remote adds us
+     *            back; no routes or gossip flow until it does.
      * WITHDRAWN — the remote sent peer-withdraw; reconnectable locally.
      * DISABLED — WE administratively disabled this peer; persistent, re-enableable
      *            locally, and re-asserted to the peer even if it re-creates the link.
@@ -23,7 +26,7 @@ public final class PeerServer {
      *            other trusted). The link is blocked (no federation) until both ends match;
      *            derived from peer-announce negotiation, not persisted, auto-clears on match.
      */
-    public enum Status { UNKNOWN, REACHABLE, UNREACHABLE, WITHDRAWN, DISABLED, REMOTE_DISABLED, TRUST_MISMATCH }
+    public enum Status { UNKNOWN, PENDING, REACHABLE, UNREACHABLE, WITHDRAWN, DISABLED, REMOTE_DISABLED, TRUST_MISMATCH }
 
     private final String domain;
     private final AtomicReference<Status> status = new AtomicReference<>(Status.UNKNOWN);
@@ -41,6 +44,20 @@ public final class PeerServer {
 
     /** Server domains an untrusted peer is allowed to see/map onto (empty = expose nothing). */
     private final Set<String> exposedServers = ConcurrentHashMap.newKeySet();
+
+    /**
+     * True once we've received a peer-announce from this peer — proof the remote's federation
+     * plugin knows us as a peer (mutual add). Until then a live S2S link shows PENDING, not
+     * REACHABLE. In-memory only: after a restart the first keepalive/announce re-confirms.
+     */
+    private volatile boolean remoteConfirmed = false;
+
+    /**
+     * Destination server domains whose route/room advertisements from THIS peer the admin has
+     * denied. A denied destination is never installed in the routing table when advertised by
+     * this peer (an alternate path via another peer is unaffected). Persisted.
+     */
+    private final Set<String> deniedRoutes = ConcurrentHashMap.newKeySet();
 
     /**
      * The remote end's last-declared trust stance, learned from its peer-announce
@@ -91,6 +108,26 @@ public final class PeerServer {
     /** True if {@code serverDomain} is on this peer's exposed list. */
     public boolean exposesServer(String serverDomain) {
         return serverDomain != null && exposedServers.contains(serverDomain);
+    }
+
+    public boolean isRemoteConfirmed() { return remoteConfirmed; }
+
+    public void setRemoteConfirmed(boolean confirmed) { this.remoteConfirmed = confirmed; }
+
+    public Set<String> getDeniedRoutes() { return deniedRoutes; }
+
+    public void setDeniedRoutes(Collection<String> routes) {
+        deniedRoutes.clear();
+        if (routes != null) {
+            for (String r : routes) {
+                if (r != null && !r.isBlank()) deniedRoutes.add(r.strip());
+            }
+        }
+    }
+
+    /** True if the admin denied advertisements for {@code destination} arriving from this peer. */
+    public boolean isRouteDenied(String destination) {
+        return destination != null && deniedRoutes.contains(destination);
     }
 
     /** The remote's last-declared trust stance, or null if not yet heard. */
