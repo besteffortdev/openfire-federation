@@ -685,8 +685,22 @@ function renderRouting(entries) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
         return;
     }
-    entries.sort((a, b) => a.hops - b.hops);
+    // Active routes by hop count first; denied (disabled) entries at the bottom.
+    entries.sort((a, b) => (a.denied ? 1 : 0) - (b.denied ? 1 : 0) || (a.hops || 0) - (b.hops || 0));
     tbody.innerHTML = entries.map(r => {
+        if (r.denied) {
+            // A deny is remembered per (peer, destination) — the entry stays here disabled
+            // even if the peer withdraws or re-advertises the route, until it is allowed again.
+            return `
+        <tr class="route-denied">
+            <td><s>${escHtml(r.destination)}</s></td>
+            <td>${escHtml(r.nextHop)}</td>
+            <td>—</td>
+            <td><span class="badge badge-untrusted" title="Advertisements of this destination from ${escHtml(r.nextHop)} are refused — even if it is withdrawn and offered again">denied</span></td>
+            <td><button class="btn-small btn-primary"
+                        onclick="allowRoute('${escHtml(r.nextHop)}','${escHtml(r.destination)}')">Allow</button></td>
+        </tr>`;
+        }
         // A learned (indirect) route was advertised to us by its next hop — the admin can
         // deny that advertisement. A direct route IS the peer; use Disable/Remove instead.
         const denyBtn = r.destination !== r.nextHop
@@ -708,8 +722,9 @@ function renderRouting(entries) {
 function denyRoute(peerDomain, destination) {
     if (!confirm('Deny the route to ' + destination + ' advertised by ' + peerDomain + '?\n\n'
         + 'This server will refuse that destination (and its rooms) whenever ' + peerDomain
-        + ' advertises it. A route to the same destination via another peer is not affected. '
-        + 'You can lift the deny from the peer’s "Servers" panel.')) return;
+        + ' advertises it — the entry stays in this table as disabled, and the deny is '
+        + 'remembered even if the route is withdrawn and comes back. A route to the same '
+        + 'destination via another peer is not affected. Use Allow to lift it.')) return;
     post({ action: 'deny-route', domain: peerDomain, destination })
         .then(result => {
             if (result && result.error) alert(result.error);

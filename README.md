@@ -91,7 +91,7 @@ The **Federation** tab has three sub‑views:
 | Tab | What it shows |
 |-----|----------------|
 | **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
-| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link; lift it from that peer's row on the Peers tab). |
+| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
 | **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers. |
 
 The page auto‑refreshes every 5 seconds.
@@ -160,8 +160,10 @@ The federation trust boundary is enforced at several points:
   (right column). The destination is refused whenever **that** peer advertises it: any installed route via that
   peer is torn down immediately (with room/ghost clean‑up) and future advertisements are dropped on receive. A
   route to the same destination via a *different* peer is unaffected, and the deny is one‑sided — nothing is
-  negotiated with the peer. **Allow** lifts it and re‑solicits the peer so the route re‑appears. Denies are
-  persisted per peer (`federation.peer.deniedroutes.<domain>`).
+  negotiated with the peer. The denied entry stays listed in the Routing Table as a disabled (struck‑through)
+  row, and the deny is remembered even if the peer withdraws the route and advertises it again later.
+  **Allow** (on the disabled row, or in the peer's *Servers* editor) lifts it and re‑solicits the peer so the
+  route re‑appears. Denies are persisted per peer (`federation.peer.deniedroutes.<domain>`).
 - **Mutual‑add handshake (Pending status).** A configured peer whose S2S link is up shows **Pending** — not
   *Reachable* — until its federation plugin sends us a `peer-announce`, i.e. until the remote has added us back
   (instantly, in open‑federation mode, via auto‑registration). No routes or gossip flow toward a pending peer;

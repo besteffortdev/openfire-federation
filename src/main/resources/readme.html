@@ -180,10 +180,11 @@
         can also refuse what it <em>receives</em>. If a peer advertises a route to a server you don't want, click
         <em>Deny</em> — on the Routing Table row, or next to that server in the peer's <em>Servers</em> editor. The
         destination is refused whenever <strong>that</strong> peer advertises it: any installed route via that peer
-        is removed at once (rooms and ghost occupants cleaned up) and later advertisements are dropped. A route to
-        the same destination via a different peer is unaffected, and nothing is negotiated with the peer — the deny
-        is entirely yours. <em>Allow</em> lifts it (for a trusted peer, the denied list appears via a
-        <em>Denied routes</em> button on its row).</li>
+        is removed at once (rooms and ghost occupants cleaned up) and later advertisements are dropped. The entry
+        stays in the Routing Table as a disabled row and the deny is remembered even if the route is withdrawn and
+        advertised again later. A route to the same destination via a different peer is unaffected, and nothing is
+        negotiated with the peer — the deny is entirely yours. <em>Allow</em> lifts it — on the disabled row, in the
+        peer's <em>Servers</em> editor, or (for a trusted peer) via the <em>Denied routes</em> button on its row.</li>
     <li><strong>S2S key pinning (trust‑on‑first‑use).</strong> The first time a peer's S2S link comes up,
         the SHA‑256 of the leaf certificate's <strong>public key</strong> (SPKI) is pinned. If the key later
         changes (a server re‑created under the same domain name — even with a cert from the same CA), the peer is

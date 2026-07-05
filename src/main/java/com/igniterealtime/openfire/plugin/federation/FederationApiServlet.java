@@ -129,6 +129,21 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"updatedAt\":").append(r.updatedAt())
               .append("}");
         }
+        // Denied advertisements stay listed as disabled entries (never installed as
+        // real routes) so the admin can see and lift the deny even while the peer
+        // isn't currently advertising the destination.
+        for (PeerServer p : mgr.getPeerRegistry().getPeers()) {
+            for (String dest : p.getDeniedRoutes()) {
+                if (dest.equals(localDomain)) continue;
+                if (!first) sb.append(",");
+                first = false;
+                sb.append("{")
+                  .append("\"destination\":\"").append(esc(dest)).append("\",")
+                  .append("\"nextHop\":\"").append(esc(p.getDomain())).append("\",")
+                  .append("\"denied\":true")
+                  .append("}");
+            }
+        }
         sb.append("],");
 
         // ── local rooms ───────────────────────────────────────────────────────
