@@ -1033,6 +1033,89 @@ public class FederationManager {
         }
     }
 
+    // ── End-to-end mapping path probe (mapping-ping / mapping-pong) ───────────
+    //
+    // The routing table only proves a route EXISTS from here — it cannot see a path
+    // silently broken mid-way in one direction (e.g. an intermediate server denying
+    // the reverse route while advertisements toward us still flow). Each ping
+    // interval we probe every distinct ACTIVE-mapped domain; the far end answers
+    // with a pong routed back across the overlay. Missing MAPPING_PING_MISS_LIMIT
+    // pongs in a row marks the path broken: mappings toward it show "not responding"
+    // and its virtual occupants are evicted, exactly as the other side already did.
+    // A returning pong clears the flag and re-syncs rosters bilaterally.
+
+    static final int MAPPING_PING_MISS_LIMIT = 3;
+
+    private static final class MappingPingState {
+        volatile boolean everPonged = false;   // never true for a pre-1.7.19 peer → never marked broken
+        volatile int     missed     = 0;       // pings sent since the last pong
+        volatile boolean broken     = false;
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<String, MappingPingState> mappingPingStates =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** True when the mapped domain has stopped answering end-to-end probes (route may still exist). */
+    public boolean isMappingPathBroken(String remoteDomain) {
+        MappingPingState st = mappingPingStates.get(remoteDomain);
+        return st != null && st.broken;
+    }
+
+    /** Sends one mapping-ping toward every distinct ACTIVE-mapped domain that is currently routable. */
+    public void sendMappingPings() {
+        Set<String> mapped = new LinkedHashSet<>();
+        for (List<RoomMapping> mappings : roomManager.getLocalMappings().values()) {
+            for (RoomMapping m : mappings) {
+                if (m.isActive()) mapped.add(m.remoteDomain());
+            }
+        }
+        mappingPingStates.keySet().retainAll(mapped);   // forget unmapped domains
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        for (String dest : mapped) {
+            java.util.Optional<String> nextHop = routingTable.findNextHop(dest);
+            if (nextHop.isEmpty()) continue;   // no route — routeMissing handling already covers this
+            MappingPingState st = mappingPingStates.computeIfAbsent(dest, k -> new MappingPingState());
+            if (st.everPonged && !st.broken && st.missed >= MAPPING_PING_MISS_LIMIT) {
+                st.broken = true;
+                onMappingPathBroken(dest);
+            }
+            st.missed++;
+            try {
+                XMPPServer.getInstance().getPacketRouter().route(
+                    FederationStanzaFactory.mappingPing(nextHop.get(), dest, localDomain, ""));
+            } catch (Exception e) {
+                Log.warn("Could not send mapping-ping toward {}: {}", dest, e.getMessage());
+            }
+        }
+    }
+
+    /** A pong arrived from a mapped domain: the round trip works. Heals a broken-path state. */
+    public void onMappingPong(String remoteDomain) {
+        MappingPingState st = mappingPingStates.computeIfAbsent(remoteDomain, k -> new MappingPingState());
+        boolean wasBroken = st.broken;
+        st.everPonged = true;
+        st.missed = 0;
+        st.broken = false;
+        if (wasBroken) {
+            Log.info("Federation mapping path to {} responds again — re-syncing occupants", remoteDomain);
+            resyncMappedDestinations(Set.of(remoteDomain));
+        }
+    }
+
+    /** The mapped domain stopped answering although a route exists: evict its ghosts. */
+    private void onMappingPathBroken(String remoteDomain) {
+        Log.warn("Federation mapping path to {} is broken end-to-end ({} pings unanswered while a route "
+               + "exists) — an intermediate server may be denying this traffic; evicting its occupants",
+                 remoteDomain, MAPPING_PING_MISS_LIMIT);
+        for (List<RoomMapping> mappings : roomManager.getLocalMappings().values()) {
+            for (RoomMapping m : mappings) {
+                if (m.isActive() && m.remoteDomain().equals(remoteDomain)) {
+                    evictForInactiveMapping(m.localRoomJid(), remoteDomain);
+                }
+            }
+        }
+    }
+
     /**
      * Re-pushes our local occupants toward each mapped remote that just became
      * reachable, so occupant rosters self-heal after a link comes up or a route

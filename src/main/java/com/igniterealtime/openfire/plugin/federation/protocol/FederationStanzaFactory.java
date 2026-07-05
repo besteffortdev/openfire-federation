@@ -252,6 +252,35 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    // ── mapping-ping / mapping-pong (end-to-end mapping path probe) ───────────
+
+    /**
+     * Lightweight end-to-end probe for an active room mapping, relayed hop-by-hop
+     * toward {@code destination}, which answers with a mapping-pong.  A pong coming
+     * back proves the full round trip works — the only signal that catches a path
+     * silently broken mid-way (e.g. a route deny on an intermediate server) while
+     * this server's own routing table still shows the destination as reachable.
+     */
+    public static IQ mappingPing(String nextHop, String destination, String originDomain, String viaTrail) {
+        return mappingProbe("mapping-ping", nextHop, destination, originDomain, viaTrail);
+    }
+
+    /** Reply half of the mapping path probe; routed back exactly like the ping. */
+    public static IQ mappingPong(String nextHop, String destination, String originDomain, String viaTrail) {
+        return mappingProbe("mapping-pong", nextHop, destination, originDomain, viaTrail);
+    }
+
+    private static IQ mappingProbe(String element, String nextHop, String destination,
+                                   String originDomain, String viaTrail) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element probe = fed.addElement(element);
+        probe.addAttribute("destination", destination);
+        probe.addAttribute("origin",      originDomain);
+        if (viaTrail != null && !viaTrail.isEmpty()) probe.addAttribute("via", viaTrail);
+        return iq;
+    }
+
     // ── muc-forward ───────────────────────────────────────────────────────────
 
     /**

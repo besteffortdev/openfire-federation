@@ -1118,7 +1118,9 @@ function renderMappingRow(localJid, m) {
     switch (m.state) {
         case 'ACTIVE':
             badge = (m.connected === false)
-                ? (m.routeMissing
+                ? (m.pathBroken
+                    ? `<span class="mapping-state mapping-disconnected" title="A route to ${dom} exists but it is not answering end-to-end — a server on the path may be denying this traffic">⚠ not responding</span>`
+                    : m.routeMissing
                     ? `<span class="mapping-state mapping-disconnected" title="No route to ${dom} — an intermediate peer is not advertising it">⚠ route missing</span>`
                     : `<span class="mapping-state mapping-disconnected" title="Route to ${dom} is down">⚠ disconnected</span>`)
                 : `<span class="mapping-state mapping-connected">● active</span>`;

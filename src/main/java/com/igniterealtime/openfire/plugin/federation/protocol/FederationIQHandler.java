@@ -43,6 +43,8 @@ import java.util.stream.Collectors;
  * room-unmap         → remove a previously confirmed mapping (sender's spoke only)
  * muc-forward        → relay or inject a MUC packet; if we are the hub, fan out to
  *                      all other mapped spokes after injecting locally
+ * mapping-ping/pong  → end-to-end probe of an active mapping's path; catches a route
+ *                      silently broken mid-way (e.g. an intermediate deny)
  */
 public class FederationIQHandler extends IQHandler {
 
@@ -104,6 +106,8 @@ public class FederationIQHandler extends IQHandler {
             case "room-mapping-disable"-> handleMappingDisable(fromDomain, child);
             case "room-mapping-enable" -> handleMappingEnable(fromDomain, child);
             case "room-unmap"          -> handleRoomUnmap(fromDomain, child);
+            case "mapping-ping"        -> handleMappingPing(fromDomain, child);
+            case "mapping-pong"        -> handleMappingPong(fromDomain, child);
             case "muc-forward"         -> handleMucForward(fromDomain, child);
             case "direct-forward"      -> handleDirectForward(fromDomain, child);
             case "presence-forward"    -> handlePresenceForward(fromDomain, child);
@@ -519,6 +523,79 @@ public class FederationIQHandler extends IQHandler {
                 }
             },
             () -> Log.warn("{}: no route to {}, dropping", element, destination));
+        return true;
+    }
+
+    // ── mapping-ping / mapping-pong (end-to-end mapping path probe) ─────────────
+
+    /**
+     * Answers (or relays) an end-to-end mapping probe.  At the destination we reply with a
+     * mapping-pong toward the origin — but only when a mapping with that origin exists, so
+     * the probe cannot be used to sweep for arbitrary reachable domains.
+     */
+    private void handleMappingPing(String fromDomain, Element el) {
+        if (relayMappingProbe("mapping-ping", fromDomain, el)) return;
+        String origin = el.attributeValue("origin");
+        if (origin == null || origin.isEmpty()) return;
+        if (!manager.getRoomManager().hasMappingWith(origin)) {
+            Log.debug("mapping-ping from {} — no active mapping with it, not answering", origin);
+            return;
+        }
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        manager.getRoutingTable().findNextHop(origin).ifPresentOrElse(
+            nextHop -> {
+                try {
+                    XMPPServer.getInstance().getPacketRouter().route(
+                        FederationStanzaFactory.mappingPong(nextHop, origin, localDomain, ""));
+                } catch (Exception e) {
+                    Log.warn("Could not answer mapping-ping from {}: {}", origin, e.getMessage());
+                }
+            },
+            () -> Log.debug("mapping-ping from {} — no route back, cannot answer", origin));
+    }
+
+    /** A pong for one of our probes arrived — the round trip to that mapped domain works. */
+    private void handleMappingPong(String fromDomain, Element el) {
+        if (relayMappingProbe("mapping-pong", fromDomain, el)) return;
+        String origin = el.attributeValue("origin");
+        if (origin != null && !origin.isEmpty()) manager.onMappingPong(origin);
+    }
+
+    /**
+     * Relays a mapping probe toward its destination if we are not it. Returns true when handled
+     * (relayed or dropped), false when we are the destination and should process it locally.
+     */
+    private boolean relayMappingProbe(String element, String fromDomain, Element el) {
+        String destination = el.attributeValue("destination");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (destination == null || localDomain.equals(destination)) return false;
+        String via = el.attributeValue("via", "");
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
+            Log.warn("{} loop detected (via={}), dropping", element, via);
+            return true;
+        }
+        // Untrusted-peer exposure gate: an untrusted peer may only probe toward exposed servers.
+        if (!untrustedAllowsServer(fromDomain, destination)) {
+            Log.warn("SECURITY: dropping {} from untrusted peer {} toward non-exposed server {}",
+                     element, fromDomain, destination);
+            return true;
+        }
+        String origin = el.attributeValue("origin");
+        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+        manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
+            nextHop -> {
+                try {
+                    XMPPServer.getInstance().getPacketRouter().route(
+                        element.equals("mapping-ping")
+                            ? FederationStanzaFactory.mappingPing(nextHop, destination, origin, newVia)
+                            : FederationStanzaFactory.mappingPong(nextHop, destination, origin, newVia));
+                } catch (Exception e) {
+                    Log.warn("Could not relay {} toward {}: {}", element, destination, e.getMessage());
+                }
+            },
+            // No route toward the destination: drop silently. For a ping this is exactly the
+            // deny/asymmetry case — the origin detects it by the missing pong.
+            () -> Log.debug("{}: no route to {}, dropping", element, destination));
         return true;
     }
 

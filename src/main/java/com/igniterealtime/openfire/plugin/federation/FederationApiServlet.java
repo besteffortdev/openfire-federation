@@ -188,15 +188,19 @@ public class FederationApiServlet extends HttpServlet {
             for (Map<String, String> m : roomMappings) {
                 if (!fm) sb.append(",");
                 fm = false;
-                boolean connected = mgr.getRoutingTable().isReachable(m.get("remoteDomain"));
-                boolean routeMissing = !connected
+                // pathBroken: a route exists but end-to-end probes go unanswered (deny mid-path).
+                boolean pathBroken = mgr.getRoutingTable().isReachable(m.get("remoteDomain"))
+                        && mgr.isMappingPathBroken(m.get("remoteDomain"));
+                boolean connected = mgr.getRoutingTable().isReachable(m.get("remoteDomain")) && !pathBroken;
+                boolean routeMissing = !connected && !pathBroken
                         && mgr.getPeerRegistry().getPeer(m.get("remoteDomain")).isEmpty();
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
                   .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\",")
                   .append("\"state\":\"").append(esc(m.get("state"))).append("\",")
                   .append("\"connected\":").append(connected).append(",")
-                  .append("\"routeMissing\":").append(routeMissing)
+                  .append("\"routeMissing\":").append(routeMissing).append(",")
+                  .append("\"pathBroken\":").append(pathBroken)
                   .append("}");
             }
             sb.append("]}");
@@ -252,14 +256,17 @@ public class FederationApiServlet extends HttpServlet {
             for (RoomMapping m : entry.getValue()) {
                 if (!fm) sb.append(",");
                 fm = false;
-                boolean connected = mgr.getRoutingTable().isReachable(m.remoteDomain());
-                boolean routeMissing = !connected
+                boolean pathBroken = mgr.getRoutingTable().isReachable(m.remoteDomain())
+                        && mgr.isMappingPathBroken(m.remoteDomain());
+                boolean connected = mgr.getRoutingTable().isReachable(m.remoteDomain()) && !pathBroken;
+                boolean routeMissing = !connected && !pathBroken
                         && mgr.getPeerRegistry().getPeer(m.remoteDomain()).isEmpty();
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
                   .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\",")
                   .append("\"connected\":").append(connected).append(",")
-                  .append("\"routeMissing\":").append(routeMissing)
+                  .append("\"routeMissing\":").append(routeMissing).append(",")
+                  .append("\"pathBroken\":").append(pathBroken)
                   .append("}");
             }
             sb.append("]");

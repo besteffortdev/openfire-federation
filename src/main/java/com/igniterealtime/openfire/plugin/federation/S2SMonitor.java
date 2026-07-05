@@ -54,6 +54,13 @@ public class S2SMonitor {
     static final         String RECONNECT_JIVE_KEY     = "plugin.federation.reconnectSeconds";
     static final         int    RECONNECT_DEFAULT       = 30;
     static final         int    RECONNECT_MINIMUM       = 5;
+
+    // End-to-end mapping path probe cadence (mapping-ping). Detects a path silently
+    // broken mid-way (e.g. an intermediate route deny) that the routing table can't see.
+    // 0 disables the probe.
+    static final         String MAPPING_PING_JIVE_KEY  = "plugin.federation.mappingPingSeconds";
+    static final         int    MAPPING_PING_DEFAULT    = 60;
+    static final         int    MAPPING_PING_MINIMUM    = 15;
     private static final int    RECONNECT_POLL_SECONDS  = 5;   // hard-coded poll interval
     private static final int    RECONNECT_BACKOFF_BASE  = 5;   // first retry delay in seconds
 
@@ -103,9 +110,24 @@ public class S2SMonitor {
         // when each UNREACHABLE peer is actually retried (up to reconnectSeconds cap).
         reconnectFuture = scheduler.scheduleAtFixedRate(
                 this::sendReconnects, RECONNECT_POLL_SECONDS, RECONNECT_POLL_SECONDS, TimeUnit.SECONDS);
-        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect-poll={}s, reconnect-cap={}s, s2s-idle={}s)",
+        // End-to-end mapping probes: catch a path broken mid-way (e.g. an intermediate
+        // route deny) that local routing state can't see. 0 disables.
+        int pingSeconds = JiveGlobals.getIntProperty(MAPPING_PING_JIVE_KEY, MAPPING_PING_DEFAULT);
+        if (pingSeconds > 0) {
+            pingSeconds = Math.max(pingSeconds, MAPPING_PING_MINIMUM);
+            scheduler.scheduleAtFixedRate(() -> {
+                try {
+                    federationManager.sendMappingPings();
+                } catch (Exception e) {
+                    // Uncaught exceptions cancel the task permanently — keep the probe alive.
+                    Log.error("Mapping-ping task threw unexpectedly — task continues", e);
+                }
+            }, pingSeconds, pingSeconds, TimeUnit.SECONDS);
+        }
+        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect-poll={}s, reconnect-cap={}s, "
+               + "mapping-ping={}s, s2s-idle={}s)",
                  POLL_SECONDS, getEffectiveKeepaliveSeconds(), RECONNECT_POLL_SECONDS, getReconnectSeconds(),
-                 idleTimeoutSeconds());
+                 pingSeconds, idleTimeoutSeconds());
     }
 
     public void stop() {

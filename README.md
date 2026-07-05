@@ -164,6 +164,13 @@ The federation trust boundary is enforced at several points:
   row, and the deny is remembered even if the peer withdraws the route and advertises it again later.
   **Allow** (on the disabled row, or in the peer’s settings panel) lifts it and re‑solicits the peer so the
   route re‑appears. Denies are persisted per peer (`federation.peer.deniedroutes.<domain>`).
+  - **End‑to‑end mapping probe (mapping‑ping).** A deny mid‑path is invisible to servers on the far side —
+    their routing tables still show a route while replies silently die at the denying hop. So every active
+    room mapping is probed end‑to‑end (default every 60 s, `plugin.federation.mappingPingSeconds`, 0 = off):
+    the mapped domain answers with a pong routed back across the overlay. Three unanswered probes in a row
+    flip the mapping to **⚠ not responding**, its remote occupants are dropped (no more stale ghosts), and
+    when pongs resume the flag clears and rosters re‑sync automatically. Peers running an older plugin never
+    answer probes and are simply never flagged.
 - **Mutual‑add handshake (Pending status).** A configured peer whose S2S link is up shows **Pending** — not
   *Reachable* — until its federation plugin sends us a `peer-announce`, i.e. until the remote has added us back
   (instantly, in open‑federation mode, via auto‑registration). No routes or gossip flow toward a pending peer;

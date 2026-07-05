@@ -554,6 +554,15 @@ public class FederatedRoomManager {
         return Collections.unmodifiableMap(result);
     }
 
+    /**
+     * True when any local room has a mapping (any state) with remoteDomain.  Gates the
+     * mapping-ping answer so probes cannot be used to sweep for reachable domains.
+     */
+    public boolean hasMappingWith(String remoteDomain) {
+        return localMappings.values().stream()
+            .anyMatch(list -> list.stream().anyMatch(m -> m.remoteDomain().equals(remoteDomain)));
+    }
+
     // ── Virtual occupant tracking ─────────────────────────────────────────────
 
     /**

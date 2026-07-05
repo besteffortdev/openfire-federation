@@ -184,7 +184,10 @@
         stays in the Routing Table as a disabled row and the deny is remembered even if the route is withdrawn and
         advertised again later. A route to the same destination via a different peer is unaffected, and nothing is
         negotiated with the peer — the deny is entirely yours. <em>Allow</em> lifts it — on the disabled row, or in
-        the peer's settings panel.</li>
+        the peer's settings panel. Servers on the far side of a deny (whose own routing table still shows a
+        route) detect the break end‑to‑end: active mappings are probed with a <code>mapping-ping</code> every
+        60&nbsp;s; when the pongs stop, the mapping shows <em>⚠ not responding</em> and its remote occupants are
+        dropped, then everything re‑syncs on its own once the path answers again.</li>
     <li><strong>S2S key pinning (trust‑on‑first‑use).</strong> The first time a peer's S2S link comes up,
         the SHA‑256 of the leaf certificate's <strong>public key</strong> (SPKI) is pinned. If the key later
         changes (a server re‑created under the same domain name — even with a cert from the same CA), the peer is
