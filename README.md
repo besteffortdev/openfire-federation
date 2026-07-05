@@ -137,8 +137,8 @@ The federation trust boundary is enforced at several points:
   auto‑registration of unknown peers is suppressed. Set it to `false` (or use the **Security** toggle on the
   Peer Servers tab) for open federation, where any server that can connect is accepted and auto‑registered.
 - **Untrusted peers (filtered exposure).** Mark a peer **Untrusted** (the checkbox next to *Add peer*, or the
-  *Make untrusted* button on its row) and it receives **no** routing updates and **no** room advertisements at
-  all. You then pick — per peer, via its *Servers* editor — exactly which **servers** it may see, chosen from
+  *Make untrusted* button in its settings panel) and it receives **no** routing updates and **no** room advertisements at
+  all. You then pick — per peer, via its settings panel (the expand arrow on its row) — exactly which **servers** it may see, chosen from
   this server itself (its federated local rooms) *and* any server reachable through it. The untrusted peer is sent
   only the federated rooms homed on those servers, plus a route to each, so it learns nothing about the rest of
   your topology. Enforcement is two‑way: inbound `room-mapping`/`muc-forward` from an untrusted peer aimed at a
@@ -147,22 +147,22 @@ The federation trust boundary is enforced at several points:
   set of servers.
   - **Trust is a property of the link.** Each end announces its stance (trusted/untrusted) in `peer-announce`;
     if the two disagree, the link is **blocked** (status *Trust mismatch*) and no federation flows until **both**
-    admins set the same trust level. It then comes up automatically — no reconnect needed. The *Servers* editor
-    shows both directions: on the left, the servers you expose to that peer (editable); on the right, the servers
-    that peer is **advertising through** to you (read‑only).
+    admins set the same trust level. It then comes up automatically — no reconnect needed. The peer’s settings panel
+    shows both directions: the servers you expose to that peer (editable), and the servers that peer is
+    **advertising through** to you (each deniable per‑link).
   - **Untrusted by default for foreign peers.** When you add a peer whose **parent domain** differs from this
     server's (the last two DNS labels, e.g. `example.net`; adjustable via `plugin.federation.trustDomainLabels`),
     the *Untrusted* box is ticked automatically — a stranger shares nothing until you choose what it may see.
     Same‑parent peers default trusted.
 - **Deniable route advertisements (per‑link inbound filter).** The exposure controls above govern what you *send*;
   each side can also refuse what it *receives*. If a peer advertises a route (and rooms) for a destination you
-  don't want, click **Deny** — on the Routing Table row, or next to that server in the peer's *Servers* editor
+  don't want, click **Deny** — on the Routing Table row, or next to that server in the peer’s settings panel
   (right column). The destination is refused whenever **that** peer advertises it: any installed route via that
   peer is torn down immediately (with room/ghost clean‑up) and future advertisements are dropped on receive. A
   route to the same destination via a *different* peer is unaffected, and the deny is one‑sided — nothing is
   negotiated with the peer. The denied entry stays listed in the Routing Table as a disabled (struck‑through)
   row, and the deny is remembered even if the peer withdraws the route and advertises it again later.
-  **Allow** (on the disabled row, or in the peer's *Servers* editor) lifts it and re‑solicits the peer so the
+  **Allow** (on the disabled row, or in the peer’s settings panel) lifts it and re‑solicits the peer so the
   route re‑appears. Denies are persisted per peer (`federation.peer.deniedroutes.<domain>`).
 - **Mutual‑add handshake (Pending status).** A configured peer whose S2S link is up shows **Pending** — not
   *Reachable* — until its federation plugin sends us a `peer-announce`, i.e. until the remote has added us back

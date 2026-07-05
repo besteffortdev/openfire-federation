@@ -155,42 +155,9 @@ function renderPeers(peers) {
         const isDisabled       = p.status === 'DISABLED';
         const isRemoteDisabled = p.status === 'REMOTE_DISABLED';
         const isPending        = p.status === 'PENDING';
-        const needsRetry = isWithdrawn || isUnreachable || isPending || p.status === 'UNKNOWN';
 
-        let actionBtns = '';
-        if (isDisabled) {
-            // We disabled this peer — only we can re-enable it.
-            actionBtns = `<button class="btn-small btn-primary" style="margin-right:4px"
-                       onclick="enablePeer('${escHtml(p.domain)}')">Enable</button>`;
-        } else if (isRemoteDisabled) {
-            // Disabled by the remote — cannot be re-enabled from this side.
-            actionBtns = '';
-        } else {
-            if (needsRetry) {
-                actionBtns += `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="retryPeer('${escHtml(p.domain)}')">${isWithdrawn ? 'Reconnect' : 'Retry'}</button>`;
-            }
-            actionBtns += `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="disablePeer('${escHtml(p.domain)}')">Disable</button>`;
-        }
-
-        // Trust controls: toggle untrusted, and (when untrusted) open the exposed-server editor.
-        const trustBtn = p.untrusted
-            ? `<button class="btn-small btn-primary" style="margin-right:4px"
-                       onclick="setUntrusted('${escHtml(p.domain)}', false)">Make trusted</button>`
-            : `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="setUntrusted('${escHtml(p.domain)}', true)">Make untrusted</button>`;
         const expanded = expandedPeerRooms.has(p.domain);
         const deniedCount = (p.deniedRoutes || []).length;
-        // Untrusted peers get the full Servers editor; a trusted peer with denied routes
-        // still needs somewhere to lift a deny made from the Routing tab.
-        const roomsBtn = p.untrusted
-            ? `<button class="btn-small" style="margin-right:4px;background:#e2e3e5;color:#383d41"
-                       onclick="togglePeerRooms('${escHtml(p.domain)}')">Servers ${expanded ? '▾' : '▸'}</button>`
-            : (deniedCount > 0
-                ? `<button class="btn-small" style="margin-right:4px;background:#e2e3e5;color:#383d41"
-                           onclick="togglePeerRooms('${escHtml(p.domain)}')">Denied routes (${deniedCount}) ${expanded ? '▾' : '▸'}</button>`
-                : '');
 
         let statusLabel;
         if (isWithdrawn)               statusLabel = 'Disconnected by remote';
@@ -212,28 +179,31 @@ function renderPeers(peers) {
         }
 
         const untrustedBadge = p.untrusted
-            ? `<span class="badge badge-untrusted" title="Shares only the servers you expose">untrusted · ${(p.exposedServers || []).length} server(s)</span>`
+            ? `<span class="badge badge-untrusted" title="Shares only the servers you expose">untrusted</span>`
             : '';
 
-        // S2S cert pinning: a changed cert (possible impersonation) shows a red alert + accept
-        // button; a quietly-pinned cert shows an unobtrusive lock.
+        // S2S cert pinning: a changed cert (possible impersonation) shows a red alert row with
+        // the accept button; a quietly-pinned cert shows an unobtrusive lock.
         const certBadge = p.certMismatch
             ? `<span class="badge badge-untrusted" title="The S2S certificate changed since it was first pinned">⚠ cert changed</span>`
             : (p.certPinned ? `<span class="badge badge-in" title="S2S certificate pinned (trust-on-first-use)">🔒 pinned</span>` : '');
-        const certBtn = p.certMismatch
-            ? `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="acceptCert('${escHtml(p.domain)}')">Trust new cert</button>`
-            : '';
+
+        // Compact summary next to the expand arrow (mirrors the rooms list).
+        const sumParts = [];
+        sumParts.push(p.untrusted ? `${(p.exposedServers || []).length} exposed` : 'trusted');
+        if (deniedCount) sumParts.push(`${deniedCount} denied`);
+        const dom = escHtml(p.domain);
 
         let row = `
         <tr>
-            <td>${escHtml(p.domain)}${untrustedBadge}${certBadge}</td>
+            <td>${dom}${untrustedBadge}${certBadge}</td>
             <td><span class="status-dot ${statusClass(p.status)}"></span> ${statusLabel}</td>
             <td>${p.lastSeen ? new Date(p.lastSeen).toLocaleString() : '—'}</td>
-            <td style="white-space:nowrap">
-                ${certBtn}${actionBtns}${trustBtn}${roomsBtn}
-                <button class="btn-small btn-danger"
-                        onclick="removePeer('${escHtml(p.domain)}')">Remove</button>
+            <td class="room-detail-cell">
+                <span class="room-detail-sum">${sumParts.join(' · ')}</span>
+                <button class="room-expand-btn ${expanded ? 'open' : ''}"
+                        title="${expanded ? 'Hide' : 'Show'} settings for this peer"
+                        onclick="togglePeerRooms('${dom}')">▸</button>
             </td>
         </tr>`;
 
@@ -241,74 +211,85 @@ function renderPeers(peers) {
             row += `
         <tr class="exposed-editor-row">
             <td colspan="4" style="color:#58151c">
-                ⚠ <strong>${escHtml(p.domain)}</strong> presented a different S2S certificate than the
+                ⚠ <strong>${dom}</strong> presented a different S2S certificate than the
                 one pinned on first contact — this can mean a server was re-created, or an impersonation
                 attempt. The peer has been auto-marked untrusted. If you trust the change, click
-                <em>Trust new cert</em>; otherwise investigate before restoring trust.
+                <button class="btn-small btn-warn" onclick="acceptCert('${dom}')">Trust new cert</button> —
+                otherwise investigate before restoring trust.
             </td>
         </tr>`;
         }
 
-        if (p.untrusted && expanded) {
-            row += renderExposedServerEditor(p);
-        } else if (expanded && deniedCount > 0) {
-            row += renderDeniedRoutesRow(p);
-        }
+        if (expanded) row += renderPeerDetailRow(p);
         return row;
     }).join('');
 }
 
-/** Denied-routes panel for a TRUSTED peer (untrusted peers manage denies in the Servers editor). */
-function renderDeniedRoutesRow(p) {
-    const rows = (p.deniedRoutes || []).slice().sort().map(s => `
-        <div class="exposed-room"><span style="text-decoration:line-through;color:#999">${escHtml(s)}</span>
-            <span class="badge badge-untrusted">denied</span>
-            <button class="btn-small btn-primary" style="margin-left:8px"
-                    onclick="allowRoute('${escHtml(p.domain)}','${escHtml(s)}')">Allow</button>
-        </div>`).join('');
-    return `
-        <tr class="exposed-editor-row">
-            <td colspan="4">
-                <div class="exposed-col-h">Denied advertisements from ${escHtml(p.domain)}
-                    <span class="exposed-col-sub">destinations refused whenever this peer advertises them</span>
-                </div>
-                ${rows}
-            </td>
-        </tr>`;
-}
+// ── Per-peer settings panel (connection + trust/exposure + inbound) ───────────
 
-// ── Untrusted peers: exposed-server editor ─────────────────────────────────────
-
-function renderExposedServerEditor(p) {
+/** Full-width detail row behind the expand arrow: every setting for one peer in one view. */
+function renderPeerDetailRow(p) {
+    const dom = escHtml(p.domain);
     const id = jidToElemId(p.domain);
-    // ── Left: SERVERS we expose to this peer (editable). ──
-    // Pending edits win over the persisted set so a refresh doesn't reset the admin's work.
-    const checkedSet = editedExposed[p.domain] || new Set(p.exposedServers || []);
-    const candidates = (p.exposableServers || []).slice();
-    // Include any exposed server no longer in the candidate list (e.g. route lost) so it's not
-    // silently dropped from the UI while still persisted.
-    (p.exposedServers || []).forEach(s => { if (!candidates.includes(s)) candidates.push(s); });
+    const isWithdrawn = p.status === 'WITHDRAWN';
+    const needsRetry = isWithdrawn || p.status === 'UNREACHABLE'
+                    || p.status === 'PENDING' || p.status === 'UNKNOWN';
 
-    const leftList = candidates.length === 0
-        ? '<p class="empty" style="margin:4px 0">No servers available to expose yet.</p>'
-        : candidates.map(s => {
-            const checked = checkedSet.has(s) ? 'checked' : '';
-            const isLocal = s === lastData.localDomain;
-            const tag = isLocal
-                ? '<span class="badge badge-in">this server</span>'
-                : (p.exposableServers || []).includes(s)
-                    ? ''
-                    : '<span class="badge badge-out" title="no current route">unavailable</span>';
-            return `
+    // ── Connection actions ──
+    let actionBtns = '';
+    if (p.status === 'DISABLED') {
+        // We disabled this peer — only we can re-enable it.
+        actionBtns = `<button class="btn-small btn-primary" onclick="enablePeer('${dom}')">Enable</button>`;
+    } else if (p.status === 'REMOTE_DISABLED') {
+        // Disabled by the remote — cannot be re-enabled from this side.
+        actionBtns = '<span class="exposed-col-sub">Disabled by the remote — only they can re-enable it.</span>';
+    } else {
+        if (needsRetry) {
+            actionBtns += `<button class="btn-small btn-warn" onclick="retryPeer('${dom}')">${isWithdrawn ? 'Reconnect' : 'Retry'}</button>`;
+        }
+        actionBtns += `<button class="btn-small btn-warn" onclick="disablePeer('${dom}')">Disable</button>`;
+    }
+
+    // ── Outbound: trust level, and (when untrusted) which servers we expose. ──
+    // Pending edits win over the persisted set so a refresh doesn't reset the admin's work.
+    const trustBtn = p.untrusted
+        ? `<button class="btn-small btn-primary" onclick="setUntrusted('${dom}', false)">Make trusted</button>`
+        : `<button class="btn-small btn-warn" onclick="setUntrusted('${dom}', true)">Make untrusted</button>`;
+    let outbound;
+    if (p.untrusted) {
+        const checkedSet = editedExposed[p.domain] || new Set(p.exposedServers || []);
+        const candidates = (p.exposableServers || []).slice();
+        // Include any exposed server no longer in the candidate list (e.g. route lost) so it's not
+        // silently dropped from the UI while still persisted.
+        (p.exposedServers || []).forEach(s => { if (!candidates.includes(s)) candidates.push(s); });
+        const list = candidates.length === 0
+            ? '<p class="empty" style="margin:4px 0">No servers available to expose yet.</p>'
+            : candidates.map(s => {
+                const checked = checkedSet.has(s) ? 'checked' : '';
+                const isLocal = s === lastData.localDomain;
+                const tag = isLocal
+                    ? '<span class="badge badge-in">this server</span>'
+                    : (p.exposableServers || []).includes(s)
+                        ? ''
+                        : '<span class="badge badge-out" title="no current route">unavailable</span>';
+                return `
             <label class="exposed-room">
-                <input type="checkbox" class="exposed-cb" data-domain="${escHtml(p.domain)}"
+                <input type="checkbox" class="exposed-cb" data-domain="${dom}"
                        value="${escHtml(s)}" ${checked}
-                       onchange="captureExposedEdits('${escHtml(p.domain)}')">
+                       onchange="captureExposedEdits('${dom}')">
                 <span>${escHtml(s)}</span> ${tag}
             </label>`;
-        }).join('');
+            }).join('');
+        outbound = `${list}
+            <div style="margin-top:8px">
+                <button class="btn-small btn-primary" onclick="saveExposedServers('${dom}')">Save</button>
+                <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
+            </div>`;
+    } else {
+        outbound = '<p class="empty" style="margin:4px 0">Trusted — this peer sees the full topology and all federated rooms.</p>';
+    }
 
-    // ── Right: SERVERS this peer advertises through to us, each deniable per-link. ──
+    // ── Inbound: what this peer advertises through to us, each deniable per-link. ──
     const denied = (p.deniedRoutes || []).slice().sort();
     const advSet = new Set([...(p.advertisedVia || []), ...(p.advertisedRoutes || [])]);
     denied.forEach(s => advSet.delete(s));
@@ -316,38 +297,44 @@ function renderExposedServerEditor(p) {
     const advRows = adv.map(s => `
             <div class="exposed-room"><span>${escHtml(s)}</span>
                 <button class="btn-small btn-warn" style="margin-left:8px"
-                        title="Refuse this server's routes and rooms when ${escHtml(p.domain)} advertises them"
-                        onclick="denyRoute('${escHtml(p.domain)}','${escHtml(s)}')">Deny</button>
+                        title="Refuse this server's routes and rooms when ${dom} advertises them"
+                        onclick="denyRoute('${dom}','${escHtml(s)}')">Deny</button>
             </div>`).join('');
     const deniedRows = denied.map(s => `
             <div class="exposed-room"><span style="text-decoration:line-through;color:#999">${escHtml(s)}</span>
                 <span class="badge badge-untrusted">denied</span>
                 <button class="btn-small btn-primary" style="margin-left:8px"
-                        onclick="allowRoute('${escHtml(p.domain)}','${escHtml(s)}')">Allow</button>
+                        onclick="allowRoute('${dom}','${escHtml(s)}')">Allow</button>
             </div>`).join('');
-    const rightList = (adv.length === 0 && denied.length === 0)
-        ? '<p class="empty" style="margin:4px 0">This peer is not advertising any servers to us yet.</p>'
+    const inbound = (adv.length === 0 && denied.length === 0)
+        ? '<p class="empty" style="margin:4px 0">This peer is not advertising any other servers to us yet.</p>'
         : advRows + deniedRows;
 
     return `
-        <tr class="exposed-editor-row">
+        <tr class="exposed-editor-row room-detail-row">
             <td colspan="4">
                 <div class="exposed-cols">
-                    <div class="exposed-col">
-                        <div class="exposed-col-h">↑ Servers exposed to ${escHtml(p.domain)}
-                            <span class="exposed-col-sub">this peer sees each checked server's federated rooms and a route to it</span>
+                    <div class="exposed-col" style="flex:0 0 200px">
+                        <div class="exposed-col-h">Connection
+                            <span class="exposed-col-sub">manage the link with ${dom}</span>
                         </div>
-                        ${leftList}
-                        <div style="margin-top:8px">
-                            <button class="btn-small btn-primary" onclick="saveExposedServers('${escHtml(p.domain)}')">Save</button>
-                            <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
+                        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+                            ${actionBtns}
+                            <button class="btn-small btn-danger" onclick="removePeer('${dom}')">Remove peer</button>
                         </div>
                     </div>
                     <div class="exposed-col">
-                        <div class="exposed-col-h">↓ Servers ${escHtml(p.domain)} advertises through
+                        <div class="exposed-col-h">↑ Exposed to ${dom}
+                            <span class="exposed-col-sub">an untrusted peer sees each checked server's federated rooms and a route to it</span>
+                        </div>
+                        <div style="margin-bottom:8px">${trustBtn}</div>
+                        ${outbound}
+                    </div>
+                    <div class="exposed-col">
+                        <div class="exposed-col-h">↓ Advertised by ${dom}
                             <span class="exposed-col-sub">what the remote is exposing inbound — Deny one to refuse its routes and rooms from this peer</span>
                         </div>
-                        ${rightList}
+                        ${inbound}
                     </div>
                 </div>
             </td>
@@ -376,9 +363,9 @@ function togglePeerRooms(domain) {
 function setUntrusted(domain, untrusted) {
     if (untrusted && !confirm('Mark ' + domain + ' as untrusted?\n\n'
         + 'It will immediately stop receiving routing updates and room advertisements. '
-        + 'Use "Servers" to choose exactly which servers it may see.')) return;
+        + 'Use the peer\'s settings panel (expand arrow) to choose exactly which servers it may see.')) return;
     post({ action: 'set-untrusted', domain, untrusted }).then(() => {
-        if (!untrusted) { expandedPeerRooms.delete(domain); delete editedExposed[domain]; }
+        if (!untrusted) delete editedExposed[domain];   // exposure list no longer applies
         refresh();
     });
 }
