@@ -1108,6 +1108,20 @@ function setRoomAutoAccept(jid, autoAccept) {
 
 // ── Mapping consent: inline rows + pending-requests panel ───────────────────────
 
+/** "12 ms · 3s ago" chip for the end-to-end mapping probe; explains itself when no pong yet. */
+function renderMappingPing(m, dom) {
+    if (m.state !== 'ACTIVE') return '';
+    if (m.pongAgeSecs >= 0) {
+        const age = m.pongAgeSecs < 120 ? `${m.pongAgeSecs}s ago` : `${Math.round(m.pongAgeSecs / 60)}m ago`;
+        const rtt = m.pingMs >= 0 ? `${m.pingMs} ms` : '✓';
+        return `<span class="mapping-ping" title="End-to-end probe of the full path to ${dom} — last answer ${age}${m.pingMs >= 0 ? `, round trip ${m.pingMs} ms` : ''}">ping ${rtt} · ${age}</span>`;
+    }
+    if (m.connected !== false) {
+        return `<span class="mapping-ping" title="No end-to-end probe answer from ${dom} since this server started — the probe runs every minute; a persistent blank here can mean the reverse path is broken or the peer predates 1.7.19">ping —</span>`;
+    }
+    return '';
+}
+
 /** Renders one mapping row with a state badge and the buttons valid for that state. */
 function renderMappingRow(localJid, m) {
     const dom = escHtml(m.remoteDomain);
@@ -1124,6 +1138,7 @@ function renderMappingRow(localJid, m) {
                     ? `<span class="mapping-state mapping-disconnected" title="No route to ${dom} — an intermediate peer is not advertising it">⚠ route missing</span>`
                     : `<span class="mapping-state mapping-disconnected" title="Route to ${dom} is down">⚠ disconnected</span>`)
                 : `<span class="mapping-state mapping-connected">● active</span>`;
+            badge += ` ${renderMappingPing(m, dom)}`;
             buttons = `<button class="btn-small btn-warn" onclick="mappingAction('disable-mapping','${lj}','${dom}')">Disable</button> ${unmap}`;
             break;
         case 'PENDING_OUT':

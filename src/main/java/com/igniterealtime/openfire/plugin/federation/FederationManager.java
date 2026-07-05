@@ -1047,18 +1047,64 @@ public class FederationManager {
     static final int MAPPING_PING_MISS_LIMIT = 3;
 
     private static final class MappingPingState {
-        volatile boolean everPonged = false;   // never true for a pre-1.7.19 peer → never marked broken
+        volatile boolean everPonged = false;   // this runtime; persisted capability survives restarts
         volatile int     missed     = 0;       // pings sent since the last pong
         volatile boolean broken     = false;
+        volatile long    lastPingAt = 0;       // epoch ms of the newest ping we sent
+        volatile long    lastPongAt = 0;       // epoch ms of the newest pong we received
+        volatile long    lastRttMs  = -1;      // round trip of the newest pong (-1 = none yet)
     }
 
     private final java.util.concurrent.ConcurrentHashMap<String, MappingPingState> mappingPingStates =
         new java.util.concurrent.ConcurrentHashMap<>();
 
+    // Domains proven to speak the probe protocol (they ponged — or pinged — us at least once,
+    // ever). Persisted: everPonged alone resets with the JVM, so a path already broken when the
+    // plugin (re)starts would otherwise never be flagged and its ghost occupants never evicted.
+    private static final String PROBE_CAPABLE_KEY = "plugin.federation.probeCapableDomains";
+    private final Set<String> probeCapable = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private volatile boolean probeCapableLoaded = false;
+
+    private Set<String> probeCapable() {
+        if (!probeCapableLoaded) {
+            synchronized (probeCapable) {
+                if (!probeCapableLoaded) {
+                    String csv = JiveGlobals.getProperty(PROBE_CAPABLE_KEY, "");
+                    for (String d : csv.split(",")) {
+                        if (!d.isBlank()) probeCapable.add(d.trim());
+                    }
+                    probeCapableLoaded = true;
+                }
+            }
+        }
+        return probeCapable;
+    }
+
+    /** Records (persistently) that this domain answers mapping probes, enabling break detection toward it. */
+    public void markProbeCapable(String domain) {
+        if (domain == null || domain.isEmpty()) return;
+        if (probeCapable().add(domain)) {
+            JiveGlobals.setProperty(PROBE_CAPABLE_KEY, String.join(",", probeCapable));
+        }
+    }
+
     /** True when the mapped domain has stopped answering end-to-end probes (route may still exist). */
     public boolean isMappingPathBroken(String remoteDomain) {
         MappingPingState st = mappingPingStates.get(remoteDomain);
         return st != null && st.broken;
+    }
+
+    /** Round trip (ms) of the newest pong from the domain; -1 when none was received this runtime. */
+    public long getMappingPingRttMs(String remoteDomain) {
+        MappingPingState st = mappingPingStates.get(remoteDomain);
+        return st == null ? -1 : st.lastRttMs;
+    }
+
+    /** Seconds since the newest pong from the domain; -1 when none was received this runtime. */
+    public long getMappingPongAgeSecs(String remoteDomain) {
+        MappingPingState st = mappingPingStates.get(remoteDomain);
+        return st == null || st.lastPongAt == 0 ? -1
+             : (System.currentTimeMillis() - st.lastPongAt) / 1000;
     }
 
     /** Sends one mapping-ping toward every distinct ACTIVE-mapped domain that is currently routable. */
@@ -1075,25 +1121,41 @@ public class FederationManager {
             java.util.Optional<String> nextHop = routingTable.findNextHop(dest);
             if (nextHop.isEmpty()) continue;   // no route — routeMissing handling already covers this
             MappingPingState st = mappingPingStates.computeIfAbsent(dest, k -> new MappingPingState());
-            if (st.everPonged && !st.broken && st.missed >= MAPPING_PING_MISS_LIMIT) {
+            if ((st.everPonged || probeCapable().contains(dest))
+                    && !st.broken && st.missed >= MAPPING_PING_MISS_LIMIT) {
                 st.broken = true;
                 onMappingPathBroken(dest);
             }
             st.missed++;
+            long now = System.currentTimeMillis();
+            st.lastPingAt = now;
             try {
                 XMPPServer.getInstance().getPacketRouter().route(
-                    FederationStanzaFactory.mappingPing(nextHop.get(), dest, localDomain, ""));
+                    FederationStanzaFactory.mappingPing(nextHop.get(), dest, localDomain, "",
+                                                        Long.toString(now)));
             } catch (Exception e) {
                 Log.warn("Could not send mapping-ping toward {}: {}", dest, e.getMessage());
             }
         }
     }
 
-    /** A pong arrived from a mapped domain: the round trip works. Heals a broken-path state. */
-    public void onMappingPong(String remoteDomain) {
+    /**
+     * A pong arrived from a mapped domain: the round trip works. Heals a broken-path state.
+     * {@code echoedTs} is our own ping timestamp echoed back by a ≥1.7.21 peer (null/empty from
+     * older peers — the newest ping's send time is used for the RTT instead).
+     */
+    public void onMappingPong(String remoteDomain, String echoedTs) {
         MappingPingState st = mappingPingStates.computeIfAbsent(remoteDomain, k -> new MappingPingState());
         boolean wasBroken = st.broken;
         st.everPonged = true;
+        markProbeCapable(remoteDomain);
+        long now = System.currentTimeMillis();
+        long sentAt = st.lastPingAt;
+        if (echoedTs != null && !echoedTs.isEmpty()) {
+            try { sentAt = Long.parseLong(echoedTs); } catch (NumberFormatException ignored) { }
+        }
+        if (sentAt > 0 && sentAt <= now) st.lastRttMs = now - sentAt;
+        st.lastPongAt = now;
         st.missed = 0;
         st.broken = false;
         if (wasBroken) {

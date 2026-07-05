@@ -170,7 +170,11 @@ The federation trust boundary is enforced at several points:
     the mapped domain answers with a pong routed back across the overlay. Three unanswered probes in a row
     flip the mapping to **⚠ not responding**, its remote occupants are dropped (no more stale ghosts), and
     when pongs resume the flag clears and rosters re‑sync automatically. Peers running an older plugin never
-    answer probes and are simply never flagged.
+    answer probes and are simply never flagged: a domain is only eligible for the *not responding* verdict
+    once it has provably answered (or sent) a probe, and that proof is **persisted**
+    (`plugin.federation.probeCapableDomains`) so it survives restarts — a path already broken when the
+    plugin starts is still detected. Each mapping row in the room's settings panel shows the probe's
+    round‑trip time and the age of the last answer (`ping 12 ms · 3s ago`; `ping —` = no answer yet).
 - **Mutual‑add handshake (Pending status).** A configured peer whose S2S link is up shows **Pending** — not
   *Reachable* — until its federation plugin sends us a `peer-announce`, i.e. until the remote has added us back
   (instantly, in open‑federation mode, via auto‑registration). No routes or gossip flow toward a pending peer;

@@ -261,23 +261,30 @@ public final class FederationStanzaFactory {
      * silently broken mid-way (e.g. a route deny on an intermediate server) while
      * this server's own routing table still shows the destination as reachable.
      */
-    public static IQ mappingPing(String nextHop, String destination, String originDomain, String viaTrail) {
-        return mappingProbe("mapping-ping", nextHop, destination, originDomain, viaTrail);
+    public static IQ mappingPing(String nextHop, String destination, String originDomain,
+                                 String viaTrail, String ts) {
+        return mappingProbe("mapping-ping", nextHop, destination, originDomain, viaTrail, ts);
     }
 
-    /** Reply half of the mapping path probe; routed back exactly like the ping. */
-    public static IQ mappingPong(String nextHop, String destination, String originDomain, String viaTrail) {
-        return mappingProbe("mapping-pong", nextHop, destination, originDomain, viaTrail);
+    /**
+     * Reply half of the mapping path probe; routed back exactly like the ping.
+     * {@code ts} echoes the ping's origin timestamp untouched so the origin can compute
+     * the round-trip time on its own clock (empty/null when the ping carried none).
+     */
+    public static IQ mappingPong(String nextHop, String destination, String originDomain,
+                                 String viaTrail, String ts) {
+        return mappingProbe("mapping-pong", nextHop, destination, originDomain, viaTrail, ts);
     }
 
     private static IQ mappingProbe(String element, String nextHop, String destination,
-                                   String originDomain, String viaTrail) {
+                                   String originDomain, String viaTrail, String ts) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement("federation", NS);
         Element probe = fed.addElement(element);
         probe.addAttribute("destination", destination);
         probe.addAttribute("origin",      originDomain);
         if (viaTrail != null && !viaTrail.isEmpty()) probe.addAttribute("via", viaTrail);
+        if (ts != null && !ts.isEmpty())             probe.addAttribute("ts",  ts);
         return iq;
     }
 

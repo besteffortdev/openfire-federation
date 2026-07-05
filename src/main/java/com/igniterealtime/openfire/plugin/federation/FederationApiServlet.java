@@ -200,7 +200,9 @@ public class FederationApiServlet extends HttpServlet {
                   .append("\"state\":\"").append(esc(m.get("state"))).append("\",")
                   .append("\"connected\":").append(connected).append(",")
                   .append("\"routeMissing\":").append(routeMissing).append(",")
-                  .append("\"pathBroken\":").append(pathBroken)
+                  .append("\"pathBroken\":").append(pathBroken).append(",")
+                  .append("\"pingMs\":").append(mgr.getMappingPingRttMs(m.get("remoteDomain"))).append(",")
+                  .append("\"pongAgeSecs\":").append(mgr.getMappingPongAgeSecs(m.get("remoteDomain")))
                   .append("}");
             }
             sb.append("]}");
@@ -266,7 +268,9 @@ public class FederationApiServlet extends HttpServlet {
                   .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\",")
                   .append("\"connected\":").append(connected).append(",")
                   .append("\"routeMissing\":").append(routeMissing).append(",")
-                  .append("\"pathBroken\":").append(pathBroken)
+                  .append("\"pathBroken\":").append(pathBroken).append(",")
+                  .append("\"pingMs\":").append(mgr.getMappingPingRttMs(m.remoteDomain())).append(",")
+                  .append("\"pongAgeSecs\":").append(mgr.getMappingPongAgeSecs(m.remoteDomain()))
                   .append("}");
             }
             sb.append("]");

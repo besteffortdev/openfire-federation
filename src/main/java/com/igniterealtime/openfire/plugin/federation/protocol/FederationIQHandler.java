@@ -541,12 +541,15 @@ public class FederationIQHandler extends IQHandler {
             Log.debug("mapping-ping from {} — no active mapping with it, not answering", origin);
             return;
         }
+        // The origin provably speaks the probe protocol — remember that for our own break detection.
+        manager.markProbeCapable(origin);
+        String ts = el.attributeValue("ts");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         manager.getRoutingTable().findNextHop(origin).ifPresentOrElse(
             nextHop -> {
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(
-                        FederationStanzaFactory.mappingPong(nextHop, origin, localDomain, ""));
+                        FederationStanzaFactory.mappingPong(nextHop, origin, localDomain, "", ts));
                 } catch (Exception e) {
                     Log.warn("Could not answer mapping-ping from {}: {}", origin, e.getMessage());
                 }
@@ -558,7 +561,7 @@ public class FederationIQHandler extends IQHandler {
     private void handleMappingPong(String fromDomain, Element el) {
         if (relayMappingProbe("mapping-pong", fromDomain, el)) return;
         String origin = el.attributeValue("origin");
-        if (origin != null && !origin.isEmpty()) manager.onMappingPong(origin);
+        if (origin != null && !origin.isEmpty()) manager.onMappingPong(origin, el.attributeValue("ts"));
     }
 
     /**
@@ -581,14 +584,15 @@ public class FederationIQHandler extends IQHandler {
             return true;
         }
         String origin = el.attributeValue("origin");
+        String ts = el.attributeValue("ts");
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
         manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
             nextHop -> {
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(
                         element.equals("mapping-ping")
-                            ? FederationStanzaFactory.mappingPing(nextHop, destination, origin, newVia)
-                            : FederationStanzaFactory.mappingPong(nextHop, destination, origin, newVia));
+                            ? FederationStanzaFactory.mappingPing(nextHop, destination, origin, newVia, ts)
+                            : FederationStanzaFactory.mappingPong(nextHop, destination, origin, newVia, ts));
                 } catch (Exception e) {
                     Log.warn("Could not relay {} toward {}: {}", element, destination, e.getMessage());
                 }
