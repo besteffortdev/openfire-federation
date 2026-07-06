@@ -298,7 +298,10 @@ public class FederationIQHandler extends IQHandler {
             manager.resyncMappedDestinations(changed);
             manager.propagateRoutingToAll(fromDomain);
             // Re-flood room knowledge so remote-room caches follow the routing change.
-            manager.propagateRoomsToAll();
+            // Debounced: one topology change arrives as a burst of routing-updates (triggered
+            // updates + solicit replies), and each full room flood is itself relayed onward by
+            // every receiver — coalescing the burst avoids an O(N² · rooms) storm per flap.
+            manager.propagateRoomsToAllDebounced();
             // If we lost any route, ask our other peers for an alternate path (and its
             // rooms) — triggered-only DV would otherwise never re-learn it.
             boolean lostRoute = changed.stream().anyMatch(d -> !manager.getRoutingTable().isReachable(d));

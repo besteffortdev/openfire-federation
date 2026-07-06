@@ -69,7 +69,7 @@ public class S2SMonitor {
     private final FederatedRoomManager   roomManager;
     private final FederationManager      federationManager;
 
-    private ScheduledExecutorService scheduler;
+    private volatile ScheduledExecutorService scheduler;
     private ScheduledFuture<?>       keepaliveFuture;
     private ScheduledFuture<?>       reconnectFuture;
     /** The interval the keepalive task is currently scheduled at (effective, post-clamp). */
@@ -133,6 +133,27 @@ public class S2SMonitor {
     public void stop() {
         if (scheduler != null) {
             scheduler.shutdownNow();
+        }
+    }
+
+    /**
+     * Runs a one-shot task on the monitor's scheduler after {@code delayMs}.  Returns false
+     * when the monitor is not running (caller should fall back to executing inline).
+     */
+    boolean schedule(Runnable task, long delayMs) {
+        ScheduledExecutorService s = scheduler;
+        if (s == null || s.isShutdown()) return false;
+        try {
+            s.schedule(() -> {
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    Log.error("Scheduled federation task threw unexpectedly", e);
+                }
+            }, delayMs, TimeUnit.MILLISECONDS);
+            return true;
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            return false;   // shut down between the check and the submit
         }
     }
 

@@ -192,9 +192,23 @@ public class RoomDefaultsManager {
         return out;
     }
 
+    /**
+     * Compiled-glob cache.  bestMatch runs every rule's glob on every room creation (and
+     * applyDefaultsToAllRooms runs it across every existing room), so recompiling the regex per
+     * call was pure waste.  Keyed by the glob string; bounded in practice by the small
+     * admin-defined rule set (deleted rules leave a stale entry, which is negligible).
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Pattern> GLOB_CACHE =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Case-insensitive Linux-style glob match ({@code *} = any run, {@code ?} = one char). */
     static boolean globMatches(String glob, String name) {
         if (glob == null || name == null) return false;
+        return GLOB_CACHE.computeIfAbsent(glob, RoomDefaultsManager::compileGlob)
+                         .matcher(name).matches();
+    }
+
+    private static Pattern compileGlob(String glob) {
         StringBuilder re = new StringBuilder("^");
         for (int i = 0; i < glob.length(); i++) {
             char c = glob.charAt(i);
@@ -205,6 +219,6 @@ public class RoomDefaultsManager {
             }
         }
         re.append("$");
-        return Pattern.compile(re.toString(), Pattern.CASE_INSENSITIVE).matcher(name).matches();
+        return Pattern.compile(re.toString(), Pattern.CASE_INSENSITIVE);
     }
 }

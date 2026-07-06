@@ -303,6 +303,8 @@ public class FederationManager {
         if (interceptor != null)
             InterceptorManager.getInstance().removeInterceptor(interceptor);
 
+        bookmarkInjector.shutdown();
+
         Log.info("Federation plugin stopped.");
     }
 
@@ -822,7 +824,11 @@ public class FederationManager {
      *        injects them without bouncing a reverse sync (in-session updates and
      *        leaves).  When false (initial mapping sync), the receiver's
      *        injectPresence runs syncLocalOccupantsToRemote and replies with its
-     *        own occupants — a bilateral exchange.
+     *        own occupants — a bilateral exchange.  Only the FIRST occupant's
+     *        presence is left unmarked in that case: one unmarked join is enough to
+     *        trigger the reverse sync, and marking the rest collapses what was an
+     *        N×M reply burst (every unmarked join provoked a full-roster reply from
+     *        the remote) into a single M-occupant reply.
      */
     private void pushOccupants(String localRoom, String remoteDomain, String remoteRoomJid,
                                boolean leaving, boolean markForwarded) {
@@ -836,6 +842,7 @@ public class FederationManager {
             String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
             String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
 
+            boolean syncTriggerSent = false;
             for (MUCOccupant occupant : occupants) {
                 Presence p = new Presence();
                 p.setFrom(occupant.getUserAddress());
@@ -850,7 +857,8 @@ public class FederationManager {
                         p.getElement().addElement("status").setText(statusEl.getText());
                     }
                 }
-                if (markForwarded) FederationStanzaFactory.markAsForwarded(p);
+                if (markForwarded || syncTriggerSent) FederationStanzaFactory.markAsForwarded(p);
+                syncTriggerSent = true;
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(
                         FederationStanzaFactory.mucForward(
@@ -877,9 +885,10 @@ public class FederationManager {
     }
 
     /**
-     * Sends current local occupants' join presences to the remote WITHOUT fed-origin
-     * so the remote's injectPresence triggers syncLocalOccupantsToRemote and replies
-     * with its own occupants.  Used only at mapping-creation time.
+     * Sends current local occupants' join presences to the remote, the first one WITHOUT
+     * fed-origin so the remote's injectPresence triggers syncLocalOccupantsToRemote exactly
+     * once and replies with its own occupants (the rest are marked — see pushOccupants).
+     * Used at mapping-creation and re-sync time.
      */
     public void pushInitialSyncPresences(String localRoom, String remoteDomain,
                                          String remoteRoomJid) {
@@ -1213,6 +1222,37 @@ public class FederationManager {
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 sendRoomState(peer.getDomain());
             }
+        }
+    }
+
+    /**
+     * Debounce window for routing-change-driven room re-floods.  A link flap delivers a burst
+     * of routing-updates (each peer's triggered update, then the solicit replies), and flooding
+     * full room state to every reachable peer for each one is O(N² · rooms) chatter across the
+     * mesh — every receiving hop relays the advertisements onward again.  Coalescing the burst
+     * into one flood is invisible to correctness: room gossip is eventually consistent, and
+     * solicits/keepalives cover any straggler.
+     */
+    private static final long ROOMS_FLOOD_DEBOUNCE_MS = 2000;
+    private final java.util.concurrent.atomic.AtomicBoolean roomsFloodPending =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * As {@link #propagateRoomsToAll} but coalesced: bursts of calls within
+     * {@link #ROOMS_FLOOD_DEBOUNCE_MS} produce a single flood.  Used by the routing-update
+     * handler, where one topology change arrives as many gossip messages in quick succession.
+     * Falls back to an immediate flood when the monitor's scheduler is unavailable.
+     */
+    public void propagateRoomsToAllDebounced() {
+        if (!roomsFloodPending.compareAndSet(false, true)) return;   // a flood is already queued
+        S2SMonitor monitor = s2sMonitor;
+        boolean scheduled = monitor != null && monitor.schedule(() -> {
+            roomsFloodPending.set(false);
+            propagateRoomsToAll();
+        }, ROOMS_FLOOD_DEBOUNCE_MS);
+        if (!scheduled) {
+            roomsFloodPending.set(false);
+            propagateRoomsToAll();
         }
     }
 
