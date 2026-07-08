@@ -5,8 +5,8 @@
     <name>Federation</name>
     <description>Better MUC federation with dynamic routing, live activation, and multi-hop forwarding.</description>
     <author>Your Name</author>
-    <version>1.8.0</version>
-    <date>07/05/2026</date>
+    <version>1.8.1</version>
+    <date>07/08/2026</date>
     <url>https://github.com/your-org/openfire-federation-plugin</url>
     <minServerVersion>5.0.5</minServerVersion>
     <licenseType>apache</licenseType>

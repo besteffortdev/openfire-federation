@@ -1,6 +1,13 @@
 target/
 .ssh_pass
+.github-sync/
+diag-s2s-reset.sh
+install-spark.sh
+deploy.sh
+pull-logs.sh
+8.txt
 *.jar
 .claude/
 org/
 logs/
+downloads/
