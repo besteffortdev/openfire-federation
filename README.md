@@ -67,9 +67,12 @@ Install the plugin on **every** server you want to participate in the federation
 ## Quick start
 
 1. **Install** the plugin on each server and open **Admin Console → Federation**.
-2. **Add a peer** (Peer Servers tab → *Add peer server*): enter the other server's XMPP domain. The status
-   dot turns green once S2S is up. Repeat so every server knows its neighbours — they don't all need to be
-   directly connected; routes propagate.
+2. **Add a peer** (Peer Servers tab → *Add peer server*): enter the other server's XMPP domain. The peer
+   shows **Pending** while it waits for the other side to add you back; the dot turns green (*Reachable*)
+   only once the remote's federation plugin confirms the mutual add. Repeat so every server knows its
+   neighbours — they don't all need to be directly connected; routes propagate. A non‑federated server
+   appearing under *Active S2S sessions* can be added as a peer directly from that list (**Add peer**
+   button on its row).
 3. **Federate a room** (Rooms tab → *Local rooms*): toggle **Federated** on for a room. It is now advertised
    to your peers and appears in their *Remote rooms* list.
 4. **Map a room**: on another server, find that room under *Remote rooms* (or map your local room to it) to
@@ -87,8 +90,8 @@ The **Federation** tab has three sub‑views:
 
 | Tab | What it shows |
 |-----|----------------|
-| **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen, live S2S sessions, and connection settings (keepalive & reconnect). |
-| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. |
+| **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
+| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
 | **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers. |
 
 The page auto‑refreshes every 5 seconds.
@@ -134,8 +137,8 @@ The federation trust boundary is enforced at several points:
   auto‑registration of unknown peers is suppressed. Set it to `false` (or use the **Security** toggle on the
   Peer Servers tab) for open federation, where any server that can connect is accepted and auto‑registered.
 - **Untrusted peers (filtered exposure).** Mark a peer **Untrusted** (the checkbox next to *Add peer*, or the
-  *Make untrusted* button on its row) and it receives **no** routing updates and **no** room advertisements at
-  all. You then pick — per peer, via its *Servers* editor — exactly which **servers** it may see, chosen from
+  *Make untrusted* button in its settings panel) and it receives **no** routing updates and **no** room advertisements at
+  all. You then pick — per peer, via its settings panel (the expand arrow on its row) — exactly which **servers** it may see, chosen from
   this server itself (its federated local rooms) *and* any server reachable through it. The untrusted peer is sent
   only the federated rooms homed on those servers, plus a route to each, so it learns nothing about the rest of
   your topology. Enforcement is two‑way: inbound `room-mapping`/`muc-forward` from an untrusted peer aimed at a
@@ -144,19 +147,51 @@ The federation trust boundary is enforced at several points:
   set of servers.
   - **Trust is a property of the link.** Each end announces its stance (trusted/untrusted) in `peer-announce`;
     if the two disagree, the link is **blocked** (status *Trust mismatch*) and no federation flows until **both**
-    admins set the same trust level. It then comes up automatically — no reconnect needed. The *Servers* editor
-    shows both directions: on the left, the servers you expose to that peer (editable); on the right, the servers
-    that peer is **advertising through** to you (read‑only).
+    admins set the same trust level. It then comes up automatically — no reconnect needed. The peer’s settings panel
+    shows both directions: the servers you expose to that peer (editable), and the servers that peer is
+    **advertising through** to you (each deniable per‑link).
   - **Untrusted by default for foreign peers.** When you add a peer whose **parent domain** differs from this
     server's (the last two DNS labels, e.g. `example.net`; adjustable via `plugin.federation.trustDomainLabels`),
     the *Untrusted* box is ticked automatically — a stranger shares nothing until you choose what it may see.
     Same‑parent peers default trusted.
-- **S2S certificate pinning (trust‑on‑first‑use).** The first time a peer's S2S link comes up, the plugin pins the
-  SHA‑256 of the top‑of‑chain certificate it presents. If that certificate later **changes** — e.g. a server is
-  re‑created under the same domain name and presents a different cert/CA — the peer is **auto‑marked untrusted** and
-  flagged in the Peers list (*⚠ cert changed*); federation toward it is blocked until you review and click
-  *Trust new cert* to pin the new one. Requires a TLS‑secured S2S link (a plain server‑dialback link presents no
-  certificate, so nothing is pinned).
+- **Deniable route advertisements (per‑link inbound filter).** The exposure controls above govern what you *send*;
+  each side can also refuse what it *receives*. If a peer advertises a route (and rooms) for a destination you
+  don't want, click **Deny** — on the Routing Table row, or next to that server in the peer’s settings panel
+  (right column). The destination is refused whenever **that** peer advertises it: any installed route via that
+  peer is torn down immediately (with room/ghost clean‑up) and future advertisements are dropped on receive. A
+  route to the same destination via a *different* peer is unaffected, and the deny is one‑sided — nothing is
+  negotiated with the peer. The denied entry stays listed in the Routing Table as a disabled (struck‑through)
+  row, and the deny is remembered even if the peer withdraws the route and advertises it again later.
+  **Allow** (on the disabled row, or in the peer’s settings panel) lifts it and re‑solicits the peer so the
+  route re‑appears. Denies are persisted per peer (`federation.peer.deniedroutes.<domain>`).
+  - **End‑to‑end mapping probe (mapping‑ping).** A deny mid‑path is invisible to servers on the far side —
+    their routing tables still show a route while replies silently die at the denying hop. So every active
+    room mapping is probed end‑to‑end (default every 60 s, `plugin.federation.mappingPingSeconds`, 0 = off):
+    the mapped domain answers with a pong routed back across the overlay. Three unanswered probes in a row
+    flip the mapping to **⚠ not responding**, its remote occupants are dropped (no more stale ghosts), and
+    when pongs resume the flag clears and rosters re‑sync automatically. Peers running an older plugin never
+    answer probes and are simply never flagged: a domain is only eligible for the *not responding* verdict
+    once it has provably answered (or sent) a probe, and that proof is **persisted**
+    (`plugin.federation.probeCapableDomains`) so it survives restarts — a path already broken when the
+    plugin starts is still detected. Each mapping row in the room's settings panel shows the probe's
+    round‑trip time and the age of the last answer (`ping 12 ms · 3s ago`; `ping —` = no answer yet).
+- **Mutual‑add handshake (Pending status).** A configured peer whose S2S link is up shows **Pending** — not
+  *Reachable* — until its federation plugin sends us a `peer-announce`, i.e. until the remote has added us back
+  (instantly, in open‑federation mode, via auto‑registration). No routes or gossip flow toward a pending peer;
+  we keep announcing ourselves on the reconnect back‑off so the link confirms promptly once the remote adds us.
+- **S2S key pinning (trust‑on‑first‑use).** The first time a peer's S2S link comes up, the plugin pins the
+  SHA‑256 of the **public key** (SPKI) of the leaf certificate it presents. If that key later **changes** — e.g. a
+  server is re‑created under the same domain name with a new key, even one signed by the same CA — the peer is
+  **auto‑marked untrusted** and flagged in the Peers list (*⚠ cert changed*); federation toward it is blocked until
+  you review and click *Trust new cert* to pin the new one. Pinning the key (rather than the CA chain) means an
+  impersonator with a certificate from the same public CA is still caught; renewals that reuse the key pass
+  silently, while a key rotation raises the flag for review. Requires a TLS‑secured S2S link (a plain
+  server‑dialback link presents no certificate, so nothing is pinned). Pins made by versions before 1.7.13
+  (top‑of‑chain cert hashes) are upgraded in place on the next sighting.
+- **Sender‑identity (anti‑spoofing) checks.** Every stanza forwarded over the overlay has its claimed `from`
+  validated at each hop: no peer may deliver a stanza pretending to come from **this server's own users**, and an
+  **untrusted** peer may only speak for itself or for servers reached *through* it — a forged identity from the
+  wrong direction is dropped and logged with a `SECURITY:` tag.
 - **Per‑room visibility.** Each federated room has a **Visible** control (next to its toggle) listing the servers
   allowed to see it — chosen from the routable peers, plus servers you can **add manually before they're reachable**
   (the room advertises to them automatically once a route appears). A newly‑federated room defaults to **visible to

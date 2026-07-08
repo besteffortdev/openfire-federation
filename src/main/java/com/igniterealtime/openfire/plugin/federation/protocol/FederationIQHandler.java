@@ -43,6 +43,8 @@ import java.util.stream.Collectors;
  * room-unmap         → remove a previously confirmed mapping (sender's spoke only)
  * muc-forward        → relay or inject a MUC packet; if we are the hub, fan out to
  *                      all other mapped spokes after injecting locally
+ * mapping-ping/pong  → end-to-end probe of an active mapping's path; catches a route
+ *                      silently broken mid-way (e.g. an intermediate deny)
  */
 public class FederationIQHandler extends IQHandler {
 
@@ -104,6 +106,8 @@ public class FederationIQHandler extends IQHandler {
             case "room-mapping-disable"-> handleMappingDisable(fromDomain, child);
             case "room-mapping-enable" -> handleMappingEnable(fromDomain, child);
             case "room-unmap"          -> handleRoomUnmap(fromDomain, child);
+            case "mapping-ping"        -> handleMappingPing(fromDomain, child);
+            case "mapping-pong"        -> handleMappingPong(fromDomain, child);
             case "muc-forward"         -> handleMucForward(fromDomain, child);
             case "direct-forward"      -> handleDirectForward(fromDomain, child);
             case "presence-forward"    -> handlePresenceForward(fromDomain, child);
@@ -149,6 +153,11 @@ public class FederationIQHandler extends IQHandler {
             Log.info("Auto-registered federation peer via incoming connection: {}", fromDomain);
         }
 
+        // A peer-announce is proof the remote's federation plugin has us configured as a peer
+        // (mutual add) — this is what flips a PENDING link to REACHABLE on the next transition.
+        manager.getPeerRegistry().getPeer(fromDomain)
+               .ifPresent(p -> p.setRemoteConfirmed(true));
+
         // Link-level trust negotiation: record the remote's declared stance and block the link
         // if it disagrees with ours. Trust is a property of the LINK — both admins must agree;
         // a one-sided change blocks (TRUST_MISMATCH) rather than silently changing behaviour.
@@ -186,6 +195,16 @@ public class FederationIQHandler extends IQHandler {
             // are only known to us — no one else learns about them until the next triggered
             // update fires (which requires the new peer to have something new to offer us).
             manager.propagateRoutingToAll(fromDomain);
+            // Run the SAME peer-up sequence as S2SMonitor.onPeerUp. Marking the peer REACHABLE
+            // here means the monitor's poll sees no transition and onPeerUp never fires, so
+            // without these the side that learns of the link via an inbound announce (a ~10s
+            // race it loses about half the time) would never pull the peer's state, re-sync
+            // mapped room rosters, or revive PENDING_OUT mapping requests toward it.
+            manager.solicitRouting(fromDomain);
+            manager.resyncMappedDestinations(Set.of(fromDomain));
+            manager.resendPendingRequests(fromDomain);
+            manager.publishDirectoryTo(fromDomain);
+            manager.pushBookmarksTo(fromDomain);
         } else if (!isReply) {
             // Steady-state keepalive: send one reply back so the reverse S2S socket —
             // which our own keepalive timer cannot reach (separate per-direction sockets,
@@ -210,6 +229,9 @@ public class FederationIQHandler extends IQHandler {
         // through it; clients see leave presences and stale rooms disappear.
         manager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(fromDomain) : removed);
         manager.getPeerRegistry().updateStatus(fromDomain, PeerServer.Status.WITHDRAWN);
+        // The remote no longer has us configured — require a fresh announce (mutual re-add)
+        // before a future link shows REACHABLE again.
+        manager.getPeerRegistry().getPeer(fromDomain).ifPresent(p -> p.setRemoteConfirmed(false));
         // doPoll skips WITHDRAWN peers so onPeerDown never fires as a fallback —
         // propagate the withdrawal here while we still know what was removed.
         if (!removed.isEmpty()) {
@@ -232,6 +254,8 @@ public class FederationIQHandler extends IQHandler {
         Set<String> removed = manager.getRoutingTable().removePeer(fromDomain);
         manager.handleUnreachableDestinations(removed.isEmpty() ? Set.of(fromDomain) : removed);
         manager.getPeerRegistry().setControlStatus(fromDomain, PeerServer.Status.REMOTE_DISABLED);
+        // The remote blocked us — require a fresh announce (it re-enabling) before REACHABLE.
+        manager.getPeerRegistry().getPeer(fromDomain).ifPresent(p -> p.setRemoteConfirmed(false));
         if (!removed.isEmpty()) {
             manager.propagateTopologyChange(fromDomain);
         }
@@ -251,6 +275,13 @@ public class FederationIQHandler extends IQHandler {
                 hops = 99;
             }
             if (dest != null && via != null) {
+                // Admin-denied advertisement: never install this destination when it is
+                // advertised by THIS peer. Leaving it out of `received` also lets the
+                // stale-withdrawal logic drop a previously-installed route via this peer.
+                if (manager.getPeerRegistry().isRouteDenied(fromDomain, dest)) {
+                    Log.debug("routing-update from {}: destination {} is denied by admin — skipping", fromDomain, dest);
+                    continue;
+                }
                 received.add(new RouteEntry(dest, via, hops));
             }
         }
@@ -267,7 +298,10 @@ public class FederationIQHandler extends IQHandler {
             manager.resyncMappedDestinations(changed);
             manager.propagateRoutingToAll(fromDomain);
             // Re-flood room knowledge so remote-room caches follow the routing change.
-            manager.propagateRoomsToAll();
+            // Debounced: one topology change arrives as a burst of routing-updates (triggered
+            // updates + solicit replies), and each full room flood is itself relayed onward by
+            // every receiver — coalescing the burst avoids an O(N² · rooms) storm per flap.
+            manager.propagateRoomsToAllDebounced();
             // If we lost any route, ask our other peers for an alternate path (and its
             // rooms) — triggered-only DV would otherwise never re-learn it.
             boolean lostRoute = changed.stream().anyMatch(d -> !manager.getRoutingTable().isReachable(d));
@@ -293,7 +327,7 @@ public class FederationIQHandler extends IQHandler {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         // Drop if this server already forwarded this advertisement (loop guard).
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.debug("room-advertisement loop detected (via={}), dropping", via);
             return;
         }
@@ -303,6 +337,13 @@ public class FederationIQHandler extends IQHandler {
         // Ignore advertisements about our own rooms bouncing back from peers.
         if (localDomain.equals(sourceDomain)) {
             Log.debug("room-advertisement origin is our own domain, ignoring");
+            return;
+        }
+
+        // Admin denied this origin's advertisements from this peer — drop without caching
+        // or relaying (mirrors the routing-update filter, so rooms and routes stay in step).
+        if (manager.getPeerRegistry().isRouteDenied(fromDomain, sourceDomain)) {
+            Log.debug("room-advertisement from {} for denied origin {} — dropping", fromDomain, sourceDomain);
             return;
         }
 
@@ -488,6 +529,83 @@ public class FederationIQHandler extends IQHandler {
         return true;
     }
 
+    // ── mapping-ping / mapping-pong (end-to-end mapping path probe) ─────────────
+
+    /**
+     * Answers (or relays) an end-to-end mapping probe.  At the destination we reply with a
+     * mapping-pong toward the origin — but only when a mapping with that origin exists, so
+     * the probe cannot be used to sweep for arbitrary reachable domains.
+     */
+    private void handleMappingPing(String fromDomain, Element el) {
+        if (relayMappingProbe("mapping-ping", fromDomain, el)) return;
+        String origin = el.attributeValue("origin");
+        if (origin == null || origin.isEmpty()) return;
+        if (!manager.getRoomManager().hasMappingWith(origin)) {
+            Log.debug("mapping-ping from {} — no active mapping with it, not answering", origin);
+            return;
+        }
+        // The origin provably speaks the probe protocol — remember that for our own break detection.
+        manager.markProbeCapable(origin);
+        String ts = el.attributeValue("ts");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        manager.getRoutingTable().findNextHop(origin).ifPresentOrElse(
+            nextHop -> {
+                try {
+                    XMPPServer.getInstance().getPacketRouter().route(
+                        FederationStanzaFactory.mappingPong(nextHop, origin, localDomain, "", ts));
+                } catch (Exception e) {
+                    Log.warn("Could not answer mapping-ping from {}: {}", origin, e.getMessage());
+                }
+            },
+            () -> Log.debug("mapping-ping from {} — no route back, cannot answer", origin));
+    }
+
+    /** A pong for one of our probes arrived — the round trip to that mapped domain works. */
+    private void handleMappingPong(String fromDomain, Element el) {
+        if (relayMappingProbe("mapping-pong", fromDomain, el)) return;
+        String origin = el.attributeValue("origin");
+        if (origin != null && !origin.isEmpty()) manager.onMappingPong(origin, el.attributeValue("ts"));
+    }
+
+    /**
+     * Relays a mapping probe toward its destination if we are not it. Returns true when handled
+     * (relayed or dropped), false when we are the destination and should process it locally.
+     */
+    private boolean relayMappingProbe(String element, String fromDomain, Element el) {
+        String destination = el.attributeValue("destination");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (destination == null || localDomain.equals(destination)) return false;
+        String via = el.attributeValue("via", "");
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
+            Log.warn("{} loop detected (via={}), dropping", element, via);
+            return true;
+        }
+        // Untrusted-peer exposure gate: an untrusted peer may only probe toward exposed servers.
+        if (!untrustedAllowsServer(fromDomain, destination)) {
+            Log.warn("SECURITY: dropping {} from untrusted peer {} toward non-exposed server {}",
+                     element, fromDomain, destination);
+            return true;
+        }
+        String origin = el.attributeValue("origin");
+        String ts = el.attributeValue("ts");
+        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+        manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
+            nextHop -> {
+                try {
+                    XMPPServer.getInstance().getPacketRouter().route(
+                        element.equals("mapping-ping")
+                            ? FederationStanzaFactory.mappingPing(nextHop, destination, origin, newVia, ts)
+                            : FederationStanzaFactory.mappingPong(nextHop, destination, origin, newVia, ts));
+                } catch (Exception e) {
+                    Log.warn("Could not relay {} toward {}: {}", element, destination, e.getMessage());
+                }
+            },
+            // No route toward the destination: drop silently. For a ping this is exactly the
+            // deny/asymmetry case — the origin detects it by the missing pong.
+            () -> Log.debug("{}: no route to {}, dropping", element, destination));
+        return true;
+    }
+
     /** Validates a lifecycle token against the stored mapping (empty stored token = legacy, accepted). */
     private boolean tokenOk(String localJid, String remoteDomain, String incomingToken, String op) {
         RoomMapping m = manager.getRoomManager().getMappingForLocal(localJid, remoteDomain);
@@ -566,7 +684,7 @@ public class FederationIQHandler extends IQHandler {
         String src         = el.attributeValue("src", fromDomain);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("muc-forward loop detected (via={}), dropping", via);
             return;
         }
@@ -576,6 +694,10 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("muc-forward from {} has no payload", fromDomain);
             return;
         }
+
+        // Origin (from-spoofing) gate. rejectLocalClaim=false: trusted diamond/hub echoes of our
+        // own users are legitimate here and neutralized by inject's self-echo guards instead.
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "muc-forward", false)) return;
 
         // Untrusted-peer exposure gate: an untrusted peer may only move traffic toward a server
         // it has been exposed to, whether we inject the room here or relay it onward. The target
@@ -656,7 +778,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("direct-forward loop detected (via={}), dropping", via);
             return;
         }
@@ -666,6 +788,9 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("direct-forward from {} has no message payload", fromDomain);
             return;
         }
+
+        // Origin (from-spoofing) gate — see payloadOriginOk. Applied per hop (relay AND deliver).
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "direct-forward", true)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             // We are the destination — deliver to the local recipient (bypasses interceptors, so the
@@ -716,7 +841,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("presence-forward loop detected (via={}), dropping", via);
             return;
         }
@@ -726,6 +851,10 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("presence-forward from {} has no presence payload", fromDomain);
             return;
         }
+
+        // Origin (from-spoofing) gate — the critical one: a forged `subscribed`/presence here
+        // would flow straight into Openfire's roster engine at the destination.
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "presence-forward", true)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             Presence pres = new Presence(payloadEl.createCopy());
@@ -784,7 +913,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("iq-forward loop detected (via={}), dropping", via);
             return;
         }
@@ -794,6 +923,10 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("iq-forward from {} has no iq payload", fromDomain);
             return;
         }
+
+        // Origin (from-spoofing) gate — a forged `set` IQ delivered to the router could mutate
+        // server-side state (roster, vCard) as the claimed user.
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "iq-forward", true)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             IQ iq = new IQ(payloadEl.createCopy());
@@ -891,7 +1024,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.debug("user-directory loop detected (via={}), dropping", via);
             return;
         }
@@ -925,7 +1058,7 @@ public class FederationIQHandler extends IQHandler {
         String via         = el.attributeValue("via", "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (via.contains(localDomain)) {
+        if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.debug("bookmark-push loop detected (via={}), dropping", via);
             return;
         }
@@ -1286,6 +1419,80 @@ public class FederationIQHandler extends IQHandler {
      */
     private boolean isFederatedLocalRoom(String roomJid) {
         return roomJid != null && manager.getRoomManager().isFederated(roomJid);
+    }
+
+    /**
+     * Origin check for overlay-forwarded payloads — the overlay's substitute for native S2S's
+     * stream-level {@code from} validation (a real S2S stream may only carry stanzas from its
+     * authenticated domain; the overlay would otherwise deliver any embedded {@code from} as-is).
+     *
+     * <p>Two tiers:
+     * <ul>
+     *   <li><b>Local claim (any sender, when {@code rejectLocalClaim}):</b> a payload claiming to
+     *       originate from THIS server's domain or one of its MUC services is dropped — no
+     *       legitimate inbound 1:1 forward carries our own users as sender. Not enforced for
+     *       trusted muc-forward ({@code rejectLocalClaim=false}): on cyclic/diamond topologies a
+     *       local user's own room traffic can legitimately echo back through a hub fan-out, and
+     *       the self-echo guards in injectMessage/injectPresence already neutralize it silently.</li>
+     *   <li><b>Route-back (untrusted senders only):</b> the claimed origin's host domain must be
+     *       the peer itself, a destination routed THROUGH that peer, or not routable here at all
+     *       (cross-edge traffic where routes are exposure-filtered — unverifiable by design and
+     *       bounded by the exposure gates). An origin we route via a DIFFERENT neighbour is a
+     *       forged our-side identity and is dropped. NOT applied to trusted peers: asymmetric DV
+     *       routes (diamonds) and hub fan-out make legitimate trusted traffic arrive off the
+     *       origin's route, so a strict check there would break real flows — the trusted mesh
+     *       remains a documented trust boundary.</li>
+     * </ul>
+     */
+    private boolean payloadOriginOk(String fromDomain, String payloadFrom, String what,
+                                    boolean rejectLocalClaim) {
+        if (payloadFrom == null || payloadFrom.isEmpty()) return true;   // no identity claimed
+        boolean untrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
+        String domain;
+        try { domain = new JID(payloadFrom).getDomain(); } catch (Exception e) { domain = null; }
+        if (domain == null || domain.isEmpty()) {
+            if (!untrusted) return true;                                 // preserve trusted behaviour
+            Log.warn("SECURITY: dropping {} from untrusted peer {} — unparseable payload from '{}'",
+                     what, fromDomain, payloadFrom);
+            return false;
+        }
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String host = originHost(domain, fromDomain, localDomain);
+        if (host.equals(localDomain) || isLocalConferenceDomain(domain)) {
+            if (rejectLocalClaim || untrusted) {
+                Log.warn("SECURITY: dropping {} from {} — payload from '{}' claims to originate on "
+                       + "THIS server; a peer never speaks for our own users", what, fromDomain, payloadFrom);
+                return false;
+            }
+            return true;   // trusted muc-forward echo — inject's self-echo guard handles it
+        }
+        if (!untrusted) return true;
+        if (host.equals(fromDomain)) return true;                        // the peer's own users
+        java.util.Optional<String> hop = manager.getRoutingTable().findNextHop(host);
+        if (hop.isEmpty()) return true;   // not routable here (exposure-filtered edge) — unverifiable
+        if (hop.get().equals(fromDomain)) return true;                   // origin is behind the sender
+        Log.warn("SECURITY: dropping {} from untrusted peer {} — payload from '{}' claims origin {} "
+               + "which routes via {} (forged identity from the wrong direction)",
+                 what, fromDomain, payloadFrom, host, hop.get());
+        return false;
+    }
+
+    /**
+     * The host SERVER a payload origin domain belongs to: the domain itself when it is the
+     * sender, local, or a known routing destination; else its parent label-stripped domain
+     * ({@code conference.X} → {@code X}) when THAT is known — components are never routing
+     * destinations themselves. Falls back to the domain unchanged (then unroutable → allowed).
+     */
+    private String originHost(String domain, String fromDomain, String localDomain) {
+        if (domain.equals(fromDomain) || domain.equals(localDomain)
+                || manager.getRoutingTable().isReachable(domain)) return domain;
+        int dot = domain.indexOf('.');
+        if (dot > 0 && dot < domain.length() - 1) {
+            String parent = domain.substring(dot + 1);
+            if (parent.equals(fromDomain) || parent.equals(localDomain)
+                    || manager.getRoutingTable().isReachable(parent)) return parent;
+        }
+        return domain;
     }
 
     /**

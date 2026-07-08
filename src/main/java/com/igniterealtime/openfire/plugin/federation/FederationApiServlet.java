@@ -94,6 +94,23 @@ public class FederationApiServlet extends HttpServlet {
                     sb.append("\"").append(esc(srv)).append("\"");
                 }
             }
+            // Destinations currently routed THROUGH this peer, and the destinations whose
+            // advertisements from this peer the admin has denied (per-link inbound filter).
+            sb.append("],\"advertisedRoutes\":[");
+            boolean fr2 = true;
+            for (RouteEntry r : mgr.getRoutingTable().getAll()) {
+                if (!r.nextHop().equals(p.getDomain()) || r.destination().equals(p.getDomain())) continue;
+                if (!fr2) sb.append(",");
+                fr2 = false;
+                sb.append("\"").append(esc(r.destination())).append("\"");
+            }
+            sb.append("],\"deniedRoutes\":[");
+            boolean fd = true;
+            for (String srv : p.getDeniedRoutes()) {
+                if (!fd) sb.append(",");
+                fd = false;
+                sb.append("\"").append(esc(srv)).append("\"");
+            }
             sb.append("]}");
         }
         sb.append("],");
@@ -111,6 +128,21 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"hops\":").append(r.hops()).append(",")
               .append("\"updatedAt\":").append(r.updatedAt())
               .append("}");
+        }
+        // Denied advertisements stay listed as disabled entries (never installed as
+        // real routes) so the admin can see and lift the deny even while the peer
+        // isn't currently advertising the destination.
+        for (PeerServer p : mgr.getPeerRegistry().getPeers()) {
+            for (String dest : p.getDeniedRoutes()) {
+                if (dest.equals(localDomain)) continue;
+                if (!first) sb.append(",");
+                first = false;
+                sb.append("{")
+                  .append("\"destination\":\"").append(esc(dest)).append("\",")
+                  .append("\"nextHop\":\"").append(esc(p.getDomain())).append("\",")
+                  .append("\"denied\":true")
+                  .append("}");
+            }
         }
         sb.append("],");
 
@@ -156,15 +188,21 @@ public class FederationApiServlet extends HttpServlet {
             for (Map<String, String> m : roomMappings) {
                 if (!fm) sb.append(",");
                 fm = false;
-                boolean connected = mgr.getRoutingTable().isReachable(m.get("remoteDomain"));
-                boolean routeMissing = !connected
+                // pathBroken: a route exists but end-to-end probes go unanswered (deny mid-path).
+                boolean pathBroken = mgr.getRoutingTable().isReachable(m.get("remoteDomain"))
+                        && mgr.isMappingPathBroken(m.get("remoteDomain"));
+                boolean connected = mgr.getRoutingTable().isReachable(m.get("remoteDomain")) && !pathBroken;
+                boolean routeMissing = !connected && !pathBroken
                         && mgr.getPeerRegistry().getPeer(m.get("remoteDomain")).isEmpty();
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
                   .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\",")
                   .append("\"state\":\"").append(esc(m.get("state"))).append("\",")
                   .append("\"connected\":").append(connected).append(",")
-                  .append("\"routeMissing\":").append(routeMissing)
+                  .append("\"routeMissing\":").append(routeMissing).append(",")
+                  .append("\"pathBroken\":").append(pathBroken).append(",")
+                  .append("\"pingMs\":").append(mgr.getMappingPingRttMs(m.get("remoteDomain"))).append(",")
+                  .append("\"pongAgeSecs\":").append(mgr.getMappingPongAgeSecs(m.get("remoteDomain")))
                   .append("}");
             }
             sb.append("]}");
@@ -220,14 +258,19 @@ public class FederationApiServlet extends HttpServlet {
             for (RoomMapping m : entry.getValue()) {
                 if (!fm) sb.append(",");
                 fm = false;
-                boolean connected = mgr.getRoutingTable().isReachable(m.remoteDomain());
-                boolean routeMissing = !connected
+                boolean pathBroken = mgr.getRoutingTable().isReachable(m.remoteDomain())
+                        && mgr.isMappingPathBroken(m.remoteDomain());
+                boolean connected = mgr.getRoutingTable().isReachable(m.remoteDomain()) && !pathBroken;
+                boolean routeMissing = !connected && !pathBroken
                         && mgr.getPeerRegistry().getPeer(m.remoteDomain()).isEmpty();
                 sb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
                   .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\",")
                   .append("\"connected\":").append(connected).append(",")
-                  .append("\"routeMissing\":").append(routeMissing)
+                  .append("\"routeMissing\":").append(routeMissing).append(",")
+                  .append("\"pathBroken\":").append(pathBroken).append(",")
+                  .append("\"pingMs\":").append(mgr.getMappingPingRttMs(m.remoteDomain())).append(",")
+                  .append("\"pongAgeSecs\":").append(mgr.getMappingPongAgeSecs(m.remoteDomain()))
                   .append("}");
             }
             sb.append("]");
@@ -711,6 +754,29 @@ public class FederationApiServlet extends HttpServlet {
                 mgr.getPeerRegistry().setExposedServers(d, list);
                 // Re-advertise the new exposed set + matching routes immediately.
                 if (isReachable(mgr, d)) { mgr.sendRoutingUpdate(d); mgr.sendRoomState(d); }
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "deny-route": case "allow-route": {
+                String domain      = req.getParameter("domain");        // the advertising peer
+                String destination = req.getParameter("destination");   // the advertised server
+                if (domain == null || domain.isBlank() || destination == null || destination.isBlank()) {
+                    out.print("{\"error\":\"domain and destination required\"}");
+                    return;
+                }
+                String d    = domain.strip().toLowerCase();
+                String dest = destination.strip().toLowerCase();
+                if (!mgr.getPeerRegistry().contains(d)) {
+                    out.print("{\"error\":\"not a configured peer\"}");
+                    return;
+                }
+                String localDomain2 = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+                if (dest.equals(localDomain2) || dest.equals(d)) {
+                    out.print("{\"error\":\"cannot deny the peer itself or this server\"}");
+                    return;
+                }
+                if ("deny-route".equals(action)) mgr.denyRouteFromPeer(d, dest);
+                else                             mgr.allowRouteFromPeer(d, dest);
                 out.print("{\"ok\":true}");
                 return;
             }

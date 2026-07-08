@@ -15,7 +15,7 @@ let lastData = {};
 const expandedPeerRooms = new Set();
 // In-flight exposed-server edits per domain (server -> checked) so a 5 s refresh doesn't clobber them.
 const editedExposed = {};
-// Federated rooms whose per-room visibility editor is expanded (persisted across refreshes).
+// Federated rooms whose settings panel (visibility + mappings + sharing) is expanded (persisted across refreshes).
 const expandedRoomVis = new Set();
 // In-flight visibility edits per room jid (server -> checked) so a 5 s refresh doesn't clobber them.
 const editedRoomVis = {};
@@ -154,41 +154,17 @@ function renderPeers(peers) {
         const isUnreachable    = p.status === 'UNREACHABLE';
         const isDisabled       = p.status === 'DISABLED';
         const isRemoteDisabled = p.status === 'REMOTE_DISABLED';
-        const needsRetry = isWithdrawn || isUnreachable || p.status === 'UNKNOWN';
+        const isPending        = p.status === 'PENDING';
 
-        let actionBtns = '';
-        if (isDisabled) {
-            // We disabled this peer — only we can re-enable it.
-            actionBtns = `<button class="btn-small btn-primary" style="margin-right:4px"
-                       onclick="enablePeer('${escHtml(p.domain)}')">Enable</button>`;
-        } else if (isRemoteDisabled) {
-            // Disabled by the remote — cannot be re-enabled from this side.
-            actionBtns = '';
-        } else {
-            if (needsRetry) {
-                actionBtns += `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="retryPeer('${escHtml(p.domain)}')">${isWithdrawn ? 'Reconnect' : 'Retry'}</button>`;
-            }
-            actionBtns += `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="disablePeer('${escHtml(p.domain)}')">Disable</button>`;
-        }
-
-        // Trust controls: toggle untrusted, and (when untrusted) open the exposed-server editor.
-        const trustBtn = p.untrusted
-            ? `<button class="btn-small btn-primary" style="margin-right:4px"
-                       onclick="setUntrusted('${escHtml(p.domain)}', false)">Make trusted</button>`
-            : `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="setUntrusted('${escHtml(p.domain)}', true)">Make untrusted</button>`;
         const expanded = expandedPeerRooms.has(p.domain);
-        const roomsBtn = p.untrusted
-            ? `<button class="btn-small" style="margin-right:4px;background:#e2e3e5;color:#383d41"
-                       onclick="togglePeerRooms('${escHtml(p.domain)}')">Servers ${expanded ? '▾' : '▸'}</button>`
-            : '';
+        const deniedCount = (p.deniedRoutes || []).length;
 
         let statusLabel;
         if (isWithdrawn)               statusLabel = 'Disconnected by remote';
         else if (isDisabled)           statusLabel = 'Disabled';
         else if (isRemoteDisabled)     statusLabel = 'Disabled by remote';
+        else if (isPending)
+            statusLabel = 'Pending <span class="retry-countdown">waiting for the remote to add this server as a peer</span>';
         else if (p.status === 'TRUST_MISMATCH')
             statusLabel = 'Trust mismatch — both ends must set the same trust level';
         else                           statusLabel = p.status;
@@ -203,28 +179,31 @@ function renderPeers(peers) {
         }
 
         const untrustedBadge = p.untrusted
-            ? `<span class="badge badge-untrusted" title="Shares only the servers you expose">untrusted · ${(p.exposedServers || []).length} server(s)</span>`
+            ? `<span class="badge badge-untrusted" title="Shares only the servers you expose">untrusted</span>`
             : '';
 
-        // S2S cert pinning: a changed cert (possible impersonation) shows a red alert + accept
-        // button; a quietly-pinned cert shows an unobtrusive lock.
+        // S2S cert pinning: a changed cert (possible impersonation) shows a red alert row with
+        // the accept button; a quietly-pinned cert shows an unobtrusive lock.
         const certBadge = p.certMismatch
             ? `<span class="badge badge-untrusted" title="The S2S certificate changed since it was first pinned">⚠ cert changed</span>`
             : (p.certPinned ? `<span class="badge badge-in" title="S2S certificate pinned (trust-on-first-use)">🔒 pinned</span>` : '');
-        const certBtn = p.certMismatch
-            ? `<button class="btn-small btn-warn" style="margin-right:4px"
-                       onclick="acceptCert('${escHtml(p.domain)}')">Trust new cert</button>`
-            : '';
+
+        // Compact summary next to the expand arrow (mirrors the rooms list).
+        const sumParts = [];
+        sumParts.push(p.untrusted ? `${(p.exposedServers || []).length} exposed` : 'trusted');
+        if (deniedCount) sumParts.push(`${deniedCount} denied`);
+        const dom = escHtml(p.domain);
 
         let row = `
         <tr>
-            <td>${escHtml(p.domain)}${untrustedBadge}${certBadge}</td>
+            <td>${dom}${untrustedBadge}${certBadge}</td>
             <td><span class="status-dot ${statusClass(p.status)}"></span> ${statusLabel}</td>
             <td>${p.lastSeen ? new Date(p.lastSeen).toLocaleString() : '—'}</td>
-            <td style="white-space:nowrap">
-                ${certBtn}${actionBtns}${trustBtn}${roomsBtn}
-                <button class="btn-small btn-danger"
-                        onclick="removePeer('${escHtml(p.domain)}')">Remove</button>
+            <td class="room-detail-cell">
+                <span class="room-detail-sum">${sumParts.join(' · ')}</span>
+                <button class="room-expand-btn ${expanded ? 'open' : ''}"
+                        title="${expanded ? 'Hide' : 'Show'} settings for this peer"
+                        onclick="togglePeerRooms('${dom}')">▸</button>
             </td>
         </tr>`;
 
@@ -232,78 +211,130 @@ function renderPeers(peers) {
             row += `
         <tr class="exposed-editor-row">
             <td colspan="4" style="color:#58151c">
-                ⚠ <strong>${escHtml(p.domain)}</strong> presented a different S2S certificate than the
+                ⚠ <strong>${dom}</strong> presented a different S2S certificate than the
                 one pinned on first contact — this can mean a server was re-created, or an impersonation
                 attempt. The peer has been auto-marked untrusted. If you trust the change, click
-                <em>Trust new cert</em>; otherwise investigate before restoring trust.
+                <button class="btn-small btn-warn" onclick="acceptCert('${dom}')">Trust new cert</button> —
+                otherwise investigate before restoring trust.
             </td>
         </tr>`;
         }
 
-        if (p.untrusted && expanded) {
-            row += renderExposedServerEditor(p);
-        }
+        if (expanded) row += renderPeerDetailRow(p);
         return row;
     }).join('');
 }
 
-// ── Untrusted peers: exposed-server editor ─────────────────────────────────────
+// ── Per-peer settings panel (connection + trust/exposure + inbound) ───────────
 
-function renderExposedServerEditor(p) {
+/** Full-width detail row behind the expand arrow: every setting for one peer in one view. */
+function renderPeerDetailRow(p) {
+    const dom = escHtml(p.domain);
     const id = jidToElemId(p.domain);
-    // ── Left: SERVERS we expose to this peer (editable). ──
-    // Pending edits win over the persisted set so a refresh doesn't reset the admin's work.
-    const checkedSet = editedExposed[p.domain] || new Set(p.exposedServers || []);
-    const candidates = (p.exposableServers || []).slice();
-    // Include any exposed server no longer in the candidate list (e.g. route lost) so it's not
-    // silently dropped from the UI while still persisted.
-    (p.exposedServers || []).forEach(s => { if (!candidates.includes(s)) candidates.push(s); });
+    const isWithdrawn = p.status === 'WITHDRAWN';
+    const needsRetry = isWithdrawn || p.status === 'UNREACHABLE'
+                    || p.status === 'PENDING' || p.status === 'UNKNOWN';
 
-    const leftList = candidates.length === 0
-        ? '<p class="empty" style="margin:4px 0">No servers available to expose yet.</p>'
-        : candidates.map(s => {
-            const checked = checkedSet.has(s) ? 'checked' : '';
-            const isLocal = s === lastData.localDomain;
-            const tag = isLocal
-                ? '<span class="badge badge-in">this server</span>'
-                : (p.exposableServers || []).includes(s)
-                    ? ''
-                    : '<span class="badge badge-out" title="no current route">unavailable</span>';
-            return `
+    // ── Connection actions ──
+    let actionBtns = '';
+    if (p.status === 'DISABLED') {
+        // We disabled this peer — only we can re-enable it.
+        actionBtns = `<button class="btn-small btn-primary" onclick="enablePeer('${dom}')">Enable</button>`;
+    } else if (p.status === 'REMOTE_DISABLED') {
+        // Disabled by the remote — cannot be re-enabled from this side.
+        actionBtns = '<span class="exposed-col-sub">Disabled by the remote — only they can re-enable it.</span>';
+    } else {
+        if (needsRetry) {
+            actionBtns += `<button class="btn-small btn-warn" onclick="retryPeer('${dom}')">${isWithdrawn ? 'Reconnect' : 'Retry'}</button>`;
+        }
+        actionBtns += `<button class="btn-small btn-warn" onclick="disablePeer('${dom}')">Disable</button>`;
+    }
+
+    // ── Outbound: trust level, and (when untrusted) which servers we expose. ──
+    // Pending edits win over the persisted set so a refresh doesn't reset the admin's work.
+    const trustBtn = p.untrusted
+        ? `<button class="btn-small btn-primary" onclick="setUntrusted('${dom}', false)">Make trusted</button>`
+        : `<button class="btn-small btn-warn" onclick="setUntrusted('${dom}', true)">Make untrusted</button>`;
+    let outbound;
+    if (p.untrusted) {
+        const checkedSet = editedExposed[p.domain] || new Set(p.exposedServers || []);
+        const candidates = (p.exposableServers || []).slice();
+        // Include any exposed server no longer in the candidate list (e.g. route lost) so it's not
+        // silently dropped from the UI while still persisted.
+        (p.exposedServers || []).forEach(s => { if (!candidates.includes(s)) candidates.push(s); });
+        const list = candidates.length === 0
+            ? '<p class="empty" style="margin:4px 0">No servers available to expose yet.</p>'
+            : candidates.map(s => {
+                const checked = checkedSet.has(s) ? 'checked' : '';
+                const isLocal = s === lastData.localDomain;
+                const tag = isLocal
+                    ? '<span class="badge badge-in">this server</span>'
+                    : (p.exposableServers || []).includes(s)
+                        ? ''
+                        : '<span class="badge badge-out" title="no current route">unavailable</span>';
+                return `
             <label class="exposed-room">
-                <input type="checkbox" class="exposed-cb" data-domain="${escHtml(p.domain)}"
+                <input type="checkbox" class="exposed-cb" data-domain="${dom}"
                        value="${escHtml(s)}" ${checked}
-                       onchange="captureExposedEdits('${escHtml(p.domain)}')">
+                       onchange="captureExposedEdits('${dom}')">
                 <span>${escHtml(s)}</span> ${tag}
             </label>`;
-        }).join('');
+            }).join('');
+        outbound = `${list}
+            <div style="margin-top:8px">
+                <button class="btn-small btn-primary" onclick="saveExposedServers('${dom}')">Save</button>
+                <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
+            </div>`;
+    } else {
+        outbound = '<p class="empty" style="margin:4px 0">Trusted — this peer sees the full topology and all federated rooms.</p>';
+    }
 
-    // ── Right: SERVERS this peer advertises through to us (read-only). ──
-    const adv = p.advertisedVia || [];
-    const rightList = adv.length === 0
-        ? '<p class="empty" style="margin:4px 0">This peer is not advertising any servers to us yet.</p>'
-        : adv.map(s => `
-            <div class="exposed-room"><span>${escHtml(s)}</span></div>`).join('');
+    // ── Inbound: what this peer advertises through to us, each deniable per-link. ──
+    const denied = (p.deniedRoutes || []).slice().sort();
+    const advSet = new Set([...(p.advertisedVia || []), ...(p.advertisedRoutes || [])]);
+    denied.forEach(s => advSet.delete(s));
+    const adv = Array.from(advSet).sort();
+    const advRows = adv.map(s => `
+            <div class="exposed-room"><span>${escHtml(s)}</span>
+                <button class="btn-small btn-warn" style="margin-left:8px"
+                        title="Refuse this server's routes and rooms when ${dom} advertises them"
+                        onclick="denyRoute('${dom}','${escHtml(s)}')">Deny</button>
+            </div>`).join('');
+    const deniedRows = denied.map(s => `
+            <div class="exposed-room"><span style="text-decoration:line-through;color:#999">${escHtml(s)}</span>
+                <span class="badge badge-untrusted">denied</span>
+                <button class="btn-small btn-primary" style="margin-left:8px"
+                        onclick="allowRoute('${dom}','${escHtml(s)}')">Allow</button>
+            </div>`).join('');
+    const inbound = (adv.length === 0 && denied.length === 0)
+        ? '<p class="empty" style="margin:4px 0">This peer is not advertising any other servers to us yet.</p>'
+        : advRows + deniedRows;
 
     return `
-        <tr class="exposed-editor-row">
+        <tr class="exposed-editor-row room-detail-row">
             <td colspan="4">
                 <div class="exposed-cols">
-                    <div class="exposed-col">
-                        <div class="exposed-col-h">↑ Servers exposed to ${escHtml(p.domain)}
-                            <span class="exposed-col-sub">this peer sees each checked server's federated rooms and a route to it</span>
+                    <div class="exposed-col" style="flex:0 0 200px">
+                        <div class="exposed-col-h">Connection
+                            <span class="exposed-col-sub">manage the link with ${dom}</span>
                         </div>
-                        ${leftList}
-                        <div style="margin-top:8px">
-                            <button class="btn-small btn-primary" onclick="saveExposedServers('${escHtml(p.domain)}')">Save</button>
-                            <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
+                        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+                            ${actionBtns}
+                            <button class="btn-small btn-danger" onclick="removePeer('${dom}')">Remove peer</button>
                         </div>
                     </div>
                     <div class="exposed-col">
-                        <div class="exposed-col-h">↓ Servers ${escHtml(p.domain)} advertises through
-                            <span class="exposed-col-sub">what the remote is exposing inbound (read-only)</span>
+                        <div class="exposed-col-h">↑ Exposed to ${dom}
+                            <span class="exposed-col-sub">an untrusted peer sees each checked server's federated rooms and a route to it</span>
                         </div>
-                        ${rightList}
+                        <div style="margin-bottom:8px">${trustBtn}</div>
+                        ${outbound}
+                    </div>
+                    <div class="exposed-col">
+                        <div class="exposed-col-h">↓ Advertised by ${dom}
+                            <span class="exposed-col-sub">what the remote is exposing inbound — Deny one to refuse its routes and rooms from this peer</span>
+                        </div>
+                        ${inbound}
                     </div>
                 </div>
             </td>
@@ -332,9 +363,9 @@ function togglePeerRooms(domain) {
 function setUntrusted(domain, untrusted) {
     if (untrusted && !confirm('Mark ' + domain + ' as untrusted?\n\n'
         + 'It will immediately stop receiving routing updates and room advertisements. '
-        + 'Use "Servers" to choose exactly which servers it may see.')) return;
+        + 'Use the peer\'s settings panel (expand arrow) to choose exactly which servers it may see.')) return;
     post({ action: 'set-untrusted', domain, untrusted }).then(() => {
-        if (!untrusted) { expandedPeerRooms.delete(domain); delete editedExposed[domain]; }
+        if (!untrusted) delete editedExposed[domain];   // exposure list no longer applies
         refresh();
     });
 }
@@ -420,15 +451,31 @@ function renderS2SSessions(sessions) {
              </button>`
         ).join('');
 
+        // Non-federated S2S session: offer to turn it into a federation peer in one click.
+        const addPeerBtn = !isFed
+            ? `<button class="btn-small btn-primary"
+                       onclick="addPeerFromSession('${escHtml(domain)}')">Add peer</button>`
+            : '';
+
         return `
         <tr>
             <td><strong>${escHtml(domain)}</strong>${fedBadge}</td>
             <td>${dirBadges}</td>
             <td class="ts">${new Date(earliest).toLocaleString()}</td>
             <td>${tlsBadge}</td>
-            <td style="white-space:nowrap">${killBtns}</td>
+            <td style="white-space:nowrap">${addPeerBtn}${killBtns}</td>
         </tr>`;
     }).join('');
+}
+
+/** Adds a peer straight from an active (non-federated) S2S session row. */
+function addPeerFromSession(domain) {
+    const untrusted = isForeignDomain(domain);
+    if (!confirm('Add ' + domain + ' as a federation peer?'
+        + (untrusted ? '\n\nIt is under a different parent domain, so it will be added as UNTRUSTED '
+                     + '(it sees nothing until you expose servers to it).' : ''))) return;
+    post({ action: 'add-peer', domain, untrusted })
+        .then(() => { flashSaved('Peer added ✓'); refresh(); });
 }
 
 // ── Connection settings ───────────────────────────────────────────────────────
@@ -610,6 +657,7 @@ function removePeer(domain) {
 function statusClass(s) {
     if (s === 'REACHABLE')  return 'green';
     if (s === 'UNREACHABLE') return 'red';
+    if (s === 'PENDING')     return 'orange';
     if (s === 'WITHDRAWN')   return 'orange';
     if (s === 'TRUST_MISMATCH') return 'orange';
     if (s === 'DISABLED' || s === 'REMOTE_DISABLED') return 'red';
@@ -621,17 +669,65 @@ function statusClass(s) {
 function renderRouting(entries) {
     const tbody = document.getElementById('routing-tbody');
     if (entries.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
         return;
     }
-    entries.sort((a, b) => a.hops - b.hops);
-    tbody.innerHTML = entries.map(r => `
+    // Active routes by hop count first; denied (disabled) entries at the bottom.
+    entries.sort((a, b) => (a.denied ? 1 : 0) - (b.denied ? 1 : 0) || (a.hops || 0) - (b.hops || 0));
+    tbody.innerHTML = entries.map(r => {
+        if (r.denied) {
+            // A deny is remembered per (peer, destination) — the entry stays here disabled
+            // even if the peer withdraws or re-advertises the route, until it is allowed again.
+            return `
+        <tr class="route-denied">
+            <td><s>${escHtml(r.destination)}</s></td>
+            <td>${escHtml(r.nextHop)}</td>
+            <td>—</td>
+            <td><span class="badge badge-untrusted" title="Advertisements of this destination from ${escHtml(r.nextHop)} are refused — even if it is withdrawn and offered again">denied</span></td>
+            <td><button class="btn-small btn-primary"
+                        onclick="allowRoute('${escHtml(r.nextHop)}','${escHtml(r.destination)}')">Allow</button></td>
+        </tr>`;
+        }
+        // A learned (indirect) route was advertised to us by its next hop — the admin can
+        // deny that advertisement. A direct route IS the peer; use Disable/Remove instead.
+        const denyBtn = r.destination !== r.nextHop
+            ? `<button class="btn-small btn-warn"
+                       onclick="denyRoute('${escHtml(r.nextHop)}','${escHtml(r.destination)}')">Deny</button>`
+            : '';
+        return `
         <tr>
             <td>${escHtml(r.destination)}</td>
             <td>${escHtml(r.nextHop)}</td>
             <td>${r.hops}</td>
             <td class="ts">${new Date(r.updatedAt).toLocaleTimeString()}</td>
-        </tr>`).join('');
+            <td>${denyBtn}</td>
+        </tr>`;
+    }).join('');
+}
+
+/** Denies a destination's route/room advertisements arriving from a specific peer. */
+function denyRoute(peerDomain, destination) {
+    if (!confirm('Deny the route to ' + destination + ' advertised by ' + peerDomain + '?\n\n'
+        + 'This server will refuse that destination (and its rooms) whenever ' + peerDomain
+        + ' advertises it — the entry stays in this table as disabled, and the deny is '
+        + 'remembered even if the route is withdrawn and comes back. A route to the same '
+        + 'destination via another peer is not affected. Use Allow to lift it.')) return;
+    post({ action: 'deny-route', domain: peerDomain, destination })
+        .then(result => {
+            if (result && result.error) alert(result.error);
+            else flashSaved('Route denied ✓');
+            refresh();
+        });
+}
+
+/** Lifts a route deny; the peer is asked to re-advertise so the route re-appears. */
+function allowRoute(peerDomain, destination) {
+    post({ action: 'allow-route', domain: peerDomain, destination })
+        .then(result => {
+            if (result && result.error) alert(result.error);
+            else flashSaved('Route allowed ✓');
+            refresh();
+        });
 }
 
 // ── Users tab ──────────────────────────────────────────────────────────────────
@@ -842,8 +938,10 @@ function presenceDot(show) {
 function bindRoomSearch() {
     document.getElementById('room-search').addEventListener('input', e => {
         roomFilter = e.target.value.toLowerCase();
-        document.querySelectorAll('#local-rooms-tbody tr[data-jid]').forEach(row => {
-            row.style.display = row.dataset.jid.toLowerCase().includes(roomFilter) ? '' : 'none';
+        // Detail rows (settings panel, occupants) carry data-parent-jid and follow their room row.
+        document.querySelectorAll('#local-rooms-tbody tr[data-jid], #local-rooms-tbody tr[data-parent-jid]').forEach(row => {
+            const jid = row.dataset.jid || row.dataset.parentJid;
+            row.style.display = jid.toLowerCase().includes(roomFilter) ? '' : 'none';
         });
     });
 }
@@ -933,23 +1031,7 @@ function renderLocalRooms(rooms) {
     expandedRoomVis.forEach(jid => captureRoomVisEdits(jid));
 
     tbody.innerHTML = rooms.map(r => {
-        let mappedCell;
-        if (r.mappings && r.mappings.length > 0) {
-            mappedCell = r.mappings.map(m => renderMappingRow(r.jid, m)).join('');
-        } else {
-            mappedCell = '<span style="color:#999;font-size:11px">not mapped</span>';
-        }
-        // Per-room visibility control (only meaningful while the room is federated).
-        const visList = r.visibleTo || [];
-        const visExpanded = expandedRoomVis.has(r.jid);
-        const visLabel = visList.includes('*') ? 'all'
-                       : (visList.length ? visList.length + ' server(s)' : 'none');
-        const visCtl = r.federated
-            ? `<div style="margin-top:6px">
-                   <button class="btn-small" style="background:#e2e3e5;color:#383d41"
-                           onclick="toggleRoomVis('${escHtml(r.jid)}')">Visible: ${visLabel} ${visExpanded ? '▾' : '▸'}</button>
-               </div>`
-            : '';
+        const expanded = r.federated && expandedRoomVis.has(r.jid);
         const visible = r.jid.toLowerCase().includes(roomFilter) ? '' : 'display:none';
         // Occupant roster expander (local + remote virtual occupants, with live presence).
         const occList = r.occupantList || [];
@@ -957,6 +1039,19 @@ function renderLocalRooms(rooms) {
         const occCell = occList.length > 0
             ? `<span style="cursor:pointer" title="show occupants" onclick="toggleRoomOccupants('${escHtml(r.jid)}')">${occList.length} ${occExpanded ? '▾' : '▸'}</span>`
             : `${r.occupants}`;
+        // Once federated, all per-room settings live behind the expand arrow on the right.
+        let settingsCell = '';
+        if (r.federated) {
+            const visList = r.visibleTo || [];
+            const visLabel = visList.includes('*') ? 'all peers'
+                           : (visList.length ? visList.length + ' server(s)' : 'nobody');
+            const mapCount = (r.mappings || []).length;
+            settingsCell = `
+                <span class="room-detail-sum">${mapCount ? mapCount + ' mapped' : 'not mapped'} · visible: ${visLabel}</span>
+                <button class="room-expand-btn ${expanded ? 'open' : ''}"
+                        title="${expanded ? 'Hide' : 'Show'} federation settings for this room"
+                        onclick="toggleRoomDetail('${escHtml(r.jid)}')">▸</button>`;
+        }
         let row = `
         <tr data-jid="${escHtml(r.jid)}" style="${visible}">
             <td><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small></td>
@@ -968,15 +1063,10 @@ function renderLocalRooms(rooms) {
                            onchange="setRoomFederated('${escHtml(r.jid)}', this.checked)">
                     <span class="slider"></span>
                 </label>
-                ${visCtl}
-                ${r.federated ? `<label style="display:block;margin-top:6px;font-size:11px;color:#495057">
-                    <input type="checkbox" ${r.autoAccept ? 'checked' : ''}
-                           onchange="setRoomAutoAccept('${escHtml(r.jid)}', this.checked)">
-                    auto-accept requests</label>` : ''}
             </td>
-            <td>${mappedCell}</td>
+            <td class="room-detail-cell">${settingsCell}</td>
         </tr>`;
-        if (r.federated && visExpanded) row += renderRoomVisEditor(r);
+        if (expanded) row += renderRoomDetailRow(r);
         if (occExpanded && occList.length > 0) row += renderRoomOccupants(r);
         return row;
     }).join('');
@@ -1000,7 +1090,7 @@ function renderRoomOccupants(r) {
         return `<span style="display:inline-block;margin:2px 14px 2px 0;font-family:monospace;font-size:12px">`
              + `${presenceDot(o.show)}${escHtml(o.name)}${kind}${st}</span>`;
     }).join('') || '<span style="color:#999">no occupants</span>';
-    return `<tr class="route-detail"><td colspan="5" style="background:#fafafa;padding:8px 24px">
+    return `<tr class="route-detail" data-parent-jid="${escHtml(r.jid)}"><td colspan="5" style="background:#fafafa;padding:8px 24px">
         <div style="font-size:12px;color:#555;margin-bottom:4px">Occupants in ${escHtml(r.name || r.jid)} (local + federated):</div>
         ${items}
     </td></tr>`;
@@ -1018,6 +1108,20 @@ function setRoomAutoAccept(jid, autoAccept) {
 
 // ── Mapping consent: inline rows + pending-requests panel ───────────────────────
 
+/** "12 ms · 3s ago" chip for the end-to-end mapping probe; explains itself when no pong yet. */
+function renderMappingPing(m, dom) {
+    if (m.state !== 'ACTIVE') return '';
+    if (m.pongAgeSecs >= 0) {
+        const age = m.pongAgeSecs < 120 ? `${m.pongAgeSecs}s ago` : `${Math.round(m.pongAgeSecs / 60)}m ago`;
+        const rtt = m.pingMs >= 0 ? `${m.pingMs} ms` : '✓';
+        return `<span class="mapping-ping" title="End-to-end probe of the full path to ${dom} — last answer ${age}${m.pingMs >= 0 ? `, round trip ${m.pingMs} ms` : ''}">ping ${rtt} · ${age}</span>`;
+    }
+    if (m.connected !== false) {
+        return `<span class="mapping-ping" title="No end-to-end probe answer from ${dom} since this server started — the probe runs every minute; a persistent blank here can mean the reverse path is broken or the peer predates 1.7.19">ping —</span>`;
+    }
+    return '';
+}
+
 /** Renders one mapping row with a state badge and the buttons valid for that state. */
 function renderMappingRow(localJid, m) {
     const dom = escHtml(m.remoteDomain);
@@ -1028,10 +1132,13 @@ function renderMappingRow(localJid, m) {
     switch (m.state) {
         case 'ACTIVE':
             badge = (m.connected === false)
-                ? (m.routeMissing
+                ? (m.pathBroken
+                    ? `<span class="mapping-state mapping-disconnected" title="A route to ${dom} exists but it is not answering end-to-end — a server on the path may be denying this traffic">⚠ not responding</span>`
+                    : m.routeMissing
                     ? `<span class="mapping-state mapping-disconnected" title="No route to ${dom} — an intermediate peer is not advertising it">⚠ route missing</span>`
                     : `<span class="mapping-state mapping-disconnected" title="Route to ${dom} is down">⚠ disconnected</span>`)
                 : `<span class="mapping-state mapping-connected">● active</span>`;
+            badge += ` ${renderMappingPing(m, dom)}`;
             buttons = `<button class="btn-small btn-warn" onclick="mappingAction('disable-mapping','${lj}','${dom}')">Disable</button> ${unmap}`;
             break;
         case 'PENDING_OUT':
@@ -1099,9 +1206,47 @@ function renderPendingRequests(reqs) {
         </div>`).join('');
 }
 
-// ── Per-room visibility ACL editor ─────────────────────────────────────────────
+// ── Per-room federation settings panel (sharing + visibility + mappings) ──────
 
-function renderRoomVisEditor(r) {
+/** Full-width detail row behind the expand arrow: every federation setting for one room in one view. */
+function renderRoomDetailRow(r) {
+    const jid = escHtml(r.jid);
+    const mappings = (r.mappings && r.mappings.length > 0)
+        ? r.mappings.map(m => renderMappingRow(r.jid, m)).join('')
+        : '<p class="empty" style="margin:6px 0">Not mapped yet — pick this room next to a remote room in the “Remote rooms” list below.</p>';
+    return `
+    <tr class="exposed-editor-row room-detail-row" data-parent-jid="${jid}">
+        <td colspan="5">
+            <div class="exposed-cols">
+                <div class="exposed-col" style="flex:0 0 230px">
+                    <div class="exposed-col-h">Sharing
+                        <span class="exposed-col-sub">how ${escHtml(r.name || r.jid)} handles incoming requests</span>
+                    </div>
+                    <label class="exposed-room">
+                        <input type="checkbox" ${r.autoAccept ? 'checked' : ''}
+                               onchange="setRoomAutoAccept('${jid}', this.checked)">
+                        <span>Auto-accept mapping requests</span>
+                    </label>
+                </div>
+                <div class="exposed-col">
+                    <div class="exposed-col-h">Visibility
+                        <span class="exposed-col-sub">none selected = visible to nobody; a checked server with no route yet is pending</span>
+                    </div>
+                    ${renderRoomVisSection(r)}
+                </div>
+                <div class="exposed-col">
+                    <div class="exposed-col-h">Mappings
+                        <span class="exposed-col-sub">remote rooms bridged to this one</span>
+                    </div>
+                    ${mappings}
+                </div>
+            </div>
+        </td>
+    </tr>`;
+}
+
+/** The visibility ACL editor section (used inside the room settings panel). */
+function renderRoomVisSection(r) {
     const id = jidToElemId(r.jid);
     const curSet = editedRoomVis[r.jid] || new Set(r.visibleTo || []);
     const allOn = curSet.has('*');
@@ -1136,11 +1281,6 @@ function renderRoomVisEditor(r) {
     }
 
     return `
-    <tr class="exposed-editor-row">
-        <td colspan="5">
-            <div class="exposed-col-h">Servers allowed to see <strong>${escHtml(r.name || r.jid)}</strong>
-                <span class="exposed-col-sub">none selected = visible to nobody; tick “all peers” to share with everyone; a checked server with no route yet is pending</span>
-            </div>
             <label class="exposed-room" style="font-weight:600">
                 <input type="checkbox" ${allOn ? 'checked' : ''} onchange="setRoomVisAll('${escHtml(r.jid)}', this.checked)">
                 <span>Visible to all peers</span>
@@ -1149,9 +1289,7 @@ function renderRoomVisEditor(r) {
             <div style="margin-top:8px">
                 <button class="btn-small btn-primary" onclick="saveRoomVis('${escHtml(r.jid)}')">Save</button>
                 <span id="roomvis-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:6px">Saved ✓</span>
-            </div>
-        </td>
-    </tr>`;
+            </div>`;
 }
 
 function roomVisibleToSet(jid) {
@@ -1176,7 +1314,7 @@ function captureRoomVisEdits(jid) {
     editedRoomVis[jid] = set;
 }
 
-function toggleRoomVis(jid) {
+function toggleRoomDetail(jid) {
     if (expandedRoomVis.has(jid)) { captureRoomVisEdits(jid); expandedRoomVis.delete(jid); }
     else expandedRoomVis.add(jid);
     renderLocalRooms(lastData.localRooms || []);

@@ -28,6 +28,7 @@ public class PeerRegistry {
     /** Legacy room-level exposure key (1.3.38–41); now dead — deleted on load/remove. */
     private static final String PROP_EXPOSED_LEGACY = "federation.peer.exposed.";
     private static final String PROP_CERTFP     = "federation.peer.certfp.";    // + domain → sha256 hex of pinned cert
+    private static final String PROP_DENIED_RT  = "federation.peer.deniedroutes."; // + domain → csv of denied destinations
 
     private final ConcurrentHashMap<String, PeerServer> peers = new ConcurrentHashMap<>();
 
@@ -65,6 +66,8 @@ public class PeerRegistry {
                     // Restore the pinned S2S cert fingerprint (TOFU). Mismatch is re-derived live.
                     String fp = JiveGlobals.getProperty(PROP_CERTFP + domain, "").strip();
                     if (!fp.isEmpty()) peer.setPinnedCertFp(fp);
+                    // Restore the admin's per-peer denied route advertisements.
+                    peer.setDeniedRoutes(parseCsv(JiveGlobals.getProperty(PROP_DENIED_RT + domain, "")));
                     peers.put(domain, peer);
                 }
             }
@@ -104,6 +107,7 @@ public class PeerRegistry {
             JiveGlobals.deleteProperty(PROP_EXPOSED_SRV + domain);
             JiveGlobals.deleteProperty(PROP_EXPOSED_LEGACY + domain);
             JiveGlobals.deleteProperty(PROP_CERTFP + domain);
+            JiveGlobals.deleteProperty(PROP_DENIED_RT + domain);
             persist();
         }
         return removed;
@@ -145,6 +149,35 @@ public class PeerRegistry {
             JiveGlobals.deleteProperty(PROP_EXPOSED_SRV + domain);
         } else {
             JiveGlobals.setProperty(PROP_EXPOSED_SRV + domain, String.join(",", stored));
+        }
+    }
+
+    // ── Denied route advertisements (per-peer inbound filter) ──────────────────
+
+    /** Destinations whose advertisements from {@code domain} the admin has denied. */
+    public Set<String> getDeniedRoutes(String domain) {
+        PeerServer peer = peers.get(domain);
+        return peer == null ? Collections.emptySet()
+                            : Collections.unmodifiableSet(peer.getDeniedRoutes());
+    }
+
+    /** True if advertisements for {@code destination} arriving from {@code domain} are denied. */
+    public boolean isRouteDenied(String domain, String destination) {
+        PeerServer peer = peers.get(domain);
+        return peer != null && peer.isRouteDenied(destination);
+    }
+
+    /** Adds (or removes) a denied destination for a peer and persists the set. No-op if unknown. */
+    public void setRouteDenied(String domain, String destination, boolean denied) {
+        PeerServer peer = peers.get(domain);
+        if (peer == null || destination == null || destination.isBlank()) return;
+        if (denied) peer.getDeniedRoutes().add(destination.strip());
+        else        peer.getDeniedRoutes().remove(destination.strip());
+        Set<String> stored = peer.getDeniedRoutes();
+        if (stored.isEmpty()) {
+            JiveGlobals.deleteProperty(PROP_DENIED_RT + domain);
+        } else {
+            JiveGlobals.setProperty(PROP_DENIED_RT + domain, String.join(",", stored));
         }
     }
 

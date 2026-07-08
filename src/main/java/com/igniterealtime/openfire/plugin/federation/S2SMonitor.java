@@ -54,6 +54,13 @@ public class S2SMonitor {
     static final         String RECONNECT_JIVE_KEY     = "plugin.federation.reconnectSeconds";
     static final         int    RECONNECT_DEFAULT       = 30;
     static final         int    RECONNECT_MINIMUM       = 5;
+
+    // End-to-end mapping path probe cadence (mapping-ping). Detects a path silently
+    // broken mid-way (e.g. an intermediate route deny) that the routing table can't see.
+    // 0 disables the probe.
+    static final         String MAPPING_PING_JIVE_KEY  = "plugin.federation.mappingPingSeconds";
+    static final         int    MAPPING_PING_DEFAULT    = 60;
+    static final         int    MAPPING_PING_MINIMUM    = 15;
     private static final int    RECONNECT_POLL_SECONDS  = 5;   // hard-coded poll interval
     private static final int    RECONNECT_BACKOFF_BASE  = 5;   // first retry delay in seconds
 
@@ -62,7 +69,7 @@ public class S2SMonitor {
     private final FederatedRoomManager   roomManager;
     private final FederationManager      federationManager;
 
-    private ScheduledExecutorService scheduler;
+    private volatile ScheduledExecutorService scheduler;
     private ScheduledFuture<?>       keepaliveFuture;
     private ScheduledFuture<?>       reconnectFuture;
     /** The interval the keepalive task is currently scheduled at (effective, post-clamp). */
@@ -103,14 +110,50 @@ public class S2SMonitor {
         // when each UNREACHABLE peer is actually retried (up to reconnectSeconds cap).
         reconnectFuture = scheduler.scheduleAtFixedRate(
                 this::sendReconnects, RECONNECT_POLL_SECONDS, RECONNECT_POLL_SECONDS, TimeUnit.SECONDS);
-        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect-poll={}s, reconnect-cap={}s, s2s-idle={}s)",
+        // End-to-end mapping probes: catch a path broken mid-way (e.g. an intermediate
+        // route deny) that local routing state can't see. 0 disables.
+        int pingSeconds = JiveGlobals.getIntProperty(MAPPING_PING_JIVE_KEY, MAPPING_PING_DEFAULT);
+        if (pingSeconds > 0) {
+            pingSeconds = Math.max(pingSeconds, MAPPING_PING_MINIMUM);
+            scheduler.scheduleAtFixedRate(() -> {
+                try {
+                    federationManager.sendMappingPings();
+                } catch (Exception e) {
+                    // Uncaught exceptions cancel the task permanently — keep the probe alive.
+                    Log.error("Mapping-ping task threw unexpectedly — task continues", e);
+                }
+            }, pingSeconds, pingSeconds, TimeUnit.SECONDS);
+        }
+        Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect-poll={}s, reconnect-cap={}s, "
+               + "mapping-ping={}s, s2s-idle={}s)",
                  POLL_SECONDS, getEffectiveKeepaliveSeconds(), RECONNECT_POLL_SECONDS, getReconnectSeconds(),
-                 idleTimeoutSeconds());
+                 pingSeconds, idleTimeoutSeconds());
     }
 
     public void stop() {
         if (scheduler != null) {
             scheduler.shutdownNow();
+        }
+    }
+
+    /**
+     * Runs a one-shot task on the monitor's scheduler after {@code delayMs}.  Returns false
+     * when the monitor is not running (caller should fall back to executing inline).
+     */
+    boolean schedule(Runnable task, long delayMs) {
+        ScheduledExecutorService s = scheduler;
+        if (s == null || s.isShutdown()) return false;
+        try {
+            s.schedule(() -> {
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    Log.error("Scheduled federation task threw unexpectedly", e);
+                }
+            }, delayMs, TimeUnit.MILLISECONDS);
+            return true;
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            return false;   // shut down between the check and the submit
         }
     }
 
@@ -284,12 +327,22 @@ public class S2SMonitor {
             }
 
             PeerServer.Status prev = peer.getStatus();
-            PeerServer.Status next = s2sUp ? PeerServer.Status.REACHABLE : PeerServer.Status.UNREACHABLE;
+            // An S2S link that is up but whose remote federation plugin has not confirmed us
+            // (no peer-announce received) is PENDING, not REACHABLE — the admin sees the peer
+            // is waiting to be added back on the other side, and no gossip/routes flow yet.
+            PeerServer.Status next;
+            if (s2sUp) {
+                next = peer.isRemoteConfirmed() ? PeerServer.Status.REACHABLE : PeerServer.Status.PENDING;
+            } else {
+                next = PeerServer.Status.UNREACHABLE;
+            }
 
             // Trust-on-first-use cert check: immediately when a link comes up (so a new/changed
             // cert is pinned at once), and periodically thereafter (catches a cert swapped under
             // a steady link). Skipped on the fast liveness ticks in between.
-            if (s2sUp && (prev != PeerServer.Status.REACHABLE || certSweep)) {
+            boolean prevUp = prev == PeerServer.Status.REACHABLE || prev == PeerServer.Status.PENDING;
+            boolean nextUp = next == PeerServer.Status.REACHABLE || next == PeerServer.Status.PENDING;
+            if (s2sUp && (!prevUp || certSweep)) {
                 federationManager.observePeerCertificate(domain);
             }
 
@@ -297,11 +350,21 @@ public class S2SMonitor {
 
             peerRegistry.updateStatus(domain, next);
 
-            if (next == PeerServer.Status.REACHABLE) {
-                onPeerUp(domain);
-            } else {
+            if (nextUp && !prevUp) {
+                if (next == PeerServer.Status.REACHABLE) {
+                    onPeerUp(domain);
+                } else {
+                    // Link up but unconfirmed: only announce ourselves. The full peer-up
+                    // sequence (direct route, gossip exchange, room sync) runs when the
+                    // remote's own peer-announce arrives and confirms the mutual add.
+                    Log.info("Federation peer link up, awaiting remote confirmation: {}", domain);
+                    federationManager.sendPeerAnnounce(domain);
+                }
+            } else if (!nextUp && prevUp) {
                 onPeerDown(domain);
             }
+            // PENDING → REACHABLE (confirmation) is driven by handlePeerAnnounce, which runs
+            // the full gossip exchange itself — no extra work on the poll side.
         }
 
         if (certSweep) lastCertSweepMs = now;
@@ -324,7 +387,10 @@ public class S2SMonitor {
         try {
             int count = 0;
             for (PeerServer peer : peerRegistry.getPeers()) {
-                if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                // PENDING peers get the keepalive announce too — it doubles as a periodic
+                // handshake attempt so the link confirms once the remote adds us back.
+                if (peer.getStatus() == PeerServer.Status.REACHABLE
+                        || peer.getStatus() == PeerServer.Status.PENDING) {
                     federationManager.sendPeerAnnounce(peer.getDomain());
                     count++;
                 }
@@ -340,7 +406,10 @@ public class S2SMonitor {
             long now   = System.currentTimeMillis();
             int  count = 0;
             for (PeerServer peer : peerRegistry.getPeers()) {
-                if (peer.getStatus() != PeerServer.Status.UNREACHABLE) continue;
+                // PENDING = link up but the remote hasn't added us back yet: keep announcing
+                // on the same back-off so the handshake completes quickly once it does.
+                if (peer.getStatus() != PeerServer.Status.UNREACHABLE
+                        && peer.getStatus() != PeerServer.Status.PENDING) continue;
                 String domain  = peer.getDomain();
                 long   retryAt = peerNextRetryAt.getOrDefault(domain, 0L);
                 if (now < retryAt) continue;   // back-off not yet elapsed
@@ -381,9 +450,11 @@ public class S2SMonitor {
         // re-acceptance, or requests queued while it was down).
         federationManager.resendPendingRequests(domain);
         // Publish our online-user directory to the freshly-reachable peer (no-op unless enabled).
-        federationManager.publishDirectory();
+        // Per-peer variant: the broadcast form skips when our directory is unchanged, but this
+        // peer's cache is empty and needs the current state regardless.
+        federationManager.publishDirectoryTo(domain);
         // Advertise our connected clients as XEP-0048 bookmarks (no-op unless enabled).
-        federationManager.pushBookmarks();
+        federationManager.pushBookmarksTo(domain);
     }
 
     private void onPeerDown(String domain) {

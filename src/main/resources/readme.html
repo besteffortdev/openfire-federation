@@ -66,9 +66,12 @@
     domain (for example <code>chat.example.com</code>) and click <em>Add peer</em>. Do this on each server for
     its neighbours. Watch the status dot:
     <span class="dot green"></span>reachable,
-    <span class="dot orange"></span>connecting/retrying,
+    <span class="dot orange"></span>pending / connecting / retrying,
     <span class="dot red"></span>unreachable,
     <span class="dot grey"></span>disabled.
+    A peer stays <strong>Pending</strong> until the other side adds this server back — federation only starts
+    once both ends have added each other. A server already talking plain S2S to you appears under
+    <em>Active S2S sessions</em> with an <em>Add peer</em> button, so you can federate it in one click.
 </div>
 
 <div class="step"><strong>2. Turn on federation for a room.</strong>
@@ -159,25 +162,47 @@
         add each other (auto-registration of unknown peers is suppressed). Set it to <code>false</code> (or use
         the Security toggle on this tab) for open federation, accepting any server that connects.</li>
     <li><strong>Untrusted peers (filtered exposure).</strong> Tick <em>Untrusted</em> when adding a peer (or use
-        <em>Make untrusted</em> on its row) and it gets <strong>no</strong> routing updates and <strong>no</strong>
-        room advertisements. Open its <em>Servers</em> editor to choose exactly which servers it may see — this
+        <em>Make untrusted</em> in its settings panel) and it gets <strong>no</strong> routing updates and <strong>no</strong>
+        room advertisements. Open its settings panel (the expand arrow on its row) to choose exactly which servers it may see — this
         server itself (its federated local rooms) and any server reachable through this one. It is sent only the
         federated rooms homed on those servers, plus a route to each, and any mapping/message it sends toward a room
         homed on a server you did <em>not</em> expose is dropped (logged <code>SECURITY:</code>). Use this for an
         edge server fronting a partner organisation that should see only a curated set of servers.
         <br><strong>Trust is per‑link:</strong> both ends must set the same trust level. If one side marks the link
         untrusted and the other leaves it trusted, the link shows <em>Trust mismatch</em> and carries no
-        federation until they agree — then it comes up on its own. The <em>Servers</em> editor has two columns: on
-        the left the servers you expose to that peer (editable), on the right the servers that peer is
-        <em>advertising through</em> to you (read‑only).
+        federation until they agree — then it comes up on its own. The settings panel shows both directions: the
+        servers you expose to that peer (editable), and the servers that peer is <em>advertising through</em>
+        to you — each with a <em>Deny</em> button (see below).
         <br><strong>Untrusted by default:</strong> adding a peer under a different parent domain (last two DNS
         labels, e.g. <code>example.net</code>; adjust with <code>plugin.federation.trustDomainLabels</code>) ticks
         <em>Untrusted</em> automatically; same‑parent peers default trusted.</li>
-    <li><strong>S2S certificate pinning (trust‑on‑first‑use).</strong> The first time a peer's S2S link comes up,
-        the SHA‑256 of the top‑of‑chain certificate it presents is pinned. If it later changes (a server re‑created
-        under the same domain name presents a different cert/CA), the peer is auto‑marked untrusted and flagged
-        <em>⚠ cert changed</em>; federation toward it is blocked until you click <em>Trust new cert</em>. Needs a
-        TLS‑secured S2S link — a plain dialback link presents no certificate and is not pinned.</li>
+    <li><strong>Deny a route advertisement (per‑link).</strong> Exposure controls what you <em>send</em>; each side
+        can also refuse what it <em>receives</em>. If a peer advertises a route to a server you don't want, click
+        <em>Deny</em> — on the Routing Table row, or next to that server in the peer's settings panel. The
+        destination is refused whenever <strong>that</strong> peer advertises it: any installed route via that peer
+        is removed at once (rooms and ghost occupants cleaned up) and later advertisements are dropped. The entry
+        stays in the Routing Table as a disabled row and the deny is remembered even if the route is withdrawn and
+        advertised again later. A route to the same destination via a different peer is unaffected, and nothing is
+        negotiated with the peer — the deny is entirely yours. <em>Allow</em> lifts it — on the disabled row, or in
+        the peer's settings panel. Servers on the far side of a deny (whose own routing table still shows a
+        route) detect the break end‑to‑end: active mappings are probed with a <code>mapping-ping</code> every
+        60&nbsp;s; when the pongs stop, the mapping shows <em>⚠ not responding</em> and its remote occupants are
+        dropped, then everything re‑syncs on its own once the path answers again. Which domains answer probes is
+        remembered persistently, so a path that is already broken when the plugin starts is still detected; the
+        room's settings panel shows each mapping's probe round trip and last‑answer age
+        (<code>ping 12 ms · 3s ago</code>).</li>
+    <li><strong>S2S key pinning (trust‑on‑first‑use).</strong> The first time a peer's S2S link comes up,
+        the SHA‑256 of the leaf certificate's <strong>public key</strong> (SPKI) is pinned. If the key later
+        changes (a server re‑created under the same domain name — even with a cert from the same CA), the peer is
+        auto‑marked untrusted and flagged <em>⚠ cert changed</em>; federation toward it is blocked until you click
+        <em>Trust new cert</em>. Renewals that reuse the key pass silently; a key rotation raises the flag. Needs a
+        TLS‑secured S2S link — a plain dialback link presents no certificate and is not pinned. Pre‑1.7.13 pins
+        (top‑of‑chain cert hashes) upgrade in place on the next sighting.</li>
+    <li><strong>Sender‑identity (anti‑spoofing) checks.</strong> Every stanza forwarded over the overlay has its
+        claimed <code>from</code> validated at each hop: no peer may deliver a stanza pretending to come from
+        <em>this server's own users</em>, and an untrusted peer may only speak for itself or for servers reached
+        <em>through</em> it — a forged identity from the wrong direction is dropped and logged with a
+        <code>SECURITY:</code> tag.</li>
     <li><strong>Per‑room visibility.</strong> Each federated room has a <em>Visible</em> control listing the servers
         allowed to see it — pick from the routable peers, or add a server manually before it is reachable (the room
         advertises to it automatically once a route appears). A newly‑federated room defaults to <strong>visible to
@@ -203,7 +228,7 @@
     <li><strong>Disable</strong> — an authoritative, persistent block. The disabled peer cannot re‑establish
         the connection (even by re‑adding) until you re‑enable it.</li>
     <li><strong>Untrusted</strong> — toggle filtered exposure for a peer (see <a href="#">Security</a>). An
-        untrusted peer's <em>Servers</em> editor lets you pick precisely which servers it may see; everything else in
+        untrusted peer's settings panel lets you pick precisely which servers it may see; everything else in
         your network stays hidden from it.</li>
 </ul>
 

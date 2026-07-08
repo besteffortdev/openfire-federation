@@ -42,11 +42,26 @@ public class BookmarkInjector {
     private final Map<String, List<String>> lastApplied = new ConcurrentHashMap<>();
 
     /**
-     * Replaces this server's injected bookmarks for {@code originDomain} with the supplied users.
-     * An empty (or null) collection withdraws the origin's bookmarks entirely.
+     * Runs the per-user storage rewrites off the caller's thread.  applyForOrigin is invoked
+     * from the S2S IQ-processing thread, and a changed push is a DB read+write for EVERY local
+     * user — on a large user base that would stall federation packet processing for the whole
+     * rewrite.  Single-threaded so apply/withdraw for the same origin keep their submission
+     * order; daemon so a hung write can never block plugin unload.
      */
-    public synchronized void applyForOrigin(String originDomain,
-                                            Collection<UserDirectory.UserPresence> users) {
+    private final java.util.concurrent.ExecutorService executor =
+        java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "federation-bookmark-injector");
+            t.setDaemon(true);
+            return t;
+        });
+
+    /**
+     * Replaces this server's injected bookmarks for {@code originDomain} with the supplied users.
+     * An empty (or null) collection withdraws the origin's bookmarks entirely.  The payload is
+     * snapshotted here; the storage rewrite itself runs asynchronously on {@link #executor}.
+     */
+    public void applyForOrigin(String originDomain,
+                               Collection<UserDirectory.UserPresence> users) {
         if (originDomain == null || originDomain.isBlank()) return;
 
         List<String> jids = (users == null) ? List.of()
@@ -56,6 +71,14 @@ public class BookmarkInjector {
                        .sorted()
                        .collect(Collectors.toList());
 
+        try {
+            executor.execute(() -> applyJidsForOrigin(originDomain, jids));
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            // Executor already shut down — the plugin is stopping; nothing to inject.
+        }
+    }
+
+    private synchronized void applyJidsForOrigin(String originDomain, List<String> jids) {
         // No-op guard: skip the (potentially expensive) per-user rewrite when nothing changed.
         if (jids.equals(lastApplied.getOrDefault(originDomain, List.of()))) return;
 
@@ -123,6 +146,16 @@ public class BookmarkInjector {
 
     /** Drops all in-memory state (e.g. on plugin shutdown). Does not touch persisted storage. */
     public void clear() {
+        lastApplied.clear();
+    }
+
+    /**
+     * Stops the background writer (pending rewrites are discarded) and drops in-memory state.
+     * Called on plugin shutdown; injected bookmarks remain in storage and are reconciled by the
+     * next push after a restart.
+     */
+    public void shutdown() {
+        executor.shutdownNow();
         lastApplied.clear();
     }
 

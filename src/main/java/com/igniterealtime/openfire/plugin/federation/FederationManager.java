@@ -303,6 +303,8 @@ public class FederationManager {
         if (interceptor != null)
             InterceptorManager.getInstance().removeInterceptor(interceptor);
 
+        bookmarkInjector.shutdown();
+
         Log.info("Federation plugin stopped.");
     }
 
@@ -822,7 +824,11 @@ public class FederationManager {
      *        injects them without bouncing a reverse sync (in-session updates and
      *        leaves).  When false (initial mapping sync), the receiver's
      *        injectPresence runs syncLocalOccupantsToRemote and replies with its
-     *        own occupants — a bilateral exchange.
+     *        own occupants — a bilateral exchange.  Only the FIRST occupant's
+     *        presence is left unmarked in that case: one unmarked join is enough to
+     *        trigger the reverse sync, and marking the rest collapses what was an
+     *        N×M reply burst (every unmarked join provoked a full-roster reply from
+     *        the remote) into a single M-occupant reply.
      */
     private void pushOccupants(String localRoom, String remoteDomain, String remoteRoomJid,
                                boolean leaving, boolean markForwarded) {
@@ -836,6 +842,7 @@ public class FederationManager {
             String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
             String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
 
+            boolean syncTriggerSent = false;
             for (MUCOccupant occupant : occupants) {
                 Presence p = new Presence();
                 p.setFrom(occupant.getUserAddress());
@@ -850,7 +857,8 @@ public class FederationManager {
                         p.getElement().addElement("status").setText(statusEl.getText());
                     }
                 }
-                if (markForwarded) FederationStanzaFactory.markAsForwarded(p);
+                if (markForwarded || syncTriggerSent) FederationStanzaFactory.markAsForwarded(p);
+                syncTriggerSent = true;
                 try {
                     XMPPServer.getInstance().getPacketRouter().route(
                         FederationStanzaFactory.mucForward(
@@ -877,9 +885,10 @@ public class FederationManager {
     }
 
     /**
-     * Sends current local occupants' join presences to the remote WITHOUT fed-origin
-     * so the remote's injectPresence triggers syncLocalOccupantsToRemote and replies
-     * with its own occupants.  Used only at mapping-creation time.
+     * Sends current local occupants' join presences to the remote, the first one WITHOUT
+     * fed-origin so the remote's injectPresence triggers syncLocalOccupantsToRemote exactly
+     * once and replies with its own occupants (the rest are marked — see pushOccupants).
+     * Used at mapping-creation and re-sync time.
      */
     public void pushInitialSyncPresences(String localRoom, String remoteDomain,
                                          String remoteRoomJid) {
@@ -1033,6 +1042,151 @@ public class FederationManager {
         }
     }
 
+    // ── End-to-end mapping path probe (mapping-ping / mapping-pong) ───────────
+    //
+    // The routing table only proves a route EXISTS from here — it cannot see a path
+    // silently broken mid-way in one direction (e.g. an intermediate server denying
+    // the reverse route while advertisements toward us still flow). Each ping
+    // interval we probe every distinct ACTIVE-mapped domain; the far end answers
+    // with a pong routed back across the overlay. Missing MAPPING_PING_MISS_LIMIT
+    // pongs in a row marks the path broken: mappings toward it show "not responding"
+    // and its virtual occupants are evicted, exactly as the other side already did.
+    // A returning pong clears the flag and re-syncs rosters bilaterally.
+
+    static final int MAPPING_PING_MISS_LIMIT = 3;
+
+    private static final class MappingPingState {
+        volatile boolean everPonged = false;   // this runtime; persisted capability survives restarts
+        volatile int     missed     = 0;       // pings sent since the last pong
+        volatile boolean broken     = false;
+        volatile long    lastPingAt = 0;       // epoch ms of the newest ping we sent
+        volatile long    lastPongAt = 0;       // epoch ms of the newest pong we received
+        volatile long    lastRttMs  = -1;      // round trip of the newest pong (-1 = none yet)
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<String, MappingPingState> mappingPingStates =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    // Domains proven to speak the probe protocol (they ponged — or pinged — us at least once,
+    // ever). Persisted: everPonged alone resets with the JVM, so a path already broken when the
+    // plugin (re)starts would otherwise never be flagged and its ghost occupants never evicted.
+    private static final String PROBE_CAPABLE_KEY = "plugin.federation.probeCapableDomains";
+    private final Set<String> probeCapable = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private volatile boolean probeCapableLoaded = false;
+
+    private Set<String> probeCapable() {
+        if (!probeCapableLoaded) {
+            synchronized (probeCapable) {
+                if (!probeCapableLoaded) {
+                    String csv = JiveGlobals.getProperty(PROBE_CAPABLE_KEY, "");
+                    for (String d : csv.split(",")) {
+                        if (!d.isBlank()) probeCapable.add(d.trim());
+                    }
+                    probeCapableLoaded = true;
+                }
+            }
+        }
+        return probeCapable;
+    }
+
+    /** Records (persistently) that this domain answers mapping probes, enabling break detection toward it. */
+    public void markProbeCapable(String domain) {
+        if (domain == null || domain.isEmpty()) return;
+        if (probeCapable().add(domain)) {
+            JiveGlobals.setProperty(PROBE_CAPABLE_KEY, String.join(",", probeCapable));
+        }
+    }
+
+    /** True when the mapped domain has stopped answering end-to-end probes (route may still exist). */
+    public boolean isMappingPathBroken(String remoteDomain) {
+        MappingPingState st = mappingPingStates.get(remoteDomain);
+        return st != null && st.broken;
+    }
+
+    /** Round trip (ms) of the newest pong from the domain; -1 when none was received this runtime. */
+    public long getMappingPingRttMs(String remoteDomain) {
+        MappingPingState st = mappingPingStates.get(remoteDomain);
+        return st == null ? -1 : st.lastRttMs;
+    }
+
+    /** Seconds since the newest pong from the domain; -1 when none was received this runtime. */
+    public long getMappingPongAgeSecs(String remoteDomain) {
+        MappingPingState st = mappingPingStates.get(remoteDomain);
+        return st == null || st.lastPongAt == 0 ? -1
+             : (System.currentTimeMillis() - st.lastPongAt) / 1000;
+    }
+
+    /** Sends one mapping-ping toward every distinct ACTIVE-mapped domain that is currently routable. */
+    public void sendMappingPings() {
+        Set<String> mapped = new LinkedHashSet<>();
+        for (List<RoomMapping> mappings : roomManager.getLocalMappings().values()) {
+            for (RoomMapping m : mappings) {
+                if (m.isActive()) mapped.add(m.remoteDomain());
+            }
+        }
+        mappingPingStates.keySet().retainAll(mapped);   // forget unmapped domains
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        for (String dest : mapped) {
+            java.util.Optional<String> nextHop = routingTable.findNextHop(dest);
+            if (nextHop.isEmpty()) continue;   // no route — routeMissing handling already covers this
+            MappingPingState st = mappingPingStates.computeIfAbsent(dest, k -> new MappingPingState());
+            if ((st.everPonged || probeCapable().contains(dest))
+                    && !st.broken && st.missed >= MAPPING_PING_MISS_LIMIT) {
+                st.broken = true;
+                onMappingPathBroken(dest);
+            }
+            st.missed++;
+            long now = System.currentTimeMillis();
+            st.lastPingAt = now;
+            try {
+                XMPPServer.getInstance().getPacketRouter().route(
+                    FederationStanzaFactory.mappingPing(nextHop.get(), dest, localDomain, "",
+                                                        Long.toString(now)));
+            } catch (Exception e) {
+                Log.warn("Could not send mapping-ping toward {}: {}", dest, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * A pong arrived from a mapped domain: the round trip works. Heals a broken-path state.
+     * {@code echoedTs} is our own ping timestamp echoed back by a ≥1.7.21 peer (null/empty from
+     * older peers — the newest ping's send time is used for the RTT instead).
+     */
+    public void onMappingPong(String remoteDomain, String echoedTs) {
+        MappingPingState st = mappingPingStates.computeIfAbsent(remoteDomain, k -> new MappingPingState());
+        boolean wasBroken = st.broken;
+        st.everPonged = true;
+        markProbeCapable(remoteDomain);
+        long now = System.currentTimeMillis();
+        long sentAt = st.lastPingAt;
+        if (echoedTs != null && !echoedTs.isEmpty()) {
+            try { sentAt = Long.parseLong(echoedTs); } catch (NumberFormatException ignored) { }
+        }
+        if (sentAt > 0 && sentAt <= now) st.lastRttMs = now - sentAt;
+        st.lastPongAt = now;
+        st.missed = 0;
+        st.broken = false;
+        if (wasBroken) {
+            Log.info("Federation mapping path to {} responds again — re-syncing occupants", remoteDomain);
+            resyncMappedDestinations(Set.of(remoteDomain));
+        }
+    }
+
+    /** The mapped domain stopped answering although a route exists: evict its ghosts. */
+    private void onMappingPathBroken(String remoteDomain) {
+        Log.warn("Federation mapping path to {} is broken end-to-end ({} pings unanswered while a route "
+               + "exists) — an intermediate server may be denying this traffic; evicting its occupants",
+                 remoteDomain, MAPPING_PING_MISS_LIMIT);
+        for (List<RoomMapping> mappings : roomManager.getLocalMappings().values()) {
+            for (RoomMapping m : mappings) {
+                if (m.isActive() && m.remoteDomain().equals(remoteDomain)) {
+                    evictForInactiveMapping(m.localRoomJid(), remoteDomain);
+                }
+            }
+        }
+    }
+
     /**
      * Re-pushes our local occupants toward each mapped remote that just became
      * reachable, so occupant rosters self-heal after a link comes up or a route
@@ -1068,6 +1222,37 @@ public class FederationManager {
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 sendRoomState(peer.getDomain());
             }
+        }
+    }
+
+    /**
+     * Debounce window for routing-change-driven room re-floods.  A link flap delivers a burst
+     * of routing-updates (each peer's triggered update, then the solicit replies), and flooding
+     * full room state to every reachable peer for each one is O(N² · rooms) chatter across the
+     * mesh — every receiving hop relays the advertisements onward again.  Coalescing the burst
+     * into one flood is invisible to correctness: room gossip is eventually consistent, and
+     * solicits/keepalives cover any straggler.
+     */
+    private static final long ROOMS_FLOOD_DEBOUNCE_MS = 2000;
+    private final java.util.concurrent.atomic.AtomicBoolean roomsFloodPending =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * As {@link #propagateRoomsToAll} but coalesced: bursts of calls within
+     * {@link #ROOMS_FLOOD_DEBOUNCE_MS} produce a single flood.  Used by the routing-update
+     * handler, where one topology change arrives as many gossip messages in quick succession.
+     * Falls back to an immediate flood when the monitor's scheduler is unavailable.
+     */
+    public void propagateRoomsToAllDebounced() {
+        if (!roomsFloodPending.compareAndSet(false, true)) return;   // a flood is already queued
+        S2SMonitor monitor = s2sMonitor;
+        boolean scheduled = monitor != null && monitor.schedule(() -> {
+            roomsFloodPending.set(false);
+            propagateRoomsToAll();
+        }, ROOMS_FLOOD_DEBOUNCE_MS);
+        if (!scheduled) {
+            roomsFloodPending.set(false);
+            propagateRoomsToAll();
         }
     }
 
@@ -1133,7 +1318,7 @@ public class FederationManager {
                                        List<FederatedRoom> rooms, String via) {
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getDomain().equals(excludeDomain)) continue;
-            if (via != null && via.contains(peer.getDomain())) continue;
+            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 // Untrusted-peer exposure + per-room visibility: relay only the allowed subset.
                 // Always send the filtered list, EVEN WHEN EMPTY: a peer that was previously on the
@@ -1159,26 +1344,60 @@ public class FederationManager {
     // ── User directory + 1:1 message relay ─────────────────────────────────────
 
     /**
+     * Snapshot of the last directory broadcast to ALL peers (sorted by JID for stable equality),
+     * so presence events and the S2S poll tick don't re-gossip an unchanged directory — each
+     * broadcast is relayed onward by every receiving hop, so redundant sends amplify across the
+     * mesh. Null = nothing broadcast yet (always send once). A peer that (re)connects is caught
+     * up via {@link #publishDirectoryTo}, which bypasses this guard.
+     */
+    private volatile List<UserDirectory.UserPresence> lastPublishedDirectory = null;
+    /** Same guard for {@link #pushBookmarks} broadcasts. */
+    private volatile List<UserDirectory.UserPresence> lastPushedBookmarks = null;
+
+    /** The current directory payload: online users when {@code enabled}, else an empty (withdrawal) list. */
+    private List<UserDirectory.UserPresence> directorySnapshot(boolean enabled) {
+        if (!enabled) return Collections.emptyList();
+        List<UserDirectory.UserPresence> users = new ArrayList<>(userDirectory.localOnlineUsers());
+        users.sort(java.util.Comparator.comparing(UserDirectory.UserPresence::jid));
+        return users;
+    }
+
+    /**
      * Publishes our online-user directory to every trusted, reachable peer when publishing is
      * enabled (default OFF). When publishing is disabled we send an EMPTY list once so peers that
      * previously cached our users withdraw them. Untrusted peers never receive the directory.
-     * Cheap and idempotent — safe to call from the S2S poll tick and on peer-up.
+     * Skips the broadcast entirely when nothing changed since the last one, so it is safe (and
+     * cheap) to call from every presence event and the S2S poll tick.
      */
     public void publishDirectory() {
-        boolean publish = FederationProperties.DIRECTORY_PUBLISH.getValue();
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        Collection<UserDirectory.UserPresence> users =
-                publish ? userDirectory.localOnlineUsers() : Collections.emptyList();
+        List<UserDirectory.UserPresence> users =
+                directorySnapshot(FederationProperties.DIRECTORY_PUBLISH.getValue());
+        if (users.equals(lastPublishedDirectory)) return;   // unchanged since last broadcast
+        lastPublishedDirectory = users;
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
-            if (isUntrusted(peer.getDomain())) continue;   // never expose our user list to an untrusted edge
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.userDirectory(
-                              peer.getDomain(), users, localDomain, null));
-            } catch (Exception e) {
-                Log.warn("Failed to send user-directory to {}: {}", peer.getDomain(), e.getMessage());
-            }
+            sendDirectoryTo(peer.getDomain(), users);
+        }
+    }
+
+    /**
+     * Sends the current directory to ONE peer regardless of the change guard — used on peer-up,
+     * where the peer's cache is empty even though our directory hasn't changed. No-op unless
+     * publishing is enabled (a fresh peer has nothing to withdraw).
+     */
+    public void publishDirectoryTo(String toDomain) {
+        if (!FederationProperties.DIRECTORY_PUBLISH.getValue()) return;
+        sendDirectoryTo(toDomain, directorySnapshot(true));
+    }
+
+    private void sendDirectoryTo(String toDomain, Collection<UserDirectory.UserPresence> users) {
+        if (isUntrusted(toDomain)) return;   // never expose our user list to an untrusted edge
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        try {
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.userDirectory(toDomain, users, localDomain, null));
+        } catch (Exception e) {
+            Log.warn("Failed to send user-directory to {}: {}", toDomain, e.getMessage());
         }
     }
 
@@ -1201,7 +1420,7 @@ public class FederationManager {
             if (peer.getDomain().equals(fromDomain)) continue;
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
             if (isUntrusted(peer.getDomain())) continue;
-            if (via != null && via.contains(peer.getDomain())) continue;
+            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.userDirectory(
@@ -1218,34 +1437,67 @@ public class FederationManager {
      * Pushes this server's connected clients to every trusted, reachable peer as a {@code
      * bookmark-push} when {@link FederationProperties#BOOKMARK_PUSH} is enabled. When disabled we
      * send an EMPTY list once so peers withdraw the bookmarks they previously injected for us.
-     * Untrusted peers never receive it. Cheap and idempotent — safe from the S2S tick and on peer-up.
+     * Untrusted peers never receive it. Skips the broadcast when nothing changed since the last
+     * one (same guard as {@link #publishDirectory}), so it is safe from every presence event and
+     * the S2S poll tick.
      */
     public void pushBookmarks() {
-        boolean enabled = FederationProperties.BOOKMARK_PUSH.getValue();
-        sendBookmarks(enabled ? userDirectory.localOnlineUsers() : Collections.emptyList());
+        List<UserDirectory.UserPresence> users =
+                bookmarkSnapshot(FederationProperties.BOOKMARK_PUSH.getValue());
+        if (users.equals(lastPushedBookmarks)) return;   // unchanged since last broadcast
+        lastPushedBookmarks = users;
+        sendBookmarks(users);
+    }
+
+    /**
+     * Bookmark payloads are consumed by JID only (receivers inject one bookmark per JID and ignore
+     * presence), so strip show/status before comparing/sending — otherwise every status change of
+     * any local user would re-broadcast the whole bookmark set across the mesh.
+     */
+    private List<UserDirectory.UserPresence> bookmarkSnapshot(boolean enabled) {
+        return directorySnapshot(enabled).stream()
+                .map(u -> new UserDirectory.UserPresence(u.jid(), "", ""))
+                .collect(Collectors.toList());
     }
 
     /**
      * One-shot advertisement of our current connected clients regardless of the auto-push toggle —
      * backs the admin "Push now" button. Peers inject the bookmarks; nothing is withdrawn.
+     * Bypasses the change guard (that is the point of a manual push) but refreshes its snapshot so
+     * the next automatic push compares against what peers actually hold.
      */
     public void pushBookmarksNow() {
-        sendBookmarks(userDirectory.localOnlineUsers());
+        List<UserDirectory.UserPresence> users = bookmarkSnapshot(true);
+        lastPushedBookmarks = users;
+        sendBookmarks(users);
+    }
+
+    /**
+     * Sends the current bookmark set to ONE peer regardless of the change guard — used on peer-up,
+     * where the peer holds nothing for us even though our client list hasn't changed. No-op unless
+     * auto-push is enabled (a fresh peer has nothing to withdraw).
+     */
+    public void pushBookmarksTo(String toDomain) {
+        if (!FederationProperties.BOOKMARK_PUSH.getValue()) return;
+        sendBookmarksTo(toDomain, bookmarkSnapshot(true));
     }
 
     /** Sends a bookmark-push (the given user set; empty = withdrawal) to every trusted, reachable peer. */
     private void sendBookmarks(Collection<UserDirectory.UserPresence> users) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
-            if (isUntrusted(peer.getDomain())) continue;   // never advertise our clients to an untrusted edge
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.bookmarkPush(
-                              peer.getDomain(), users, localDomain, null));
-            } catch (Exception e) {
-                Log.warn("Failed to send bookmark-push to {}: {}", peer.getDomain(), e.getMessage());
-            }
+            sendBookmarksTo(peer.getDomain(), users);
+        }
+    }
+
+    private void sendBookmarksTo(String toDomain, Collection<UserDirectory.UserPresence> users) {
+        if (isUntrusted(toDomain)) return;   // never advertise our clients to an untrusted edge
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        try {
+            XMPPServer.getInstance().getPacketRouter()
+                      .route(FederationStanzaFactory.bookmarkPush(toDomain, users, localDomain, null));
+        } catch (Exception e) {
+            Log.warn("Failed to send bookmark-push to {}: {}", toDomain, e.getMessage());
         }
     }
 
@@ -1269,7 +1521,7 @@ public class FederationManager {
             if (peer.getDomain().equals(fromDomain)) continue;
             if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
             if (isUntrusted(peer.getDomain())) continue;
-            if (via != null && via.contains(peer.getDomain())) continue;
+            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
             try {
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.bookmarkPush(
@@ -1640,12 +1892,57 @@ public class FederationManager {
         return out;
     }
 
-    // ── Trust-on-first-use: foreign-domain default + S2S cert pinning ───────────
+    // ── Per-peer route advertisement deny ───────────────────────────────────────
+
+    /**
+     * Denies {@code destination}'s route/room advertisements arriving from {@code peerDomain}.
+     * Future advertisements are filtered on receive; any route currently installed via that
+     * peer is torn down immediately (with ghost/room clean-up and topology re-propagation),
+     * while a route to the same destination via a DIFFERENT peer is left intact.
+     */
+    public void denyRouteFromPeer(String peerDomain, String destination) {
+        peerRegistry.setRouteDenied(peerDomain, destination, true);
+        boolean removed = routingTable.removeRouteVia(destination, peerDomain);
+        if (removed) {
+            handleUnreachableDestinations(Set.of(destination));
+            propagateTopologyChange(peerDomain);
+        } else if (!routingTable.isReachable(destination)) {
+            // No live route, but cached rooms/directory entries may have arrived via this peer.
+            handleUnreachableDestinations(Set.of(destination));
+        }
+        Log.info("Denied route advertisements for {} from peer {}{}", destination, peerDomain,
+                 removed ? " (installed route removed)" : "");
+    }
+
+    /**
+     * Lifts a route-advertisement deny and asks the peer to re-send its routing table and
+     * room cache so the destination is re-learned without waiting for the next gossip.
+     */
+    public void allowRouteFromPeer(String peerDomain, String destination) {
+        peerRegistry.setRouteDenied(peerDomain, destination, false);
+        PeerServer.Status st = peerRegistry.getPeer(peerDomain).map(PeerServer::getStatus).orElse(null);
+        if (st == PeerServer.Status.REACHABLE) {
+            solicitRouting(peerDomain);
+        }
+        Log.info("Allowed route advertisements for {} from peer {}", destination, peerDomain);
+    }
+
+    // ── Trust-on-first-use: foreign-domain default + S2S key pinning ────────────
     //
     // A peer whose PARENT domain differs from ours is treated as a stranger and defaults to
-    // untrusted on add. Separately, the top-of-chain cert each peer presents on the S2S link is
-    // pinned on first sighting; if it later changes (a server re-created under the same domain
-    // name presents a different cert/CA) the peer is auto-untrusted and the admin is alerted.
+    // untrusted on add. Separately, the PUBLIC KEY of the leaf cert each peer presents on the
+    // S2S link (its SPKI, stored as "spki:<sha256>") is pinned on first sighting; if it later
+    // changes (a server re-created under the same domain name presents a different key) the
+    // peer is auto-untrusted and the admin is alerted.
+    //
+    // Why the leaf SPKI and not the top-of-chain cert (the pre-1.7.13 scheme): pinning the
+    // chain top pins the CA — any impersonator with a cert from the SAME public CA (e.g.
+    // Let's Encrypt) passes unnoticed, which defeats the check's purpose. The leaf's public
+    // key identifies the actual server: it survives renewals that reuse the key, and a
+    // re-created server (new key) trips the alarm even under the same CA. Trade-off: a
+    // renewal that ROTATES the key (certbot's default) also trips it — the admin clears it
+    // with the existing "Trust new cert" button. Legacy cert-hash pins are upgraded in place
+    // on the next sighting when the old hash still matches.
 
     /** Number of trailing DNS labels that define the "parent" (registrable) domain. */
     private int trustDomainLabels() {
@@ -1666,14 +1963,36 @@ public class FederationManager {
         return !parentDomain(peerDomain).equals(parentDomain(local));
     }
 
-    /** SHA-256 (lowercase hex) of a certificate's encoded form, or null on failure. */
-    private static String sha256Hex(java.security.cert.Certificate cert) {
+    /** SHA-256 (lowercase hex) of arbitrary bytes, or null on failure. */
+    private static String sha256Hex(byte[] data) {
         try {
-            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(cert.getEncoded());
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(data);
             StringBuilder sb = new StringBuilder(d.length * 2);
             for (byte b : d) sb.append(Character.forDigit((b >> 4) & 0xF, 16))
                                .append(Character.forDigit(b & 0xF, 16));
             return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** SHA-256 (lowercase hex) of a certificate's encoded form (legacy pin format), or null. */
+    private static String sha256Hex(java.security.cert.Certificate cert) {
+        try {
+            return sha256Hex(cert.getEncoded());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Prefix marking a pin in the leaf-SPKI format (vs a legacy bare top-of-chain cert hash). */
+    private static final String SPKI_PREFIX = "spki:";
+
+    /** {@code "spki:<sha256>"} of the LEAF certificate's SubjectPublicKeyInfo, or null on failure. */
+    private static String leafSpkiFp(java.security.cert.Certificate[] chain) {
+        try {
+            String hex = sha256Hex(chain[0].getPublicKey().getEncoded());
+            return hex == null ? null : SPKI_PREFIX + hex;
         } catch (Exception e) {
             return null;
         }
@@ -1700,15 +2019,17 @@ public class FederationManager {
     }
 
     /**
-     * Observes the peer's current S2S cert and applies TOFU pinning: pins on first sighting,
-     * accepts a matching cert, and on a CHANGED cert auto-untrusts the peer and raises an alert.
-     * Called from the poll loop for each REACHABLE peer. No-op when no certificate is available
-     * (e.g. a plain server-dialback link with no TLS).
+     * Observes the peer's current S2S identity and applies TOFU pinning on the LEAF cert's
+     * public key (SPKI): pins on first sighting, accepts a matching key, and on a CHANGED key
+     * auto-untrusts the peer and raises an alert. A legacy (pre-1.7.13) top-of-chain cert-hash
+     * pin that still matches is upgraded to the SPKI format in place — same server, new scheme,
+     * no alarm. Called from the poll loop for each REACHABLE peer. No-op when no certificate is
+     * available (e.g. a plain server-dialback link with no TLS).
      */
     public void observePeerCertificate(String domain) {
         java.security.cert.Certificate[] chain = peerCertChain(domain);
-        if (chain == null) return;                       // no TLS cert visible — nothing to pin
-        String fp = sha256Hex(chain[chain.length - 1]);  // top-of-chain (closest to root presented)
+        if (chain == null || chain.length == 0) return;   // no TLS cert visible — nothing to pin
+        String fp = leafSpkiFp(chain);
         if (fp == null) return;
         peerRegistry.setLastSeenCertFp(domain, fp);
 
@@ -1716,20 +2037,30 @@ public class FederationManager {
         if (pinned == null || pinned.isBlank()) {
             peerRegistry.setPinnedCertFp(domain, fp);
             peerRegistry.setCertMismatch(domain, false);
-            Log.info("Pinned S2S cert for {} ({}…)", domain, fp.substring(0, Math.min(12, fp.length())));
+            Log.info("Pinned S2S leaf key for {} ({}…)", domain, abbrevFp(fp));
             return;
         }
         if (pinned.equals(fp)) {
             peerRegistry.setCertMismatch(domain, false);
             return;
         }
-        // Cert changed under the same domain name — possible impersonation. Act once on transition.
+        // Legacy pin (bare SHA-256 of the top-of-chain CERT): if it still matches what the peer
+        // presents, this is the same server observed under the new scheme — upgrade the pin.
+        if (!pinned.startsWith(SPKI_PREFIX)) {
+            String legacy = sha256Hex(chain[chain.length - 1]);
+            if (pinned.equals(legacy)) {
+                peerRegistry.setPinnedCertFp(domain, fp);
+                peerRegistry.setCertMismatch(domain, false);
+                Log.info("Upgraded S2S pin for {} from legacy cert-hash to leaf-SPKI ({}…)",
+                         domain, abbrevFp(fp));
+                return;
+            }
+        }
+        // Key changed under the same domain name — possible impersonation. Act once on transition.
         if (!peerRegistry.isCertMismatch(domain)) {
             peerRegistry.setCertMismatch(domain, true);
-            Log.warn("SECURITY: S2S cert for {} changed (pinned={}…, seen={}…) — auto-untrusting; "
-                   + "admin must accept the new cert to restore", domain,
-                     pinned.substring(0, Math.min(12, pinned.length())),
-                     fp.substring(0, Math.min(12, fp.length())));
+            Log.warn("SECURITY: S2S identity key for {} changed (pinned={}…, seen={}…) — auto-untrusting; "
+                   + "admin must accept the new key to restore", domain, abbrevFp(pinned), abbrevFp(fp));
             if (!peerRegistry.isUntrusted(domain)) {
                 peerRegistry.setUntrusted(domain, true);
                 applyLocalTrustChange(domain);
@@ -1737,7 +2068,13 @@ public class FederationManager {
         }
     }
 
-    /** Admin accepted a changed cert: re-pin the last observed fingerprint and clear the alert. */
+    /** First 12 hex chars of a fingerprint for logging, with the format prefix stripped. */
+    private static String abbrevFp(String fp) {
+        String hex = fp.startsWith(SPKI_PREFIX) ? fp.substring(SPKI_PREFIX.length()) : fp;
+        return hex.substring(0, Math.min(12, hex.length()));
+    }
+
+    /** Admin accepted a changed key: re-pin the last observed fingerprint and clear the alert. */
     public void acceptNewCertificate(String domain) {
         String fp = peerRegistry.getPeer(domain).map(PeerServer::getLastSeenCertFp).orElse(null);
         if (fp == null || fp.isBlank()) {
@@ -1746,7 +2083,7 @@ public class FederationManager {
         }
         peerRegistry.setPinnedCertFp(domain, fp);
         peerRegistry.setCertMismatch(domain, false);
-        Log.info("Admin accepted new S2S cert for {} ({}…)", domain, fp.substring(0, Math.min(12, fp.length())));
+        Log.info("Admin accepted new S2S identity key for {} ({}…)", domain, abbrevFp(fp));
     }
 
     // ── Link-level trust negotiation ────────────────────────────────────────────

@@ -65,7 +65,13 @@ public class FederatedRoomManager {
     /** origin domain → which direct S2S neighbor last relayed that origin's rooms to us. */
     private final ConcurrentHashMap<String, String> roomRelaySource = new ConcurrentHashMap<>();
 
-    /** localRoomJid → list of confirmed mappings (one per remote domain). */
+    /**
+     * localRoomJid → list of confirmed mappings (one per remote domain).
+     * Values are {@link java.util.concurrent.CopyOnWriteArrayList}s: they are mutated by
+     * admin/IQ-handler threads while interceptor threads iterate them on every MUC packet,
+     * so a plain ArrayList would risk ConcurrentModificationException / torn reads.
+     * Reads vastly outnumber writes (mapping lifecycle events), so copy-on-write is ideal.
+     */
     private final ConcurrentHashMap<String, List<RoomMapping>> localMappings = new ConcurrentHashMap<>();
 
     /** remoteRoomJid → mapping (reverse index for fast lookups). */
@@ -185,7 +191,7 @@ public class FederatedRoomManager {
                                     catch (IllegalArgumentException e) { state = RoomMapping.State.PENDING_OUT; }
                                 }
                                 RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain, state, token);
-                                localMappings.computeIfAbsent(localJid, k -> new ArrayList<>()).add(m);
+                                localMappings.computeIfAbsent(localJid, k -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(m);
                                 remoteMappings.put(remoteJid, m);
                                 Log.info("Loaded room mapping: {} ↔ {} ({}) [{}]", localJid, remoteJid, remoteDomain, state);
                             }
@@ -200,7 +206,7 @@ public class FederatedRoomManager {
                     String remoteDomain = JiveGlobals.getProperty("federation.rooms.mapping." + localJid + ".domain");
                     if (remoteJid != null && remoteDomain != null) {
                         RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain);
-                        localMappings.computeIfAbsent(localJid, k -> new ArrayList<>()).add(m);
+                        localMappings.computeIfAbsent(localJid, k -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(m);
                         remoteMappings.put(remoteJid, m);
                         Log.info("Migrating legacy mapping: {} ↔ {} ({})", localJid, remoteJid, remoteDomain);
                         persistMappingsForRoom(localJid);
@@ -433,7 +439,7 @@ public class FederatedRoomManager {
 
     public void addMapping(String localJid, String remoteJid, String remoteDomain,
                            RoomMapping.State state, String token) {
-        List<RoomMapping> list = localMappings.computeIfAbsent(localJid, k -> new ArrayList<>());
+        List<RoomMapping> list = localMappings.computeIfAbsent(localJid, k -> new java.util.concurrent.CopyOnWriteArrayList<>());
 
         // Remove any existing mapping to the same remote domain before adding the new one.
         list.removeIf(m -> {
@@ -548,6 +554,15 @@ public class FederatedRoomManager {
         return Collections.unmodifiableMap(result);
     }
 
+    /**
+     * True when any local room has a mapping (any state) with remoteDomain.  Gates the
+     * mapping-ping answer so probes cannot be used to sweep for reachable domains.
+     */
+    public boolean hasMappingWith(String remoteDomain) {
+        return localMappings.values().stream()
+            .anyMatch(list -> list.stream().anyMatch(m -> m.remoteDomain().equals(remoteDomain)));
+    }
+
     // ── Virtual occupant tracking ─────────────────────────────────────────────
 
     /**
@@ -560,15 +575,22 @@ public class FederatedRoomManager {
         boolean newRoom = !virtualOccupants.containsKey(localRoomJid);
         ConcurrentHashMap<String, VirtualOccupant> byNick =
             virtualOccupants.computeIfAbsent(localRoomJid, k -> new ConcurrentHashMap<>());
+        boolean[] changed = new boolean[1];
         VirtualOccupant vo = byNick.compute(virtualNick, (n, existing) -> {
             if (existing == null) {
                 Set<String> via = ConcurrentHashMap.newKeySet();
                 via.add(arrivedVia);
+                changed[0] = true;
                 return new VirtualOccupant(n, origin, via);
             }
-            existing.arrivedVia().add(arrivedVia);   // additional reachable path for an existing occupant
+            // Additional reachable path for an existing occupant; add() reports whether it was new.
+            if (existing.arrivedVia().add(arrivedVia)) changed[0] = true;
             return existing;
         });
+        // Presence UPDATES of an already-tracked occupant re-enter here on every status change;
+        // only touch the DB when the tracked state actually changed (new occupant or new path) —
+        // each JiveGlobals.setProperty is a DB write plus a cluster-wide property event.
+        if (!changed[0]) return;
         // Incremental persistence: write ONLY the changed occupant + the nicks list (and the
         // rooms index only when this room is new), instead of rewriting every occupant entry
         // on every track — which was N+2 DB writes per join on a room with N occupants.

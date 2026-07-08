@@ -252,6 +252,42 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    // ── mapping-ping / mapping-pong (end-to-end mapping path probe) ───────────
+
+    /**
+     * Lightweight end-to-end probe for an active room mapping, relayed hop-by-hop
+     * toward {@code destination}, which answers with a mapping-pong.  A pong coming
+     * back proves the full round trip works — the only signal that catches a path
+     * silently broken mid-way (e.g. a route deny on an intermediate server) while
+     * this server's own routing table still shows the destination as reachable.
+     */
+    public static IQ mappingPing(String nextHop, String destination, String originDomain,
+                                 String viaTrail, String ts) {
+        return mappingProbe("mapping-ping", nextHop, destination, originDomain, viaTrail, ts);
+    }
+
+    /**
+     * Reply half of the mapping path probe; routed back exactly like the ping.
+     * {@code ts} echoes the ping's origin timestamp untouched so the origin can compute
+     * the round-trip time on its own clock (empty/null when the ping carried none).
+     */
+    public static IQ mappingPong(String nextHop, String destination, String originDomain,
+                                 String viaTrail, String ts) {
+        return mappingProbe("mapping-pong", nextHop, destination, originDomain, viaTrail, ts);
+    }
+
+    private static IQ mappingProbe(String element, String nextHop, String destination,
+                                   String originDomain, String viaTrail, String ts) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element probe = fed.addElement(element);
+        probe.addAttribute("destination", destination);
+        probe.addAttribute("origin",      originDomain);
+        if (viaTrail != null && !viaTrail.isEmpty()) probe.addAttribute("via", viaTrail);
+        if (ts != null && !ts.isEmpty())             probe.addAttribute("ts",  ts);
+        return iq;
+    }
+
     // ── muc-forward ───────────────────────────────────────────────────────────
 
     /**
@@ -429,6 +465,20 @@ public final class FederationStanzaFactory {
 
     public static boolean isMarkedAsForwarded(Packet packet) {
         return packet.getElement().element(NS_ORIGIN_ELEMENT) != null;
+    }
+
+    /**
+     * True when {@code domain} appears as an ELEMENT of the comma-separated {@code via} trail.
+     * A plain {@code String.contains} false-positives when one server's domain is a substring
+     * of another's (e.g. {@code xmpp.example.net} inside {@code 2503-xmpp.example.net}), which
+     * would silently drop legitimate traffic or skip a peer during relay.
+     */
+    public static boolean viaContains(String via, String domain) {
+        if (via == null || via.isEmpty() || domain == null) return false;
+        for (String d : via.split(",")) {
+            if (domain.equals(d.strip())) return true;
+        }
+        return false;
     }
 
     private static final String NS_ORIGIN_ELEMENT = "fed-origin";
