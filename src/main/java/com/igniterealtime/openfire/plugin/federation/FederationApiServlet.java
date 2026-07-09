@@ -411,6 +411,10 @@ public class FederationApiServlet extends HttpServlet {
                     return;
                 }
                 String d = domain.strip().toLowerCase();
+                if (!isPlausibleDomain(d)) {
+                    out.print("{\"error\":\"invalid domain\"}");
+                    return;
+                }
                 mgr.addPeer(d);
                 // Default the untrusted flag from the parent-domain rule when the caller didn't
                 // specify it (the UI always sends the checkbox; this guards API callers).
@@ -844,6 +848,23 @@ public class FederationApiServlet extends HttpServlet {
     }
 
     private String str(Object o) { return o == null ? "" : o.toString(); }
+
+    /**
+     * Minimal syntactic check for an admin-entered peer domain: lowercase host characters only
+     * (letters, digits, {@code . - _}). Single-label lab hostnames like {@code 2501} are allowed;
+     * quotes, whitespace, and angle brackets — which could break the status JSON or the admin UI's
+     * inline handlers if persisted and rendered — are rejected. Not a full hostname validation.
+     */
+    private static boolean isPlausibleDomain(String d) {
+        if (d == null || d.isEmpty() || d.length() > 253) return false;
+        for (int i = 0; i < d.length(); i++) {
+            char c = d.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                       || c == '.' || c == '-' || c == '_';
+            if (!ok) return false;
+        }
+        return true;
+    }
 
     /** True if the peer currently has a live (REACHABLE) federation link. */
     private boolean isReachable(FederationManager mgr, String domain) {

@@ -352,12 +352,21 @@ public class FederationIQHandler extends IQHandler {
             String jid  = r.attributeValue("jid");
             String name = r.attributeValue("name", "");
             String desc = r.attributeValue("description", "");
-            // Carry the per-room visibility ACL so we enforce it when relaying onward (absent = all).
+            // Per-room visibility ACL carried on the ad so we enforce it when relaying onward. Absence
+            // is parsed as an empty set, which roomVisibleAtHop treats as "visible to nobody" — the
+            // same secure default as a locally-federated room. (Same-version peers always emit the
+            // attribute, including the "*" sentinel; only pre-ACL peers omit it, in which case their
+            // rooms won't relay past us until they upgrade.)
             String visibleto = r.attributeValue("visibleto", "");
             java.util.Set<String> visibleTo = new java.util.LinkedHashSet<>();
             for (String s : visibleto.split(",")) if (!s.isBlank()) visibleTo.add(s.strip().toLowerCase());
-            if (jid != null) {
+            // Reject a peer-supplied room JID carrying characters that are invalid in an XMPP JID and
+            // that would enable admin-console script injection or malformed routing if cached/rendered.
+            if (jid != null && isSafeFederationJid(jid)) {
                 rooms.add(new FederatedRoom(jid, name, desc, sourceDomain, visibleTo));
+            } else if (jid != null) {
+                Log.warn("SECURITY: dropping advertised room with malformed JID from {} (len={})",
+                         fromDomain, jid.length());
             }
         }
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
@@ -726,6 +735,16 @@ public class FederationIQHandler extends IQHandler {
                        payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
                 return;
             }
+            // Mapping-consent gate: federation-enabled is NOT consent on its own. Traffic may only
+            // enter a room that has at least one ACTIVE mapping — otherwise a reachable peer could
+            // push messages or spoofed presence into any tagged-but-unmapped room. getMappingsForLocal
+            // returns ACTIVE mappings only, so a room with all mappings disabled/pending is also closed.
+            if (manager.getRoomManager().getMappingsForLocal(targetRoom).isEmpty()) {
+                Log.warn("SECURITY: dropping muc-forward from {} into federated but UNMAPPED local room {} "
+                       + "(type={}, from={})", fromDomain, targetRoom,
+                       payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
+                return;
+            }
             injectLocally(payloadEl, via, targetRoom, fromDomain, src);
             // Hub behavior: fan out to all other mapped spokes.
             fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via);
@@ -738,7 +757,11 @@ public class FederationIQHandler extends IQHandler {
             // Same authorization gate: only inject into a federation-enabled local room.
             if (targetRoom != null) {
                 RoomMapping ownMapping = manager.getRoomManager().getMappingForRemote(targetRoom);
-                if (ownMapping != null && isFederatedLocalRoom(ownMapping.localRoomJid())) {
+                // Only an ACTIVE mapping consents to traffic. getMappingForRemote returns a mapping in
+                // ANY state, so without the isActive() check a disabled/pending/rejected mapping would
+                // still admit injected packets into the local room.
+                if (ownMapping != null && ownMapping.isActive()
+                        && isFederatedLocalRoom(ownMapping.localRoomJid())) {
                     injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain, src);
                 }
             }
@@ -1419,6 +1442,24 @@ public class FederationIQHandler extends IQHandler {
      */
     private boolean isFederatedLocalRoom(String roomJid) {
         return roomJid != null && manager.getRoomManager().isFederated(roomJid);
+    }
+
+    /**
+     * Conservative syntactic gate for a peer-supplied JID before we cache, route on, or render it.
+     * Rejects control characters, whitespace, and the characters that enable admin-console script
+     * injection ({@code " ' < > & \}) — none of which are valid in an XMPP domain or room JID. This
+     * is not full RFC 7622 validation; it closes the injection/robustness surface (see the admin UI's
+     * inline event handlers) without rejecting legitimate lab room JIDs like {@code r_ext@conference.2503}.
+     */
+    private static boolean isSafeFederationJid(String jid) {
+        if (jid == null || jid.isEmpty() || jid.length() > 3071) return false;   // RFC 7622 max length
+        for (int i = 0; i < jid.length(); i++) {
+            char c = jid.charAt(i);
+            if (c < 0x20 || c == 0x7f) return false;                             // control chars
+            if (c == '"' || c == '\'' || c == '<' || c == '>'
+                    || c == '&' || c == '\\' || c == ' ') return false;
+        }
+        return jid.indexOf('@') > 0 || jid.indexOf('.') > 0;   // a room JID or at least a dotted domain
     }
 
     /**

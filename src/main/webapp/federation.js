@@ -192,7 +192,7 @@ function renderPeers(peers) {
         const sumParts = [];
         sumParts.push(p.untrusted ? `${(p.exposedServers || []).length} exposed` : 'trusted');
         if (deniedCount) sumParts.push(`${deniedCount} denied`);
-        const dom = escHtml(p.domain);
+        const dom = jsArg(p.domain);
 
         let row = `
         <tr>
@@ -229,7 +229,7 @@ function renderPeers(peers) {
 
 /** Full-width detail row behind the expand arrow: every setting for one peer in one view. */
 function renderPeerDetailRow(p) {
-    const dom = escHtml(p.domain);
+    const dom = jsArg(p.domain);
     const id = jidToElemId(p.domain);
     const isWithdrawn = p.status === 'WITHDRAWN';
     const needsRetry = isWithdrawn || p.status === 'UNREACHABLE'
@@ -298,13 +298,13 @@ function renderPeerDetailRow(p) {
             <div class="exposed-room"><span>${escHtml(s)}</span>
                 <button class="btn-small btn-warn" style="margin-left:8px"
                         title="Refuse this server's routes and rooms when ${dom} advertises them"
-                        onclick="denyRoute('${dom}','${escHtml(s)}')">Deny</button>
+                        onclick="denyRoute('${dom}','${jsArg(s)}')">Deny</button>
             </div>`).join('');
     const deniedRows = denied.map(s => `
             <div class="exposed-room"><span style="text-decoration:line-through;color:#999">${escHtml(s)}</span>
                 <span class="badge badge-untrusted">denied</span>
                 <button class="btn-small btn-primary" style="margin-left:8px"
-                        onclick="allowRoute('${dom}','${escHtml(s)}')">Allow</button>
+                        onclick="allowRoute('${dom}','${jsArg(s)}')">Allow</button>
             </div>`).join('');
     const inbound = (adv.length === 0 && denied.length === 0)
         ? '<p class="empty" style="margin:4px 0">This peer is not advertising any other servers to us yet.</p>'
@@ -446,7 +446,7 @@ function renderS2SSessions(sessions) {
 
         const killBtns = domSessions.map(s =>
             `<button class="btn-small btn-danger" style="margin-left:4px"
-                     onclick="killSession('${escHtml(domain)}','${escHtml(s.direction)}')">
+                     onclick="killSession('${jsArg(domain)}','${jsArg(s.direction)}')">
                  Kill ${s.direction === 'outgoing' ? '↑' : '↓'}
              </button>`
         ).join('');
@@ -454,7 +454,7 @@ function renderS2SSessions(sessions) {
         // Non-federated S2S session: offer to turn it into a federation peer in one click.
         const addPeerBtn = !isFed
             ? `<button class="btn-small btn-primary"
-                       onclick="addPeerFromSession('${escHtml(domain)}')">Add peer</button>`
+                       onclick="addPeerFromSession('${jsArg(domain)}')">Add peer</button>`
             : '';
 
         return `
@@ -685,14 +685,14 @@ function renderRouting(entries) {
             <td>—</td>
             <td><span class="badge badge-untrusted" title="Advertisements of this destination from ${escHtml(r.nextHop)} are refused — even if it is withdrawn and offered again">denied</span></td>
             <td><button class="btn-small btn-primary"
-                        onclick="allowRoute('${escHtml(r.nextHop)}','${escHtml(r.destination)}')">Allow</button></td>
+                        onclick="allowRoute('${jsArg(r.nextHop)}','${jsArg(r.destination)}')">Allow</button></td>
         </tr>`;
         }
         // A learned (indirect) route was advertised to us by its next hop — the admin can
         // deny that advertisement. A direct route IS the peer; use Disable/Remove instead.
         const denyBtn = r.destination !== r.nextHop
             ? `<button class="btn-small btn-warn"
-                       onclick="denyRoute('${escHtml(r.nextHop)}','${escHtml(r.destination)}')">Deny</button>`
+                       onclick="denyRoute('${jsArg(r.nextHop)}','${jsArg(r.destination)}')">Deny</button>`
             : '';
         return `
         <tr>
@@ -848,6 +848,7 @@ function renderRoomDefaults(rules) {
             : '—';
         const yn = v => v ? '✓' : '—';
         const p = escHtml(r.pattern);
+        const pj = jsArg(r.pattern);
         return `<tr>
             <td><code>${p}</code></td>
             <td>${yn(r.federated)}</td>
@@ -855,8 +856,8 @@ function renderRoomDefaults(rules) {
             <td>${escHtml(vis)}</td>
             <td>${yn(r.autoMap)}</td>
             <td style="text-align:right">
-                <button class="btn btn-small" onclick="editRoomDefault('${p}')">Edit</button>
-                <button class="btn btn-small btn-danger" onclick="deleteRoomDefault('${p}')">Delete</button>
+                <button class="btn btn-small" onclick="editRoomDefault('${pj}')">Edit</button>
+                <button class="btn btn-small btn-danger" onclick="deleteRoomDefault('${pj}')">Delete</button>
             </td>
         </tr>`;
     }).join('');
@@ -1037,7 +1038,7 @@ function renderLocalRooms(rooms) {
         const occList = r.occupantList || [];
         const occExpanded = expandedRoomOccupants.has(r.jid);
         const occCell = occList.length > 0
-            ? `<span style="cursor:pointer" title="show occupants" onclick="toggleRoomOccupants('${escHtml(r.jid)}')">${occList.length} ${occExpanded ? '▾' : '▸'}</span>`
+            ? `<span style="cursor:pointer" title="show occupants" onclick="toggleRoomOccupants('${jsArg(r.jid)}')">${occList.length} ${occExpanded ? '▾' : '▸'}</span>`
             : `${r.occupants}`;
         // Once federated, all per-room settings live behind the expand arrow on the right.
         let settingsCell = '';
@@ -1050,7 +1051,7 @@ function renderLocalRooms(rooms) {
                 <span class="room-detail-sum">${mapCount ? mapCount + ' mapped' : 'not mapped'} · visible: ${visLabel}</span>
                 <button class="room-expand-btn ${expanded ? 'open' : ''}"
                         title="${expanded ? 'Hide' : 'Show'} federation settings for this room"
-                        onclick="toggleRoomDetail('${escHtml(r.jid)}')">▸</button>`;
+                        onclick="toggleRoomDetail('${jsArg(r.jid)}')">▸</button>`;
         }
         let row = `
         <tr data-jid="${escHtml(r.jid)}" style="${visible}">
@@ -1060,7 +1061,7 @@ function renderLocalRooms(rooms) {
             <td>
                 <label class="toggle">
                     <input type="checkbox" ${r.federated ? 'checked' : ''}
-                           onchange="setRoomFederated('${escHtml(r.jid)}', this.checked)">
+                           onchange="setRoomFederated('${jsArg(r.jid)}', this.checked)">
                     <span class="slider"></span>
                 </label>
             </td>
@@ -1124,8 +1125,8 @@ function renderMappingPing(m, dom) {
 
 /** Renders one mapping row with a state badge and the buttons valid for that state. */
 function renderMappingRow(localJid, m) {
-    const dom = escHtml(m.remoteDomain);
-    const lj = escHtml(localJid);
+    const dom = jsArg(m.remoteDomain);
+    const lj = jsArg(localJid);
     const target = `<span class="badge badge-fed" title="${dom}">${escHtml(m.remoteRoomJid)}</span>`;
     const unmap = `<button class="btn-small btn-danger" onclick="unmapRoom('${lj}','${dom}')">Unmap</button>`;
     let badge, buttons;
@@ -1201,8 +1202,8 @@ function renderPendingRequests(reqs) {
             <strong>${escHtml(req.remoteDomain)}</strong> wants to map
             <span class="badge badge-fed">${escHtml(req.remoteRoomJid)}</span> onto your
             <span class="badge badge-fed">${escHtml(req.localJid)}</span>
-            <button class="btn-small btn-primary" onclick="mappingAction('accept-mapping','${escHtml(req.localJid)}','${escHtml(req.remoteDomain)}')">Accept</button>
-            <button class="btn-small btn-warn" onclick="mappingAction('reject-mapping','${escHtml(req.localJid)}','${escHtml(req.remoteDomain)}')">Reject</button>
+            <button class="btn-small btn-primary" onclick="mappingAction('accept-mapping','${jsArg(req.localJid)}','${jsArg(req.remoteDomain)}')">Accept</button>
+            <button class="btn-small btn-warn" onclick="mappingAction('reject-mapping','${jsArg(req.localJid)}','${jsArg(req.remoteDomain)}')">Reject</button>
         </div>`).join('');
 }
 
@@ -1210,7 +1211,7 @@ function renderPendingRequests(reqs) {
 
 /** Full-width detail row behind the expand arrow: every federation setting for one room in one view. */
 function renderRoomDetailRow(r) {
-    const jid = escHtml(r.jid);
+    const jid = jsArg(r.jid);
     const mappings = (r.mappings && r.mappings.length > 0)
         ? r.mappings.map(m => renderMappingRow(r.jid, m)).join('')
         : '<p class="empty" style="margin:6px 0">Not mapped yet — pick this room next to a remote room in the “Remote rooms” list below.</p>';
@@ -1267,7 +1268,7 @@ function renderRoomVisSection(r) {
             return `
             <label class="exposed-room">
                 <input type="checkbox" class="roomvis-cb" data-jid="${escHtml(r.jid)}" value="${escHtml(s)}" ${checked}
-                       onchange="captureRoomVisEdits('${escHtml(r.jid)}')">
+                       onchange="captureRoomVisEdits('${jsArg(r.jid)}')">
                 <span>${escHtml(s)}</span> ${tag}
             </label>`;
         }).join('') || '<p class="empty" style="margin:4px 0">No servers selected — this room is visible to nobody.</p>';
@@ -1275,19 +1276,19 @@ function renderRoomVisSection(r) {
             <div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                 <input type="text" id="roomvis-add-${id}" placeholder="add a server not listed yet"
                        style="padding:4px 6px;font-size:12px;min-width:220px"
-                       onkeydown="if(event.key==='Enter'){addRoomVisServer('${escHtml(r.jid)}');event.preventDefault();}">
-                <button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="addRoomVisServer('${escHtml(r.jid)}')">Add</button>
+                       onkeydown="if(event.key==='Enter'){addRoomVisServer('${jsArg(r.jid)}');event.preventDefault();}">
+                <button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="addRoomVisServer('${jsArg(r.jid)}')">Add</button>
             </div>`;
     }
 
     return `
             <label class="exposed-room" style="font-weight:600">
-                <input type="checkbox" ${allOn ? 'checked' : ''} onchange="setRoomVisAll('${escHtml(r.jid)}', this.checked)">
+                <input type="checkbox" ${allOn ? 'checked' : ''} onchange="setRoomVisAll('${jsArg(r.jid)}', this.checked)">
                 <span>Visible to all peers</span>
             </label>
             ${body}
             <div style="margin-top:8px">
-                <button class="btn-small btn-primary" onclick="saveRoomVis('${escHtml(r.jid)}')">Save</button>
+                <button class="btn-small btn-primary" onclick="saveRoomVis('${jsArg(r.jid)}')">Save</button>
                 <span id="roomvis-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:6px">Saved ✓</span>
             </div>`;
 }
@@ -1399,7 +1400,7 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
                 if (mapped) {
                     mapCell = `<span class="badge badge-fed">↔ ${escHtml(mapped.localJid)}</span>
                                <button class="btn-small btn-danger" style="margin-left:4px"
-                                       onclick="unmapRoom('${escHtml(mapped.localJid)}','${escHtml(mapped.remoteDomain)}')">Unmap</button>`;
+                                       onclick="unmapRoom('${jsArg(mapped.localJid)}','${jsArg(mapped.remoteDomain)}')">Unmap</button>`;
                 } else if (available.length === 0) {
                     mapCell = '<span style="color:#999;font-size:11px">no local rooms available<br>(enable federation on a local room first)</span>';
                 } else {
@@ -1412,7 +1413,7 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
                                    ${options}
                                </select>
                                <button class="btn-small btn-primary" style="margin-left:4px"
-                                       onclick="mapRoom('${escHtml(r.jid)}','${escHtml(peer)}','${selId}')">Map</button>`;
+                                       onclick="mapRoom('${jsArg(r.jid)}','${jsArg(peer)}','${selId}')">Map</button>`;
                 }
                 return `
                 <tr>
@@ -1432,7 +1433,7 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
 
         return `
         <div class="peer-section">
-            <div class="peer-section-header" onclick="togglePeer('${escHtml(peer)}')">
+            <div class="peer-section-header" onclick="togglePeer('${jsArg(peer)}')">
                 <span class="peer-collapse-icon" id="peer-icon-${peerId}">${isCollapsed ? '▶' : '▼'}</span>
                 <strong>${escHtml(peer)}</strong>
                 <span class="peer-room-count">${rooms.length} room(s)</span>
@@ -1509,5 +1510,23 @@ function escHtml(s) {
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+// Escapes a value for safe interpolation into a SINGLE-QUOTED JS string that itself sits inside a
+// double-quoted inline handler attribute — e.g. onclick="fn('${jsArg(x)}')". HTML-entity escaping
+// alone (escHtml) is NOT enough here: the browser HTML-decodes the attribute value BEFORE the JS
+// parser runs, so an entity-encoded quote would decode back to a real quote and break out of the
+// string. So we backslash-escape the JS metacharacters first, then HTML-escape the attribute-
+// breaking characters. Output is also safe in a double-quoted HTML attribute or HTML text context.
+function jsArg(s) {
+    if (s == null) return '';
+    return String(s)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n')
+        .replace(/</g, '\\x3C')
+        .replace(/&/g, '&amp;')
         .replace(/"/g, '&quot;');
 }
