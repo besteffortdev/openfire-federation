@@ -454,6 +454,24 @@
                         <button class="btn btn-primary btn-small" onclick="saveReconnect()">Save</button>
                     </div>
                 </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Mapping probe interval (mapping-ping)</div>
+                        <div class="setting-desc">
+                            Probes every active room mapping end-to-end at this interval; the mapped
+                            domain answers with a pong routed back across the overlay. Three unanswered
+                            probes in a row flag the mapping as <em>⚠ not responding</em> and evict its
+                            remote occupants (≈2 minutes at the default cadence). Applies immediately —
+                            no restart needed. 0 disables the probe. Minimum: 15 s. Default: 30 s.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="mapping-ping-input" class="num-input"
+                               min="0" max="3600" step="5">
+                        <span class="setting-state">s</span>
+                        <button class="btn btn-primary btn-small" onclick="saveMappingPing()">Save</button>
+                    </div>
+                </div>
             </div>
         </div>
 

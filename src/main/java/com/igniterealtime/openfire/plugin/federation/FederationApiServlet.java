@@ -297,6 +297,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds()).append(",");
         sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
         sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds()).append(",");
+        sb.append("\"mappingPingSeconds\":").append(mgr.getMappingPingSeconds()).append(",");
         sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue()).append(",");
         sb.append("\"allowRemoteRoomTraversal\":").append(FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()).append(",");
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
@@ -638,6 +639,21 @@ public class FederationApiServlet extends HttpServlet {
                     int seconds = Integer.parseInt(secParam.strip());
                     mgr.setReconnectSeconds(seconds);
                     out.print("{\"ok\":true,\"reconnectSeconds\":" + mgr.getReconnectSeconds() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"seconds must be an integer\"}");
+                }
+                return;
+            }
+            case "set-mapping-ping": {
+                String secParam = req.getParameter("seconds");
+                if (secParam == null || secParam.isBlank()) {
+                    out.print("{\"error\":\"seconds required\"}");
+                    return;
+                }
+                try {
+                    int seconds = Integer.parseInt(secParam.strip());
+                    mgr.setMappingPingSeconds(seconds);
+                    out.print("{\"ok\":true,\"mappingPingSeconds\":" + mgr.getMappingPingSeconds() + "}");
                 } catch (NumberFormatException e) {
                     out.print("{\"error\":\"seconds must be an integer\"}");
                 }

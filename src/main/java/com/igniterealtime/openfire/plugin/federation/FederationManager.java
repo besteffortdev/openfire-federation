@@ -2244,6 +2244,8 @@ public class FederationManager {
     public void setKeepaliveSeconds(int sec)     { s2sMonitor.setKeepaliveSeconds(sec); }
     public int  getReconnectSeconds()            { return s2sMonitor.getReconnectSeconds(); }
     public void setReconnectSeconds(int sec)     { s2sMonitor.setReconnectSeconds(sec); }
+    public int  getMappingPingSeconds()          { return s2sMonitor.getMappingPingSeconds(); }
+    public void setMappingPingSeconds(int sec)   { s2sMonitor.setMappingPingSeconds(sec); }
     public long getNextRetryAt(String domain)    { return s2sMonitor.getNextRetryAt(domain); }
 
     public PeerRegistry           getPeerRegistry()  { return peerRegistry;  }

@@ -73,8 +73,11 @@ public class S2SMonitor {
     private volatile ScheduledExecutorService scheduler;
     private ScheduledFuture<?>       keepaliveFuture;
     private ScheduledFuture<?>       reconnectFuture;
+    private ScheduledFuture<?>       mappingPingFuture;
     /** The interval the keepalive task is currently scheduled at (effective, post-clamp). */
     private volatile int            scheduledKeepaliveSeconds = -1;
+    /** The interval the mapping-ping task is currently scheduled at (effective; 0 = disabled). */
+    private volatile int            scheduledMappingPingSeconds = -1;
     /** Epoch-ms of the last periodic certificate sweep, throttling cert checks to CERT_SWEEP_SECONDS. */
     private volatile long           lastCertSweepMs = 0L;
 
@@ -113,22 +116,11 @@ public class S2SMonitor {
                 this::sendReconnects, RECONNECT_POLL_SECONDS, RECONNECT_POLL_SECONDS, TimeUnit.SECONDS);
         // End-to-end mapping probes: catch a path broken mid-way (e.g. an intermediate
         // route deny) that local routing state can't see. 0 disables.
-        int pingSeconds = JiveGlobals.getIntProperty(MAPPING_PING_JIVE_KEY, MAPPING_PING_DEFAULT);
-        if (pingSeconds > 0) {
-            pingSeconds = Math.max(pingSeconds, MAPPING_PING_MINIMUM);
-            scheduler.scheduleAtFixedRate(() -> {
-                try {
-                    federationManager.sendMappingPings();
-                } catch (Exception e) {
-                    // Uncaught exceptions cancel the task permanently — keep the probe alive.
-                    Log.error("Mapping-ping task threw unexpectedly — task continues", e);
-                }
-            }, pingSeconds, pingSeconds, TimeUnit.SECONDS);
-        }
+        rescheduleMappingPing();
         Log.info("S2SMonitor started (poll={}s, keepalive={}s, reconnect-poll={}s, reconnect-cap={}s, "
                + "mapping-ping={}s, s2s-idle={}s)",
                  POLL_SECONDS, getEffectiveKeepaliveSeconds(), RECONNECT_POLL_SECONDS, getReconnectSeconds(),
-                 pingSeconds, idleTimeoutSeconds());
+                 scheduledMappingPingSeconds, idleTimeoutSeconds());
     }
 
     public void stop() {
@@ -283,6 +275,50 @@ public class S2SMonitor {
     /** Epoch-ms when the next reconnect attempt is scheduled for this domain, or 0 if imminent. */
     public long getNextRetryAt(String domain) {
         return peerNextRetryAt.getOrDefault(domain, 0L);
+    }
+
+    public int getMappingPingSeconds() {
+        return JiveGlobals.getIntProperty(MAPPING_PING_JIVE_KEY, MAPPING_PING_DEFAULT);
+    }
+
+    /** Effective probe cadence in seconds after clamping to the minimum; 0 = probe disabled. */
+    public int getEffectiveMappingPingSeconds() {
+        int configured = getMappingPingSeconds();
+        return configured <= 0 ? 0 : Math.max(configured, MAPPING_PING_MINIMUM);
+    }
+
+    /** Persists the new probe interval and reschedules the ping task immediately (0 disables). */
+    public void setMappingPingSeconds(int seconds) {
+        if (seconds < 0) seconds = 0;
+        if (seconds > 0 && seconds < MAPPING_PING_MINIMUM) seconds = MAPPING_PING_MINIMUM;
+        JiveGlobals.setProperty(MAPPING_PING_JIVE_KEY, String.valueOf(seconds));
+        rescheduleMappingPing();
+        Log.info("Mapping-ping interval updated to {}s{}", seconds,
+                 seconds == 0 ? " (end-to-end probe disabled)" : "");
+    }
+
+    /**
+     * (Re)schedules the mapping-ping task at the current effective interval.  Idempotent —
+     * does nothing when the effective interval is unchanged.  An interval of 0 cancels the
+     * task entirely (probe off); a later non-zero value brings it back without a restart.
+     */
+    private synchronized void rescheduleMappingPing() {
+        if (scheduler == null) return;
+        int effective = getEffectiveMappingPingSeconds();
+        if (effective == scheduledMappingPingSeconds) return;
+        if (mappingPingFuture != null) mappingPingFuture.cancel(false);
+        mappingPingFuture = null;
+        if (effective > 0) {
+            mappingPingFuture = scheduler.scheduleAtFixedRate(() -> {
+                try {
+                    federationManager.sendMappingPings();
+                } catch (Exception e) {
+                    // Uncaught exceptions cancel the task permanently — keep the probe alive.
+                    Log.error("Mapping-ping task threw unexpectedly — task continues", e);
+                }
+            }, effective, effective, TimeUnit.SECONDS);
+        }
+        scheduledMappingPingSeconds = effective;
     }
 
     private void poll() {

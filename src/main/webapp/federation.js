@@ -81,6 +81,7 @@ function refresh() {
             updateStatusBadge(data.peers || []);
             updateKeepaliveInput(data.keepaliveSeconds);
             updateReconnectInput(data.reconnectSeconds);
+            updateMappingPingInput(data.mappingPingSeconds);
             updateAllowlistToggle(data.peerAllowlist);
             updateTraversalToggle(data.allowRemoteRoomTraversal);
             updateDirectRelayToggle(data.directMsgRelay);
@@ -519,6 +520,29 @@ function saveReconnect() {
         return;
     }
     post({ action: 'set-reconnect', seconds })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function updateMappingPingInput(seconds) {
+    const inp = document.getElementById('mapping-ping-input');
+    if (inp && document.activeElement !== inp) {
+        inp.value = seconds != null ? seconds : 30;
+    }
+}
+
+function saveMappingPing() {
+    const inp = document.getElementById('mapping-ping-input');
+    const seconds = parseInt(inp ? inp.value : '', 10);
+    if (isNaN(seconds) || seconds < 0 || (seconds > 0 && seconds < 15)) {
+        alert('Mapping probe interval must be 0 (probe off) or at least 15 seconds.');
+        return;
+    }
+    post({ action: 'set-mapping-ping', seconds })
         .then(result => {
             if (result && result.ok) {
                 flashSaved('Saved ✓');
