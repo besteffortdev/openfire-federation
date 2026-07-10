@@ -57,9 +57,10 @@ public class S2SMonitor {
 
     // End-to-end mapping path probe cadence (mapping-ping). Detects a path silently
     // broken mid-way (e.g. an intermediate route deny) that the routing table can't see.
-    // 0 disables the probe.
+    // 0 disables the probe. 30 s × MAPPING_PING_MISS_LIMIT misses = a break is flagged
+    // within ~2 minutes worst case.
     static final         String MAPPING_PING_JIVE_KEY  = "plugin.federation.mappingPingSeconds";
-    static final         int    MAPPING_PING_DEFAULT    = 60;
+    static final         int    MAPPING_PING_DEFAULT    = 30;
     static final         int    MAPPING_PING_MINIMUM    = 15;
     private static final int    RECONNECT_POLL_SECONDS  = 5;   // hard-coded poll interval
     private static final int    RECONNECT_BACKOFF_BASE  = 5;   // first retry delay in seconds

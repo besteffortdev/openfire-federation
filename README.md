@@ -166,9 +166,10 @@ The federation trust boundary is enforced at several points:
   route re‑appears. Denies are persisted per peer (`federation.peer.deniedroutes.<domain>`).
   - **End‑to‑end mapping probe (mapping‑ping).** A deny mid‑path is invisible to servers on the far side —
     their routing tables still show a route while replies silently die at the denying hop. So every active
-    room mapping is probed end‑to‑end (default every 60 s, `plugin.federation.mappingPingSeconds`, 0 = off):
+    room mapping is probed end‑to‑end (default every 30 s, `plugin.federation.mappingPingSeconds`, 0 = off):
     the mapped domain answers with a pong routed back across the overlay. Three unanswered probes in a row
-    flip the mapping to **⚠ not responding**, its remote occupants are dropped (no more stale ghosts), and
+    (≈2 minutes at the default cadence) flip the mapping to **⚠ not responding**, its remote occupants are
+    dropped (no more stale ghosts), and
     when pongs resume the flag clears and rosters re‑sync automatically. Peers running an older plugin never
     answer probes and are simply never flagged: a domain is only eligible for the *not responding* verdict
     once it has provably answered (or sent) a probe, and that proof is **persisted**
