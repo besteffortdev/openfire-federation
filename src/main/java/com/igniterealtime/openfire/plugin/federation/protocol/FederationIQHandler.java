@@ -706,7 +706,10 @@ public class FederationIQHandler extends IQHandler {
 
         // Origin (from-spoofing) gate. rejectLocalClaim=false: trusted diamond/hub echoes of our
         // own users are legitimate here and neutralized by inject's self-echo guards instead.
-        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "muc-forward", false)) return;
+        // The RAW src attr (no fallback) is the claimed entry server — payloadOriginOk uses it to
+        // recognize hub fan-out, where the payload origin legitimately arrives off its own route.
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "muc-forward", false,
+                             el.attributeValue("src"))) return;
 
         // Untrusted-peer exposure gate: an untrusted peer may only move traffic toward a server
         // it has been exposed to, whether we inject the room here or relay it onward. The target
@@ -813,7 +816,7 @@ public class FederationIQHandler extends IQHandler {
         }
 
         // Origin (from-spoofing) gate — see payloadOriginOk. Applied per hop (relay AND deliver).
-        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "direct-forward", true)) return;
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "direct-forward", true, null)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             // We are the destination — deliver to the local recipient (bypasses interceptors, so the
@@ -877,7 +880,7 @@ public class FederationIQHandler extends IQHandler {
 
         // Origin (from-spoofing) gate — the critical one: a forged `subscribed`/presence here
         // would flow straight into Openfire's roster engine at the destination.
-        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "presence-forward", true)) return;
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "presence-forward", true, null)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             Presence pres = new Presence(payloadEl.createCopy());
@@ -949,7 +952,7 @@ public class FederationIQHandler extends IQHandler {
 
         // Origin (from-spoofing) gate — a forged `set` IQ delivered to the router could mutate
         // server-side state (roster, vCard) as the claimed user.
-        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "iq-forward", true)) return;
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "iq-forward", true, null)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             IQ iq = new IQ(payloadEl.createCopy());
@@ -1479,14 +1482,22 @@ public class FederationIQHandler extends IQHandler {
      *       the peer itself, a destination routed THROUGH that peer, or not routable here at all
      *       (cross-edge traffic where routes are exposure-filtered — unverifiable by design and
      *       bounded by the exposure gates). An origin we route via a DIFFERENT neighbour is a
-     *       forged our-side identity and is dropped. NOT applied to trusted peers: asymmetric DV
-     *       routes (diamonds) and hub fan-out make legitimate trusted traffic arrive off the
-     *       origin's route, so a strict check there would break real flows — the trusted mesh
-     *       remains a documented trust boundary.</li>
+     *       forged our-side identity and is dropped — UNLESS the packet's claimed entry server
+     *       ({@code claimedEntry}, the muc-forward {@code src} attr a fan-out hub re-stamps with
+     *       its own domain) is distinct from the sender and itself routes through the sender:
+     *       that is the hub fan-out shape, where a spoke's user legitimately reaches us from the
+     *       hub's direction instead of its own. src == sender (or absent) earns no allowance —
+     *       an off-route origin on the sender's own word is exactly the forgery this gate stops.
+     *       Residual: an untrusted peer already ON the relay path to a mapped hub can claim
+     *       origins behind itself — no new power, since an on-path relay can already tamper with
+     *       the legitimate traffic it carries (the overlay has no end-to-end signing). NOT
+     *       applied to trusted peers: asymmetric DV routes (diamonds) and hub fan-out make
+     *       legitimate trusted traffic arrive off the origin's route, so a strict check there
+     *       would break real flows — the trusted mesh remains a documented trust boundary.</li>
      * </ul>
      */
     private boolean payloadOriginOk(String fromDomain, String payloadFrom, String what,
-                                    boolean rejectLocalClaim) {
+                                    boolean rejectLocalClaim, String claimedEntry) {
         if (payloadFrom == null || payloadFrom.isEmpty()) return true;   // no identity claimed
         boolean untrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
         String domain;
@@ -1512,6 +1523,16 @@ public class FederationIQHandler extends IQHandler {
         java.util.Optional<String> hop = manager.getRoutingTable().findNextHop(host);
         if (hop.isEmpty()) return true;   // not routable here (exposure-filtered edge) — unverifiable
         if (hop.get().equals(fromDomain)) return true;                   // origin is behind the sender
+        if (claimedEntry != null && !claimedEntry.equals(fromDomain)) {
+            java.util.Optional<String> entryHop = manager.getRoutingTable().findNextHop(claimedEntry);
+            if (entryHop.isPresent() && entryHop.get().equals(fromDomain)) {
+                // Hub fan-out: the mapped entry server is behind the sender, so the packet's
+                // immediate provenance is consistent with the link it arrived on (see Javadoc).
+                Log.debug("{} from untrusted peer {}: off-route origin {} allowed — claimed entry {} "
+                        + "routes via the sender (hub fan-out)", what, fromDomain, host, claimedEntry);
+                return true;
+            }
+        }
         Log.warn("SECURITY: dropping {} from untrusted peer {} — payload from '{}' claims origin {} "
                + "which routes via {} (forged identity from the wrong direction)",
                  what, fromDomain, payloadFrom, host, hop.get());
