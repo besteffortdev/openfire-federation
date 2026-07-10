@@ -1,9 +1,7 @@
 /* federation.js — admin console client-side logic */
 
 const API_URL = 'api';
-const POLL_MS = 5000;
 
-let pollTimer  = null;
 let roomFilter = '';
 
 // Tracks which peer sections are manually collapsed across refreshes.
@@ -13,11 +11,11 @@ const collapsedPeers = new Set();
 let lastData = {};
 // Untrusted peers whose exposed-server editor is expanded (persisted across refreshes).
 const expandedPeerRooms = new Set();
-// In-flight exposed-server edits per domain (server -> checked) so a 5 s refresh doesn't clobber them.
+// In-flight exposed-server edits per domain (server -> checked) so a background refresh doesn't clobber them.
 const editedExposed = {};
 // Federated rooms whose settings panel (visibility + mappings + sharing) is expanded (persisted across refreshes).
 const expandedRoomVis = new Set();
-// In-flight visibility edits per room jid (server -> checked) so a 5 s refresh doesn't clobber them.
+// In-flight visibility edits per room jid (server -> checked) so a background refresh doesn't clobber them.
 const editedRoomVis = {};
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
@@ -28,8 +26,8 @@ document.addEventListener('DOMContentLoaded', () => {
     bindRoomDefaultForm();
     bindRoomSearch();
     bindFilters();
-    refresh();
-    pollTimer = setInterval(refresh, POLL_MS);
+    pollLoop();                       // long-poll: renders immediately, then on every change
+    setInterval(tickClocks, 1000);    // advances countdowns/probe ages between data updates
 });
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
@@ -59,38 +57,63 @@ function setupTabs() {
 
 // ── Data refresh ──────────────────────────────────────────────────────────────
 
+// One-shot fetch for immediate feedback right after a POST action; every other update
+// arrives through pollLoop() the moment the server-side state changes.
 function refresh() {
     fetch(API_URL + '?action=status')
         .then(r => r.json())
-        .then(data => {
-            lastData = data;
-            if (data.localDomain) {
-                const el = document.getElementById('local-domain');
-                if (el) el.textContent = data.localDomain;
-            }
-            const mappings   = data.mappings    || {};
-            const localRooms = data.localRooms  || [];
-            renderPeers(data.peers || []);
-            renderS2SSessions(data.s2sSessions || []);
-            renderRouting(data.routing || []);
-            renderUsersTab(data.localUsers || [], data.directory || {}, data.advertisedBookmarks || {});
-            renderPendingRequests(data.pendingRequests || []);
-            renderLocalRooms(localRooms);
-            renderRoomDefaults(data.roomDefaults || []);
-            renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
-            updateStatusBadge(data.peers || []);
-            updateKeepaliveInput(data.keepaliveSeconds);
-            updateReconnectInput(data.reconnectSeconds);
-            updateMappingPingInput(data.mappingPingSeconds);
-            updateAllowlistToggle(data.peerAllowlist);
-            updateTraversalToggle(data.allowRemoteRoomTraversal);
-            updateDirectRelayToggle(data.directMsgRelay);
-            updateProbeOnSubscribeToggle(data.probeOnSubscribe);
-            updateDirectoryPublishToggle(data.directoryPublish);
-            updateBookmarkPushToggle(data.bookmarkPush);
-            applyAllFilters();
-        })
+        .then(renderAll)
         .catch(err => console.error('Federation API error:', err));
+}
+
+// Long-poll loop: the server holds each request open until the status fingerprint
+// changes (or ~25 s pass), so the page updates as things happen instead of on a timer.
+let statusHash = '';
+async function pollLoop() {
+    while (true) {
+        try {
+            const r = await fetch(API_URL + '?action=poll&hash=' + encodeURIComponent(statusHash),
+                                  { credentials: 'same-origin' });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const data = await r.json();
+            if (data.error) throw new Error(data.error);
+            statusHash = data.hash || '';
+            renderAll(data);
+        } catch (err) {
+            // Server restart, expired admin session, network blip — back off and reconnect.
+            console.error('Federation poll error:', err);
+            await new Promise(res => setTimeout(res, 3000));
+        }
+    }
+}
+
+function renderAll(data) {
+    lastData = data;
+    if (data.localDomain) {
+        const el = document.getElementById('local-domain');
+        if (el) el.textContent = data.localDomain;
+    }
+    const mappings   = data.mappings    || {};
+    const localRooms = data.localRooms  || [];
+    renderPeers(data.peers || []);
+    renderS2SSessions(data.s2sSessions || []);
+    renderRouting(data.routing || []);
+    renderUsersTab(data.localUsers || [], data.directory || {}, data.advertisedBookmarks || {});
+    renderPendingRequests(data.pendingRequests || []);
+    renderLocalRooms(localRooms);
+    renderRoomDefaults(data.roomDefaults || []);
+    renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
+    updateStatusBadge(data.peers || []);
+    updateKeepaliveInput(data.keepaliveSeconds);
+    updateReconnectInput(data.reconnectSeconds);
+    updateMappingPingInput(data.mappingPingSeconds);
+    updateAllowlistToggle(data.peerAllowlist);
+    updateTraversalToggle(data.allowRemoteRoomTraversal);
+    updateDirectRelayToggle(data.directMsgRelay);
+    updateProbeOnSubscribeToggle(data.probeOnSubscribe);
+    updateDirectoryPublishToggle(data.directoryPublish);
+    updateBookmarkPushToggle(data.bookmarkPush);
+    applyAllFilters();
 }
 
 // ── Status badge ──────────────────────────────────────────────────────────────
@@ -149,7 +172,6 @@ function renderPeers(peers) {
     // refresh mid-edit doesn't discard the admin's pending checkbox changes.
     expandedPeerRooms.forEach(domain => captureExposedEdits(domain));
 
-    const now = Date.now();
     tbody.innerHTML = peers.map(p => {
         const isWithdrawn      = p.status === 'WITHDRAWN';
         const isUnreachable    = p.status === 'UNREACHABLE';
@@ -171,12 +193,7 @@ function renderPeers(peers) {
         else                           statusLabel = p.status;
         if (isUnreachable) {
             const retryAt = p.nextRetryAt || 0;
-            if (retryAt > now) {
-                const secsLeft = Math.ceil((retryAt - now) / 1000);
-                statusLabel += ` <span class="retry-countdown">next retry in ${secsLeft}s</span>`;
-            } else {
-                statusLabel += ` <span class="retry-countdown">retrying…</span>`;
-            }
+            statusLabel += ` <span class="retry-countdown" data-retry-at="${retryAt}">${retryCountdownText(retryAt)}</span>`;
         }
 
         const untrustedBadge = p.untrusted
@@ -958,6 +975,31 @@ function presenceDot(show) {
          + `background:${color};margin-right:5px;vertical-align:middle"></span>`;
 }
 
+// ── Live clock text ───────────────────────────────────────────────────────────
+//
+// The page only re-renders when the data actually changes, so text derived from the
+// current time (retry countdowns, probe ages) is advanced here once a second from the
+// absolute timestamps stamped on the elements at render time.
+
+function retryCountdownText(retryAt) {
+    const left = retryAt - Date.now();
+    return left > 0 ? `next retry in ${Math.ceil(left / 1000)}s` : 'retrying…';
+}
+
+function pingAgeText(secs) {
+    return secs < 120 ? `${secs}s ago` : `${Math.round(secs / 60)}m ago`;
+}
+
+function tickClocks() {
+    document.querySelectorAll('.retry-countdown[data-retry-at]').forEach(el => {
+        el.textContent = retryCountdownText(parseInt(el.dataset.retryAt, 10));
+    });
+    document.querySelectorAll('.mapping-ping[data-pong-at]').forEach(el => {
+        const secs = Math.max(0, Math.round((Date.now() - parseInt(el.dataset.pongAt, 10)) / 1000));
+        el.textContent = `ping ${el.dataset.rtt} · ${pingAgeText(secs)}`;
+    });
+}
+
 // ── Room search ───────────────────────────────────────────────────────────────
 
 function bindRoomSearch() {
@@ -975,8 +1017,8 @@ function bindRoomSearch() {
 //
 // Any `.filter-input[data-target]` filters the rows of the table tbody (or the
 // `.peer-section` cards of the container) with that id by substring match, and any
-// `.count-chip[data-count-for]` shows that list's size. Both survive the 5 s poll:
-// renders rebuild the rows, then refresh() calls applyAllFilters() to re-apply.
+// `.count-chip[data-count-for]` shows that list's size. Both survive background updates:
+// renders rebuild the rows, then renderAll() calls applyAllFilters() to re-apply.
 const tableFilters = {};   // targetId -> active lowercase query (presence = it has a filter input)
 
 function bindFilters() {
@@ -1137,9 +1179,10 @@ function setRoomAutoAccept(jid, autoAccept) {
 function renderMappingPing(m, dom) {
     if (m.state !== 'ACTIVE') return '';
     if (m.pongAgeSecs >= 0) {
-        const age = m.pongAgeSecs < 120 ? `${m.pongAgeSecs}s ago` : `${Math.round(m.pongAgeSecs / 60)}m ago`;
+        const pongAt = Date.now() - m.pongAgeSecs * 1000;
+        const age = pingAgeText(m.pongAgeSecs);
         const rtt = m.pingMs >= 0 ? `${m.pingMs} ms` : '✓';
-        return `<span class="mapping-ping" title="End-to-end probe of the full path to ${dom} — last answer ${age}${m.pingMs >= 0 ? `, round trip ${m.pingMs} ms` : ''}">ping ${rtt} · ${age}</span>`;
+        return `<span class="mapping-ping" data-pong-at="${pongAt}" data-rtt="${rtt}" title="End-to-end probe of the full path to ${dom} — last answer ${age}${m.pingMs >= 0 ? `, round trip ${m.pingMs} ms` : ''}">ping ${rtt} · ${age}</span>`;
     }
     if (m.connected !== false) {
         return `<span class="mapping-ping" title="No end-to-end probe answer from ${dom} since this server started — the probe runs every minute; a persistent blank here can mean the reverse path is broken or the peer predates 1.7.19">ping —</span>`;

@@ -33,6 +33,73 @@ public class FederationApiServlet extends HttpServlet {
             return;
         }
 
+        if ("poll".equals(req.getParameter("action"))) {
+            out.print(longPoll(req.getParameter("hash")));
+        } else {
+            out.print(buildStatusJson(plugin));
+        }
+    }
+
+    // ── Long-poll: hold the request until the status actually changes ─────────
+
+    /** How long a poll request is held open before answering "unchanged". */
+    private static final long POLL_TIMEOUT_MS = 25_000;
+    /** How often a held request re-checks the state for a change. */
+    private static final long POLL_CHECK_MS = 1_000;
+    /** Each held request occupies an admin-console thread; extra tabs degrade to plain polling. */
+    private static final int POLL_MAX_HELD = 8;
+    private static final java.util.concurrent.atomic.AtomicInteger heldPolls =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * Holds the request until the status fingerprint no longer matches {@code clientHash}
+     * (or the timeout passes), then answers with the full status JSON plus the new
+     * fingerprint under a {@code hash} key. The fingerprint ignores fields that merely age
+     * with the clock (probe age/RTT) — the page advances those locally between updates.
+     */
+    private String longPoll(String clientHash) {
+        String json = buildStatusJson(FederationPlugin.getInstance());
+        String hash = fingerprint(json);
+        if (clientHash != null && !clientHash.isEmpty() && hash.equals(clientHash)) {
+            boolean hold = heldPolls.incrementAndGet() <= POLL_MAX_HELD;
+            try {
+                long checkMs = hold ? POLL_CHECK_MS : POLL_CHECK_MS * 5;
+                long deadline = System.currentTimeMillis() + (hold ? POLL_TIMEOUT_MS : checkMs);
+                while (hash.equals(clientHash) && System.currentTimeMillis() < deadline) {
+                    try {
+                        Thread.sleep(checkMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    FederationPlugin plugin = FederationPlugin.getInstance();
+                    if (plugin == null) return "{\"error\":\"Plugin not loaded\"}";
+                    json = buildStatusJson(plugin);
+                    hash = fingerprint(json);
+                }
+            } finally {
+                heldPolls.decrementAndGet();
+            }
+        }
+        return "{\"hash\":\"" + hash + "\"," + json.substring(1);
+    }
+
+    /** SHA-256 (hex, truncated) of the status JSON with clock-derived fields blanked. */
+    private static String fingerprint(String json) {
+        String stable = json.replaceAll("\"(?:pongAgeSecs|pingMs)\":-?\\d+", "");
+        try {
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(stable.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(32);
+            for (int i = 0; i < 16; i++) sb.append(String.format("%02x", d[i]));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            return Integer.toHexString(stable.hashCode());
+        }
+    }
+
+    /** Builds the full status document the admin page renders (one JSON object). */
+    private String buildStatusJson(FederationPlugin plugin) {
         FederationManager mgr = plugin.getManager();
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
@@ -376,7 +443,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("]");
 
         sb.append("}");
-        out.print(sb.toString());
+        return sb.toString();
     }
 
     @Override
