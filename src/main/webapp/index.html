@@ -281,6 +281,8 @@
         .exposed-room:last-of-type { border-bottom: none; }
         .exposed-room input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
         .exposed-room small { color: var(--muted); }
+        /* Visibility ACL server list: cap at ~5 rows, scroll beyond (6th row peeks to hint). */
+        .roomvis-list { max-height: 150px; overflow-y: auto; overscroll-behavior: contain; }
 
         /* ══ Room settings expander (arrow on federated rooms) ═══════ */
         .room-detail-cell { text-align: right; white-space: nowrap; }

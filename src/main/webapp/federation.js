@@ -1339,7 +1339,7 @@ function renderRoomVisSection(r) {
                 <span>${escHtml(s)}</span> ${tag}
             </label>`;
         }).join('') || '<p class="empty" style="margin:4px 0">No servers selected — this room is visible to nobody.</p>';
-        body = `${rows}
+        body = `<div class="roomvis-list">${rows}</div>
             <div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                 <input type="text" id="roomvis-add-${id}" placeholder="add a server not listed yet"
                        style="padding:4px 6px;font-size:12px;min-width:220px"
