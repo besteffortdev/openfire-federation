@@ -1,5 +1,0 @@
-Direct MUC API injection — eliminates the "Allow anyone to send messages" manual room config requirement
-Persistent virtual occupant tracking — in-memory tracker is lost on plugin reload; ghosts reappear until clients rejoin
-Full occupant-list sync on new mapping — both sides see the complete room roster immediately on mapping
-Reconnect back-off — exponential back-off instead of fixed interval to avoid hammering an unreachable peer
-UI reconnect countdown — show "next retry in Xs" next to UNREACHABLE peers
