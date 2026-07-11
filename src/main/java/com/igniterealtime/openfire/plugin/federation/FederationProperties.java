@@ -136,7 +136,7 @@ public final class FederationProperties {
 
     /** End-to-end mapping probe interval (seconds); 0 disables (effective values below 15 are clamped). */
     public static final SystemProperty<Integer> MAPPING_PING_SECONDS =
-        intProp("plugin.federation.mappingPingSeconds", 60, 0);
+        intProp("plugin.federation.mappingPingSeconds", 30, 0);
 
     /** Touching this class triggers the static field initialisers above, registering every property. */
     public static void register() { /* no-op; class load does the work */ }

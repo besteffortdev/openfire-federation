@@ -352,12 +352,21 @@ public class FederationIQHandler extends IQHandler {
             String jid  = r.attributeValue("jid");
             String name = r.attributeValue("name", "");
             String desc = r.attributeValue("description", "");
-            // Carry the per-room visibility ACL so we enforce it when relaying onward (absent = all).
+            // Per-room visibility ACL carried on the ad so we enforce it when relaying onward. Absence
+            // is parsed as an empty set, which roomVisibleAtHop treats as "visible to nobody" — the
+            // same secure default as a locally-federated room. (Same-version peers always emit the
+            // attribute, including the "*" sentinel; only pre-ACL peers omit it, in which case their
+            // rooms won't relay past us until they upgrade.)
             String visibleto = r.attributeValue("visibleto", "");
             java.util.Set<String> visibleTo = new java.util.LinkedHashSet<>();
             for (String s : visibleto.split(",")) if (!s.isBlank()) visibleTo.add(s.strip().toLowerCase());
-            if (jid != null) {
+            // Reject a peer-supplied room JID carrying characters that are invalid in an XMPP JID and
+            // that would enable admin-console script injection or malformed routing if cached/rendered.
+            if (jid != null && isSafeFederationJid(jid)) {
                 rooms.add(new FederatedRoom(jid, name, desc, sourceDomain, visibleTo));
+            } else if (jid != null) {
+                Log.warn("SECURITY: dropping advertised room with malformed JID from {} (len={})",
+                         fromDomain, jid.length());
             }
         }
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
@@ -697,7 +706,10 @@ public class FederationIQHandler extends IQHandler {
 
         // Origin (from-spoofing) gate. rejectLocalClaim=false: trusted diamond/hub echoes of our
         // own users are legitimate here and neutralized by inject's self-echo guards instead.
-        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "muc-forward", false)) return;
+        // The RAW src attr (no fallback) is the claimed entry server — payloadOriginOk uses it to
+        // recognize hub fan-out, where the payload origin legitimately arrives off its own route.
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "muc-forward", false,
+                             el.attributeValue("src"))) return;
 
         // Untrusted-peer exposure gate: an untrusted peer may only move traffic toward a server
         // it has been exposed to, whether we inject the room here or relay it onward. The target
@@ -726,6 +738,16 @@ public class FederationIQHandler extends IQHandler {
                        payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
                 return;
             }
+            // Mapping-consent gate: federation-enabled is NOT consent on its own. Traffic may only
+            // enter a room that has at least one ACTIVE mapping — otherwise a reachable peer could
+            // push messages or spoofed presence into any tagged-but-unmapped room. getMappingsForLocal
+            // returns ACTIVE mappings only, so a room with all mappings disabled/pending is also closed.
+            if (manager.getRoomManager().getMappingsForLocal(targetRoom).isEmpty()) {
+                Log.warn("SECURITY: dropping muc-forward from {} into federated but UNMAPPED local room {} "
+                       + "(type={}, from={})", fromDomain, targetRoom,
+                       payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
+                return;
+            }
             injectLocally(payloadEl, via, targetRoom, fromDomain, src);
             // Hub behavior: fan out to all other mapped spokes.
             fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via);
@@ -738,7 +760,11 @@ public class FederationIQHandler extends IQHandler {
             // Same authorization gate: only inject into a federation-enabled local room.
             if (targetRoom != null) {
                 RoomMapping ownMapping = manager.getRoomManager().getMappingForRemote(targetRoom);
-                if (ownMapping != null && isFederatedLocalRoom(ownMapping.localRoomJid())) {
+                // Only an ACTIVE mapping consents to traffic. getMappingForRemote returns a mapping in
+                // ANY state, so without the isActive() check a disabled/pending/rejected mapping would
+                // still admit injected packets into the local room.
+                if (ownMapping != null && ownMapping.isActive()
+                        && isFederatedLocalRoom(ownMapping.localRoomJid())) {
                     injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain, src);
                 }
             }
@@ -790,7 +816,7 @@ public class FederationIQHandler extends IQHandler {
         }
 
         // Origin (from-spoofing) gate — see payloadOriginOk. Applied per hop (relay AND deliver).
-        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "direct-forward", true)) return;
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "direct-forward", true, null)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             // We are the destination — deliver to the local recipient (bypasses interceptors, so the
@@ -854,7 +880,7 @@ public class FederationIQHandler extends IQHandler {
 
         // Origin (from-spoofing) gate — the critical one: a forged `subscribed`/presence here
         // would flow straight into Openfire's roster engine at the destination.
-        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "presence-forward", true)) return;
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "presence-forward", true, null)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             Presence pres = new Presence(payloadEl.createCopy());
@@ -926,7 +952,7 @@ public class FederationIQHandler extends IQHandler {
 
         // Origin (from-spoofing) gate — a forged `set` IQ delivered to the router could mutate
         // server-side state (roster, vCard) as the claimed user.
-        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "iq-forward", true)) return;
+        if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "iq-forward", true, null)) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             IQ iq = new IQ(payloadEl.createCopy());
@@ -1422,6 +1448,24 @@ public class FederationIQHandler extends IQHandler {
     }
 
     /**
+     * Conservative syntactic gate for a peer-supplied JID before we cache, route on, or render it.
+     * Rejects control characters, whitespace, and the characters that enable admin-console script
+     * injection ({@code " ' < > & \}) — none of which are valid in an XMPP domain or room JID. This
+     * is not full RFC 7622 validation; it closes the injection/robustness surface (see the admin UI's
+     * inline event handlers) without rejecting legitimate lab room JIDs like {@code r_ext@conference.2503}.
+     */
+    private static boolean isSafeFederationJid(String jid) {
+        if (jid == null || jid.isEmpty() || jid.length() > 3071) return false;   // RFC 7622 max length
+        for (int i = 0; i < jid.length(); i++) {
+            char c = jid.charAt(i);
+            if (c < 0x20 || c == 0x7f) return false;                             // control chars
+            if (c == '"' || c == '\'' || c == '<' || c == '>'
+                    || c == '&' || c == '\\' || c == ' ') return false;
+        }
+        return jid.indexOf('@') > 0 || jid.indexOf('.') > 0;   // a room JID or at least a dotted domain
+    }
+
+    /**
      * Origin check for overlay-forwarded payloads — the overlay's substitute for native S2S's
      * stream-level {@code from} validation (a real S2S stream may only carry stanzas from its
      * authenticated domain; the overlay would otherwise deliver any embedded {@code from} as-is).
@@ -1438,14 +1482,22 @@ public class FederationIQHandler extends IQHandler {
      *       the peer itself, a destination routed THROUGH that peer, or not routable here at all
      *       (cross-edge traffic where routes are exposure-filtered — unverifiable by design and
      *       bounded by the exposure gates). An origin we route via a DIFFERENT neighbour is a
-     *       forged our-side identity and is dropped. NOT applied to trusted peers: asymmetric DV
-     *       routes (diamonds) and hub fan-out make legitimate trusted traffic arrive off the
-     *       origin's route, so a strict check there would break real flows — the trusted mesh
-     *       remains a documented trust boundary.</li>
+     *       forged our-side identity and is dropped — UNLESS the packet's claimed entry server
+     *       ({@code claimedEntry}, the muc-forward {@code src} attr a fan-out hub re-stamps with
+     *       its own domain) is distinct from the sender and itself routes through the sender:
+     *       that is the hub fan-out shape, where a spoke's user legitimately reaches us from the
+     *       hub's direction instead of its own. src == sender (or absent) earns no allowance —
+     *       an off-route origin on the sender's own word is exactly the forgery this gate stops.
+     *       Residual: an untrusted peer already ON the relay path to a mapped hub can claim
+     *       origins behind itself — no new power, since an on-path relay can already tamper with
+     *       the legitimate traffic it carries (the overlay has no end-to-end signing). NOT
+     *       applied to trusted peers: asymmetric DV routes (diamonds) and hub fan-out make
+     *       legitimate trusted traffic arrive off the origin's route, so a strict check there
+     *       would break real flows — the trusted mesh remains a documented trust boundary.</li>
      * </ul>
      */
     private boolean payloadOriginOk(String fromDomain, String payloadFrom, String what,
-                                    boolean rejectLocalClaim) {
+                                    boolean rejectLocalClaim, String claimedEntry) {
         if (payloadFrom == null || payloadFrom.isEmpty()) return true;   // no identity claimed
         boolean untrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
         String domain;
@@ -1471,6 +1523,16 @@ public class FederationIQHandler extends IQHandler {
         java.util.Optional<String> hop = manager.getRoutingTable().findNextHop(host);
         if (hop.isEmpty()) return true;   // not routable here (exposure-filtered edge) — unverifiable
         if (hop.get().equals(fromDomain)) return true;                   // origin is behind the sender
+        if (claimedEntry != null && !claimedEntry.equals(fromDomain)) {
+            java.util.Optional<String> entryHop = manager.getRoutingTable().findNextHop(claimedEntry);
+            if (entryHop.isPresent() && entryHop.get().equals(fromDomain)) {
+                // Hub fan-out: the mapped entry server is behind the sender, so the packet's
+                // immediate provenance is consistent with the link it arrived on (see Javadoc).
+                Log.debug("{} from untrusted peer {}: off-route origin {} allowed — claimed entry {} "
+                        + "routes via the sender (hub fan-out)", what, fromDomain, host, claimedEntry);
+                return true;
+            }
+        }
         Log.warn("SECURITY: dropping {} from untrusted peer {} — payload from '{}' claims origin {} "
                + "which routes via {} (forged identity from the wrong direction)",
                  what, fromDomain, payloadFrom, host, hop.get());

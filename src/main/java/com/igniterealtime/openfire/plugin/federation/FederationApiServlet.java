@@ -33,6 +33,73 @@ public class FederationApiServlet extends HttpServlet {
             return;
         }
 
+        if ("poll".equals(req.getParameter("action"))) {
+            out.print(longPoll(req.getParameter("hash")));
+        } else {
+            out.print(buildStatusJson(plugin));
+        }
+    }
+
+    // ── Long-poll: hold the request until the status actually changes ─────────
+
+    /** How long a poll request is held open before answering "unchanged". */
+    private static final long POLL_TIMEOUT_MS = 25_000;
+    /** How often a held request re-checks the state for a change. */
+    private static final long POLL_CHECK_MS = 1_000;
+    /** Each held request occupies an admin-console thread; extra tabs degrade to plain polling. */
+    private static final int POLL_MAX_HELD = 8;
+    private static final java.util.concurrent.atomic.AtomicInteger heldPolls =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * Holds the request until the status fingerprint no longer matches {@code clientHash}
+     * (or the timeout passes), then answers with the full status JSON plus the new
+     * fingerprint under a {@code hash} key. The fingerprint ignores fields that merely age
+     * with the clock (probe age/RTT) — the page advances those locally between updates.
+     */
+    private String longPoll(String clientHash) {
+        String json = buildStatusJson(FederationPlugin.getInstance());
+        String hash = fingerprint(json);
+        if (clientHash != null && !clientHash.isEmpty() && hash.equals(clientHash)) {
+            boolean hold = heldPolls.incrementAndGet() <= POLL_MAX_HELD;
+            try {
+                long checkMs = hold ? POLL_CHECK_MS : POLL_CHECK_MS * 5;
+                long deadline = System.currentTimeMillis() + (hold ? POLL_TIMEOUT_MS : checkMs);
+                while (hash.equals(clientHash) && System.currentTimeMillis() < deadline) {
+                    try {
+                        Thread.sleep(checkMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    FederationPlugin plugin = FederationPlugin.getInstance();
+                    if (plugin == null) return "{\"error\":\"Plugin not loaded\"}";
+                    json = buildStatusJson(plugin);
+                    hash = fingerprint(json);
+                }
+            } finally {
+                heldPolls.decrementAndGet();
+            }
+        }
+        return "{\"hash\":\"" + hash + "\"," + json.substring(1);
+    }
+
+    /** SHA-256 (hex, truncated) of the status JSON with clock-derived fields blanked. */
+    private static String fingerprint(String json) {
+        String stable = json.replaceAll("\"(?:pongAgeSecs|pingMs)\":-?\\d+", "");
+        try {
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(stable.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(32);
+            for (int i = 0; i < 16; i++) sb.append(String.format("%02x", d[i]));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            return Integer.toHexString(stable.hashCode());
+        }
+    }
+
+    /** Builds the full status document the admin page renders (one JSON object). */
+    private String buildStatusJson(FederationPlugin plugin) {
         FederationManager mgr = plugin.getManager();
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
@@ -297,6 +364,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds()).append(",");
         sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
         sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds()).append(",");
+        sb.append("\"mappingPingSeconds\":").append(mgr.getMappingPingSeconds()).append(",");
         sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue()).append(",");
         sb.append("\"allowRemoteRoomTraversal\":").append(FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()).append(",");
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
@@ -375,7 +443,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("]");
 
         sb.append("}");
-        out.print(sb.toString());
+        return sb.toString();
     }
 
     @Override
@@ -411,6 +479,10 @@ public class FederationApiServlet extends HttpServlet {
                     return;
                 }
                 String d = domain.strip().toLowerCase();
+                if (!isPlausibleDomain(d)) {
+                    out.print("{\"error\":\"invalid domain\"}");
+                    return;
+                }
                 mgr.addPeer(d);
                 // Default the untrusted flag from the parent-domain rule when the caller didn't
                 // specify it (the UI always sends the checkbox; this guards API callers).
@@ -639,6 +711,21 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 return;
             }
+            case "set-mapping-ping": {
+                String secParam = req.getParameter("seconds");
+                if (secParam == null || secParam.isBlank()) {
+                    out.print("{\"error\":\"seconds required\"}");
+                    return;
+                }
+                try {
+                    int seconds = Integer.parseInt(secParam.strip());
+                    mgr.setMappingPingSeconds(seconds);
+                    out.print("{\"ok\":true,\"mappingPingSeconds\":" + mgr.getMappingPingSeconds() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"seconds must be an integer\"}");
+                }
+                return;
+            }
             case "set-allowlist": {
                 String enabled = req.getParameter("enabled");
                 if (enabled == null) {
@@ -844,6 +931,23 @@ public class FederationApiServlet extends HttpServlet {
     }
 
     private String str(Object o) { return o == null ? "" : o.toString(); }
+
+    /**
+     * Minimal syntactic check for an admin-entered peer domain: lowercase host characters only
+     * (letters, digits, {@code . - _}). Single-label lab hostnames like {@code 2501} are allowed;
+     * quotes, whitespace, and angle brackets — which could break the status JSON or the admin UI's
+     * inline handlers if persisted and rendered — are rejected. Not a full hostname validation.
+     */
+    private static boolean isPlausibleDomain(String d) {
+        if (d == null || d.isEmpty() || d.length() > 253) return false;
+        for (int i = 0; i < d.length(); i++) {
+            char c = d.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                       || c == '.' || c == '-' || c == '_';
+            if (!ok) return false;
+        }
+        return true;
+    }
 
     /** True if the peer currently has a live (REACHABLE) federation link. */
     private boolean isReachable(FederationManager mgr, String domain) {

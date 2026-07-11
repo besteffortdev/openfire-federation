@@ -12,8 +12,11 @@ import java.util.Set;
  * For remote rooms, originServer == the peer domain that advertised it.
  *
  * {@code visibleTo} is the per-room visibility ACL: the set of destination server domains allowed to
- * see this room's advertisement. An EMPTY set means "visible to all peers" (the default). The set
- * travels with the advertisement on the wire so every relay can enforce it (see
+ * see this room's advertisement. An EMPTY set means "visible to NOBODY" — the secure default for a
+ * newly-federated room (the admin then chooses who sees it); the {@code "*"} sentinel means "all
+ * peers". (Rooms federated before the empty-means-none change were migrated once to an explicit
+ * {@code "*"} to preserve their prior "all" behaviour — see {@code FederatedRoomManager.load}.) The
+ * ACL travels with the advertisement on the wire so every relay can enforce it (see
  * {@code FederationManager.roomVisibleAtHop}).
  */
 public record FederatedRoom(
@@ -29,7 +32,10 @@ public record FederatedRoom(
                                         : Collections.unmodifiableSet(new LinkedHashSet<>(visibleTo));
     }
 
-    /** Convenience constructor for rooms with no visibility restriction (visible to all). */
+    /**
+     * Convenience constructor with no explicit ACL: an empty set, i.e. visible to NOBODY until an
+     * ACL (or the {@code "*"} sentinel) is set. Used where visibility is populated separately.
+     */
     public FederatedRoom(String jid, String name, String description, String originServer) {
         this(jid, name, description, originServer, Collections.emptySet());
     }

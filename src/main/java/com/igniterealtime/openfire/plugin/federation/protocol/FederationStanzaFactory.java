@@ -158,7 +158,9 @@ public final class FederationStanzaFactory {
             r.addAttribute("jid",         room.jid());
             r.addAttribute("name",        room.name()        != null ? room.name()        : "");
             r.addAttribute("description", room.description() != null ? room.description() : "");
-            // Per-room visibility ACL travels with the ad so every relay enforces it (absent = all).
+            // Per-room visibility ACL travels with the ad so every relay enforces it. The attribute
+            // is emitted only for a non-empty ACL; an empty ACL means "visible to nobody", so such a
+            // room is filtered out upstream (roomVisibleAtHop) and never reaches serialization here.
             if (room.visibleTo() != null && !room.visibleTo().isEmpty()) {
                 r.addAttribute("visibleto", String.join(",", room.visibleTo()));
             }

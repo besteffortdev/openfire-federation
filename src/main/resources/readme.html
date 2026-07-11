@@ -186,8 +186,8 @@
         negotiated with the peer — the deny is entirely yours. <em>Allow</em> lifts it — on the disabled row, or in
         the peer's settings panel. Servers on the far side of a deny (whose own routing table still shows a
         route) detect the break end‑to‑end: active mappings are probed with a <code>mapping-ping</code> every
-        60&nbsp;s; when the pongs stop, the mapping shows <em>⚠ not responding</em> and its remote occupants are
-        dropped, then everything re‑syncs on its own once the path answers again. Which domains answer probes is
+        30&nbsp;s; when the pongs stop (≈2&nbsp;minutes), the mapping shows <em>⚠ not responding</em> and its
+        remote occupants are dropped, then everything re‑syncs on its own once the path answers again. Which domains answer probes is
         remembered persistently, so a path that is already broken when the plugin starts is still detected; the
         room's settings panel shows each mapping's probe round trip and last‑answer age
         (<code>ping 12 ms · 3s ago</code>).</li>

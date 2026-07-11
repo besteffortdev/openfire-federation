@@ -281,6 +281,8 @@
         .exposed-room:last-of-type { border-bottom: none; }
         .exposed-room input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
         .exposed-room small { color: var(--muted); }
+        /* Visibility ACL server list: cap at ~5 rows, scroll beyond (6th row peeks to hint). */
+        .roomvis-list { max-height: 150px; overflow-y: auto; overscroll-behavior: contain; }
 
         /* ══ Room settings expander (arrow on federated rooms) ═══════ */
         .room-detail-cell { text-align: right; white-space: nowrap; }
@@ -324,7 +326,7 @@
         <span id="fed-status-badge" class="fed-badge neutral">Loading…</span>
         <span class="fed-meta">
             <span class="fed-live"></span>This server: <strong id="local-domain">…</strong><br>
-            Auto-refreshes every 5&nbsp;s
+            Live — updates as things change
         </span>
     </div>
 
@@ -452,6 +454,24 @@
                                min="5" max="300" step="5">
                         <span class="setting-state">s</span>
                         <button class="btn btn-primary btn-small" onclick="saveReconnect()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Mapping probe interval (mapping-ping)</div>
+                        <div class="setting-desc">
+                            Probes every active room mapping end-to-end at this interval; the mapped
+                            domain answers with a pong routed back across the overlay. Three unanswered
+                            probes in a row flag the mapping as <em>⚠ not responding</em> and evict its
+                            remote occupants (≈2 minutes at the default cadence). Applies immediately —
+                            no restart needed. 0 disables the probe. Minimum: 15 s. Default: 30 s.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="mapping-ping-input" class="num-input"
+                               min="0" max="3600" step="5">
+                        <span class="setting-state">s</span>
+                        <button class="btn btn-primary btn-small" onclick="saveMappingPing()">Save</button>
                     </div>
                 </div>
             </div>
