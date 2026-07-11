@@ -11,3 +11,4 @@ pull-logs.sh
 org/
 logs/
 downloads/
+*.txt
