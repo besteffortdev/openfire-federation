@@ -113,6 +113,7 @@ function renderAll(data) {
     updateProbeOnSubscribeToggle(data.probeOnSubscribe);
     updateDirectoryPublishToggle(data.directoryPublish);
     updateBookmarkPushToggle(data.bookmarkPush);
+    renderFileConfig(data.fileConfig || {});
     applyAllFilters();
 }
 
@@ -494,6 +495,44 @@ function addPeerFromSession(domain) {
                      + '(it sees nothing until you expose servers to it).' : ''))) return;
     post({ action: 'add-peer', domain, untrusted })
         .then(() => { flashSaved('Peer added ✓'); refresh(); });
+}
+
+// ── Config file (openfire.xml) ──────────────────────────────────────────────────
+
+function renderFileConfig(fc) {
+    const pathEl = document.getElementById('fedconfig-path');
+    if (pathEl) pathEl.textContent = fc.path || '';
+
+    const loadedEl = document.getElementById('fedconfig-loaded');
+    if (loadedEl) loadedEl.textContent = fc.loadedAt ? new Date(fc.loadedAt).toLocaleString() : 'never';
+
+    const summaryEl = document.getElementById('fedconfig-summary');
+    if (summaryEl) {
+        summaryEl.textContent = fc.blockPresent
+            ? ('+' + (fc.peersAdded || 0) + ' peer(s) added, ' + (fc.peersUpdated || 0)
+               + ' peer field(s) updated, ' + (fc.roomsUpdated || 0) + ' room(s) updated, '
+               + (fc.mappingsRequested || 0) + ' mapping(s) requested.')
+            : 'No <federation> block found in openfire.xml — nothing to ingest.';
+    }
+
+    const warnEl = document.getElementById('fedconfig-warnings');
+    if (warnEl) {
+        const warnings = fc.warnings || [];
+        warnEl.innerHTML = warnings.map(w => '<div class="fedconfig-warn">⚠ ' + escHtml(w) + '</div>').join('');
+    }
+}
+
+function reloadFedConfig() {
+    post({ action: 'reload-fed-config' })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Reloaded: +' + result.peersAdded + ' peer(s), ' + result.roomsUpdated
+                          + ' room(s), ' + result.mappingsRequested + ' mapping(s)');
+                refresh();
+            } else if (result && result.error) {
+                alert(result.error);
+            }
+        });
 }
 
 // ── Connection settings ───────────────────────────────────────────────────────

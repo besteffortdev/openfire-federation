@@ -98,6 +98,57 @@ The page auto‑refreshes every 5 seconds.
 
 ---
 
+## Declarative config (openfire.xml)
+
+Peers, room federation, sharing, visibility, and mappings can also be declared directly in this server's
+own `conf/openfire.xml` — the same bootstrap file Openfire itself uses for setup/database settings — as a
+`<federation>` block under the root `<jive>` element:
+
+```xml
+<jive>
+  ...
+  <federation>
+    <peers>
+      <peer domain="2502-xmpp.example.net" untrusted="false"/>
+      <peer domain="2506-xmpp.example.net" untrusted="true">
+        <exposedServers><server>2505-xmpp.example.net</server></exposedServers>
+      </peer>
+    </peers>
+    <rooms>
+      <room jid="team@conference.2501-xmpp.example.net" federated="true" autoAccept="true">
+        <visibleTo>
+          <server>2502-xmpp.example.net</server>
+          <!-- a single <server>*</server> means "visible to every peer" -->
+        </visibleTo>
+        <mappings>
+          <mapping remoteJid="team@conference.2502-xmpp.example.net" remoteDomain="2502-xmpp.example.net"/>
+        </mappings>
+      </room>
+    </rooms>
+  </federation>
+</jive>
+```
+
+The block is read **once on every plugin start**, and again on demand from the **Reload now** button in
+Settings → *Config file (openfire.xml)*. It is **safe‑upsert, never destructive**: it only adds peers/
+mappings that don't exist yet and updates the specific fields it declares (`untrusted`, `exposedServers`,
+`federated`, `autoAccept`, `visibleTo`); anything already in the database but absent from the file — a peer
+added by hand, a mapping not listed — is left alone. Re‑running it (restart or **Reload now**) is idempotent.
+
+Notes:
+- `autoAccept="true"` is the "room‑sharing" toggle — the same one the Rooms tab labels *Sharing
+  (auto‑accept)*: the room accepts incoming mapping requests without an admin click.
+- A `<room jid="…">` must refer to a MUC room that **already exists**; this only tags federation metadata
+  onto it (like the admin console's *Federated* toggle) — it does not create rooms. For provisioning new
+  rooms by name pattern, see `RoomDefaultsManager`'s existing "Default settings for new rooms" section on
+  the Rooms tab instead.
+- A `<mapping>` is only requested once the room is actually shared with that domain (federated + in
+  `visibleTo`, checked the same way the admin console's *Map* button does) — list `<visibleTo>` before
+  `<mappings>` if you want both applied in the same pass.
+- `openfire.xml` is only ever **read**, never written, by this feature.
+
+---
+
 ## Configuration properties
 
 Set under **Admin Console → Server → System Properties** (or via the Connection settings UI for the first two).

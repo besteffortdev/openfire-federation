@@ -20,6 +20,8 @@
     .step { background: #f8f9fa; border-left: 4px solid #0d6efd; padding: 8px 14px; margin: 10px 0; border-radius: 0 6px 6px 0; }
     .dot { display:inline-block; width:10px; height:10px; border-radius:50%; vertical-align:middle; margin-right:4px; }
     .green{background:#28a745}.red{background:#dc3545}.grey{background:#adb5bd}.orange{background:#fd7e14}
+    pre.code { background:#f8f9fa; border:1px solid #dee2e6; border-radius:6px; padding:12px 14px;
+               overflow-x:auto; font-size:12.5px; line-height:1.5; }
 </style>
 </head>
 <body>
@@ -125,6 +127,58 @@
     re‑advertise automatically as users come and go. Only trusted peers receive it; the injected entries
     are tagged so they merge with — never overwrite — a user's own bookmarks, and turning auto‑push off
     withdraws them. Bookmarks are read by clients at login, so changes appear on a peer user's next sign‑in.
+</p>
+
+<h2>Declarative config (openfire.xml)</h2>
+<p>
+    Instead of (or in addition to) clicking through the admin console, a server's peers and room
+    federation/sharing/visibility/mappings can be declared in its own <code>conf/openfire.xml</code> — the
+    same bootstrap file Openfire uses for its database settings — as a <code>&lt;federation&gt;</code>
+    block under the root <code>&lt;jive&gt;</code> element:
+</p>
+<pre class="code"><code>&lt;jive&gt;
+  ...
+  &lt;federation&gt;
+    &lt;peers&gt;
+      &lt;peer domain="2502-xmpp.example.net" untrusted="false"/&gt;
+      &lt;peer domain="2506-xmpp.example.net" untrusted="true"&gt;
+        &lt;exposedServers&gt;&lt;server&gt;2505-xmpp.example.net&lt;/server&gt;&lt;/exposedServers&gt;
+      &lt;/peer&gt;
+    &lt;/peers&gt;
+    &lt;rooms&gt;
+      &lt;room jid="team@conference.2501-xmpp.example.net" federated="true" autoAccept="true"&gt;
+        &lt;visibleTo&gt;
+          &lt;server&gt;2502-xmpp.example.net&lt;/server&gt;
+          &lt;!-- a single &lt;server&gt;*&lt;/server&gt; means "visible to every peer" --&gt;
+        &lt;/visibleTo&gt;
+        &lt;mappings&gt;
+          &lt;mapping remoteJid="team@conference.2502-xmpp.example.net" remoteDomain="2502-xmpp.example.net"/&gt;
+        &lt;/mappings&gt;
+      &lt;/room&gt;
+    &lt;/rooms&gt;
+  &lt;/federation&gt;
+&lt;/jive&gt;</code></pre>
+<p>
+    The block is read once on every plugin start, and again on demand from the <strong>Reload now</strong>
+    button in Settings → <em>Config file (openfire.xml)</em>, which also shows the resolved file path, the
+    last‑load time, and a summary of what was applied.
+</p>
+<div class="tip">
+    This is <strong>safe‑upsert, never destructive</strong>: it only adds peers/mappings that don't exist
+    yet and updates the specific fields it declares. Anything already configured that the file doesn't
+    mention — a peer added by hand, a mapping not listed — is left untouched. Re‑running it (restart or
+    <em>Reload now</em>) is idempotent, and <code>openfire.xml</code> is only ever <strong>read</strong>,
+    never written, by this feature.
+</div>
+<p>
+    <code>autoAccept="true"</code> is the "room‑sharing" toggle — the same one the Rooms tab labels
+    <em>Sharing (auto‑accept)</em>. A <code>&lt;room jid="…"&gt;</code> must refer to a MUC room that
+    already exists — this only tags federation metadata onto it, the same way the <em>Federated</em> toggle
+    does; it does not create rooms (for provisioning new rooms by name pattern, see the Rooms tab's
+    <em>Default settings for new rooms</em> section instead). A <code>&lt;mapping&gt;</code> is only
+    requested once the room is actually shared with that domain (federated + listed in
+    <code>visibleTo</code>) — list <code>&lt;visibleTo&gt;</code> before <code>&lt;mappings&gt;</code> so
+    both apply in the same pass.
 </p>
 
 <h2>Connection settings</h2>
