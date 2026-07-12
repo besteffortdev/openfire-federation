@@ -62,6 +62,7 @@ public class FederationManager {
     private final RoomDefaultsManager    roomDefaults    = new RoomDefaultsManager();
     private final UserDirectory          userDirectory   = new UserDirectory();
     private final BookmarkInjector       bookmarkInjector = new BookmarkInjector();
+    private final FederationFileConfig   fileConfig      = new FederationFileConfig();
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
     private       FederationPacketInterceptor interceptor;
@@ -111,8 +112,20 @@ public class FederationManager {
         roomListener = new RoomCreationListener(this);
         MUCEventDispatcher.addListener(roomListener);
 
+        // Declarative config from openfire.xml (<federation> block, if present): configured peers +
+        // per-room federation/sharing/visibility/mappings, safe-upserted into the DB via the same
+        // public methods the admin console uses. No-op if the block is absent.
+        fileConfig.ingest(this);
+
         Log.info("Federation plugin started — {} peer(s) configured", peerRegistry.getPeers().size());
     }
+
+    /** Re-runs file-based config ingestion (the admin console "Reload" button). Safe to call any time. */
+    public FederationFileConfig.IngestResult reloadConfigFile() {
+        return fileConfig.ingest(this);
+    }
+
+    public FederationFileConfig getFileConfig() { return fileConfig; }
 
     /**
      * A local user's presence changed. Two effects: (1) refresh the published directory if publishing

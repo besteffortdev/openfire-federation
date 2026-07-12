@@ -213,6 +213,10 @@
         .setting-title { font-weight: 600; font-size: 13px; }
         .setting-desc { color: var(--muted); font-size: 12px; margin-top: 5px; line-height: 1.55; max-width: 620px; }
         .setting-desc code { font-size: 11px; background: var(--surface-2); padding: 1px 4px; border-radius: 3px; }
+        .fedconfig-warn {
+            background: var(--amber-soft); color: var(--amber-ink); font-size: 12px;
+            padding: 4px 8px; border-radius: 4px; margin-top: 4px; max-width: 620px;
+        }
         .setting-ctl {
             flex: none; display: flex; align-items: center; gap: 10px;
             white-space: nowrap; padding-top: 2px;
@@ -417,6 +421,34 @@
 
     <!-- ── Settings panel ───────────────────────────────────────────────────────── -->
     <div id="panel-settings" class="fed-panel">
+
+        <div class="section-box">
+            <div class="section-box-header">Config file (openfire.xml)</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Declarative peers &amp; rooms</div>
+                        <div class="setting-desc">
+                            On every plugin start (and on demand here), a <code>&lt;federation&gt;</code>
+                            block is read — if present — from this server's own
+                            <span id="fedconfig-path" class="mono"></span> and safe-upserted into the
+                            database: configured peers, and per-room federation / sharing (auto-accept) /
+                            visibility / mappings. It only adds what's missing and updates fields the file
+                            declares — it never removes a peer, room tag, or mapping that isn't mentioned.
+                            Edit the file on disk, then reload here to apply without restarting.
+                        </div>
+                        <div class="setting-desc">
+                            Last loaded: <span id="fedconfig-loaded">never</span><br>
+                            <span id="fedconfig-summary"></span>
+                        </div>
+                        <div id="fedconfig-warnings"></div>
+                    </div>
+                    <div class="setting-ctl">
+                        <button class="btn btn-primary btn-small" onclick="reloadFedConfig()">Reload now</button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <div class="section-box">
             <div class="section-box-header">Connection settings</div>

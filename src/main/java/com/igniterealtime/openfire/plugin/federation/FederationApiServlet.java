@@ -372,6 +372,26 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"bookmarkPush\":").append(FederationProperties.BOOKMARK_PUSH.getValue()).append(",");
         sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
 
+        // ── file-based config (openfire.xml <federation> block) ─────────────────
+        FederationFileConfig.IngestResult fcResult = mgr.getFileConfig().lastResult();
+        Long fcLoadedAt = mgr.getFileConfig().lastLoadedAtMillis();
+        sb.append("\"fileConfig\":{")
+          .append("\"path\":\"").append(esc(mgr.getFileConfig().configFile().toString())).append("\",")
+          .append("\"loadedAt\":").append(fcLoadedAt == null ? "null" : fcLoadedAt).append(",")
+          .append("\"blockPresent\":").append(fcResult.blockPresent()).append(",")
+          .append("\"peersAdded\":").append(fcResult.peersAdded()).append(",")
+          .append("\"peersUpdated\":").append(fcResult.peersUpdated()).append(",")
+          .append("\"roomsUpdated\":").append(fcResult.roomsUpdated()).append(",")
+          .append("\"mappingsRequested\":").append(fcResult.mappingsRequested()).append(",")
+          .append("\"warnings\":[");
+        boolean fw = true;
+        for (String w : fcResult.warnings()) {
+            if (!fw) sb.append(",");
+            fw = false;
+            sb.append("\"").append(esc(w)).append("\"");
+        }
+        sb.append("]},");
+
         // ── this server's connected clients (local online users) ───────────────
         sb.append("\"localUsers\":[");
         first = true;
@@ -724,6 +744,26 @@ public class FederationApiServlet extends HttpServlet {
                 } catch (NumberFormatException e) {
                     out.print("{\"error\":\"seconds must be an integer\"}");
                 }
+                return;
+            }
+            case "reload-fed-config": {
+                FederationFileConfig.IngestResult r = mgr.reloadConfigFile();
+                StringBuilder rb = new StringBuilder();
+                rb.append("{\"ok\":true,")
+                  .append("\"blockPresent\":").append(r.blockPresent()).append(",")
+                  .append("\"peersAdded\":").append(r.peersAdded()).append(",")
+                  .append("\"peersUpdated\":").append(r.peersUpdated()).append(",")
+                  .append("\"roomsUpdated\":").append(r.roomsUpdated()).append(",")
+                  .append("\"mappingsRequested\":").append(r.mappingsRequested()).append(",")
+                  .append("\"warnings\":[");
+                boolean fw = true;
+                for (String w : r.warnings()) {
+                    if (!fw) rb.append(",");
+                    fw = false;
+                    rb.append("\"").append(esc(w)).append("\"");
+                }
+                rb.append("]}");
+                out.print(rb);
                 return;
             }
             case "set-allowlist": {
