@@ -431,11 +431,15 @@ public class FederationIQHandler extends IQHandler {
             String theirRemote = map.attributeValue("remote");
             if (theirLocal != null && theirRemote != null) {
                 // Authorization: only accept a mapping onto a local room the admin has
-                // explicitly enabled for federation. Without this, any peer could map an
-                // arbitrary (even private) local room and siphon its roster + messages.
-                if (!isFederatedLocalRoom(theirRemote)) {
+                // explicitly enabled for federation AND explicitly shared with this origin via
+                // its visibility ACL. Without this, any peer that ever observed the room's JID
+                // (e.g. a transit hop merely relaying the ad toward a different allowed
+                // destination) could map an arbitrary (even private, or ACL-restricted) local
+                // room and siphon its roster + messages.
+                if (!manager.roomSharedWith(theirRemote, actualOrigin)) {
                     Log.warn("SECURITY: rejecting room-mapping from {} onto local room {} — "
-                           + "that room is not federation-enabled here", actualOrigin, theirRemote);
+                           + "that room is not federation-enabled here, or its visibility ACL "
+                           + "does not include this origin", actualOrigin, theirRemote);
                     continue;
                 }
                 if (!untrustedAllowsServer(fromDomain, localDomain)) {

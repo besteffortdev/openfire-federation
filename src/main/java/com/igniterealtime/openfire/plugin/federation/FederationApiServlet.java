@@ -55,7 +55,8 @@ public class FederationApiServlet extends HttpServlet {
      * Holds the request until the status fingerprint no longer matches {@code clientHash}
      * (or the timeout passes), then answers with the full status JSON plus the new
      * fingerprint under a {@code hash} key. The fingerprint ignores fields that merely age
-     * with the clock (probe age/RTT) — the page advances those locally between updates.
+     * with the clock (probe age/RTT, and a down peer's reconnect countdown) — the page advances
+     * those locally between updates, so they must not by themselves wake a held poll.
      */
     private String longPoll(String clientHash) {
         String json = buildStatusJson(FederationPlugin.getInstance());
@@ -86,7 +87,13 @@ public class FederationApiServlet extends HttpServlet {
 
     /** SHA-256 (hex, truncated) of the status JSON with clock-derived fields blanked. */
     private static String fingerprint(String json) {
-        String stable = json.replaceAll("\"(?:pongAgeSecs|pingMs)\":-?\\d+", "");
+        // Blank the fields that advance on their own without a real state change: probe age/RTT,
+        // and nextRetryAt (an UNREACHABLE peer's back-off pushes this forward every few seconds).
+        // The page re-derives all of these locally from absolute timestamps (see tickClocks), and a
+        // genuine transition still moves an un-blanked field (e.g. the peer's status), so stripping
+        // these only stops a held long-poll from returning — and the whole page re-rendering — on a
+        // change no admin would notice.
+        String stable = json.replaceAll("\"(?:pongAgeSecs|pingMs|nextRetryAt)\":-?\\d+", "");
         try {
             byte[] d = java.security.MessageDigest.getInstance("SHA-256")
                     .digest(stable.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -295,7 +302,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"remoteRooms\":{");
         first = true;
         for (Map.Entry<String, List<FederatedRoom>> entry :
-                mgr.getRoomManager().getRemoteRooms().entrySet()) {
+                mgr.getRoomManager().getRemoteRoomsVisibleToUs().entrySet()) {
             if (!first) sb.append(",");
             first = false;
             sb.append("\"").append(esc(entry.getKey())).append("\":[");
