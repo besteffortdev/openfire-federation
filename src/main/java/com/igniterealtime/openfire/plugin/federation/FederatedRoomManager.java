@@ -336,6 +336,19 @@ public class FederatedRoomManager {
         Log.info("Room {} visibility → {}", roomJid, set.isEmpty() ? "all peers" : set);
     }
 
+    /**
+     * True iff a remote room's own ACL names our local domain (or {@code "*"}) — i.e. we are a
+     * genuine destination, not merely a transit hop that cached it while relaying it onward to
+     * some other allowed destination. The ACL travels unmodified on the wire with the room
+     * (see {@code FederationManager.roomVisibleAtHop}), so every hop that has cached a
+     * {@link FederatedRoom} already has enough information to answer this locally.
+     */
+    public boolean isVisibleToLocalDomain(FederatedRoom room) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        Set<String> vis = room.visibleTo();
+        return vis.contains(VISIBLE_ALL) || vis.contains(localDomain);
+    }
+
     // ── Per-room auto-accept (accept incoming mapping requests without a prompt) ──
 
     public boolean isAutoAccept(String roomJid) {
@@ -809,6 +822,25 @@ public class FederatedRoomManager {
 
     public Map<String, List<FederatedRoom>> getRemoteRooms() {
         return Collections.unmodifiableMap(remoteRooms);
+    }
+
+    /**
+     * Same as {@link #getRemoteRooms()} but drops rooms we only hold as a transit relay hop —
+     * i.e. rooms whose ACL doesn't actually name us. Used by the admin UI/API so a room routed
+     * through us on its way to some other allowed destination doesn't appear as if it were
+     * shared with us. Relay/re-advertisement paths must keep using {@link #getRemoteRooms()}
+     * (unfiltered) — forwarding depends on the full cache regardless of whether we're a named
+     * destination.
+     */
+    public Map<String, List<FederatedRoom>> getRemoteRoomsVisibleToUs() {
+        Map<String, List<FederatedRoom>> out = new LinkedHashMap<>();
+        for (Map.Entry<String, List<FederatedRoom>> e : remoteRooms.entrySet()) {
+            List<FederatedRoom> kept = e.getValue().stream()
+                    .filter(this::isVisibleToLocalDomain)
+                    .collect(Collectors.toList());
+            if (!kept.isEmpty()) out.put(e.getKey(), kept);
+        }
+        return out;
     }
 
     /**

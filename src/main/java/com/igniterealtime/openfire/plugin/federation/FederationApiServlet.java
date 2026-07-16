@@ -295,7 +295,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"remoteRooms\":{");
         first = true;
         for (Map.Entry<String, List<FederatedRoom>> entry :
-                mgr.getRoomManager().getRemoteRooms().entrySet()) {
+                mgr.getRoomManager().getRemoteRoomsVisibleToUs().entrySet()) {
             if (!first) sb.append(",");
             first = false;
             sb.append("\"").append(esc(entry.getKey())).append("\":[");
