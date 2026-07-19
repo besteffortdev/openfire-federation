@@ -119,6 +119,12 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             throw new PacketRejectedException("Suppressed spurious not-allowed bounce for an overlay-relayed stanza");
         }
 
+        // Leak diagnostics: an error stanza coming BACK from an overlay domain usually means a
+        // stanza escaped to native S2S toward a peer with no direct link and delivery failed —
+        // the bounce embeds the original payload, so log it (catches even stanzas that bypassed
+        // this interceptor on the way out, e.g. Openfire's internal presence fan-out).
+        logOverlayBounce(packet);
+
         // A message annotated with a fed-file share by ANOTHER server, about to be delivered to a
         // local user (native S2S from a direct peer, or a local room's re-broadcast of an overlay
         // share): rewrite its upload URL to our own download endpoint and pull the content.
@@ -155,6 +161,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // the relays above), but its upload URL is still unreachable for the peer's clients — annotate
         // it so the receiving side rewrites the URL and pulls the content over the overlay.
         annotateDirectPeerFileShare(packet, session, toLocalConference);
+
+        // Leak diagnostics: reaching this point means NO relay above claimed the stanza (each one
+        // rejects-to-suppress on success). If it is aimed at an overlay domain without a direct
+        // link, Openfire will now attempt native S2S — which cannot work — and the stanza is lost.
+        logOverlayLeak(packet);
     }
 
     // ── Message forwarding ────────────────────────────────────────────────────
@@ -489,6 +500,89 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (packet.getFrom() == null && session != null && session.getAddress() != null) {
             packet.setFrom(session.getAddress());
         }
+    }
+
+    // ── Leak diagnostics (1.8.15) ─────────────────────────────────────────────
+    //
+    // Field observation (2501↔2503 via the 2502 hub): a small fraction of 1:1 stanzas escape the
+    // overlay relays above and fall through to native S2S toward a NON-adjacent peer — which has
+    // no network path, so Openfire logs "Unable to create a socket connection" and the stanza is
+    // silently lost. These two loggers capture WHAT leaks and WHY, ahead of a reject-and-bounce
+    // fix: FED-LEAK fires on the way out (with the routing-table state at that instant), and
+    // FED-LEAK-BOUNCE fires on the resulting local error bounce, which embeds the original
+    // payload — covering even stanzas that never passed this interceptor outbound (e.g.
+    // Openfire's internal presence fan-out to a remote subscriber).
+
+    /**
+     * The plugin's own wire traffic (keepalive peer-announce, reconnect probes to a down peer)
+     * legitimately rides native S2S and legitimately fails while a peer is down — never report
+     * it as a leak.  Matches only the protocol envelope element, not fed-file/fed-origin markers
+     * on user stanzas.
+     */
+    private boolean isFederationProtocolStanza(Packet packet) {
+        return packet.getElement()
+                     .element(org.dom4j.QName.get("federation", FederationStanzaFactory.NS)) != null;
+    }
+
+    /**
+     * Maps a stanza's target domain to the overlay server domain it belongs to, or null when the
+     * domain has no overlay affiliation (a genuinely external XMPP domain, or our own).  Checks
+     * the domain itself first, then its conference-service host (conference.X → X).
+     */
+    private String overlayDomainOf(String domain) {
+        if (domain == null) return null;
+        if (isKnownOverlayDomain(domain)) return domain;
+        String host = mucServerDomain(domain);
+        return (host != null && isKnownOverlayDomain(host)) ? host : null;
+    }
+
+    /** A domain counts as overlay-affiliated if it ever had a route OR is a configured peer. */
+    private boolean isKnownOverlayDomain(String domain) {
+        return manager.getRoutingTable().wasEverRoutable(domain)
+            || manager.getPeerRegistry().contains(domain);
+    }
+
+    /**
+     * Logs a stanza that no relay claimed even though it is addressed to an overlay domain that
+     * has no direct native link — Openfire's next step is a doomed native-S2S attempt.  Includes
+     * the live next-hop state and full routing snapshot so a momentary route blip is visible.
+     */
+    private void logOverlayLeak(Packet packet) {
+        JID to = packet.getTo();
+        if (to == null) return;
+        if (XMPPServer.getInstance().isLocal(to)) return;
+        if (isFederationProtocolStanza(packet)) return;
+        String overlayDomain = overlayDomainOf(to.getDomain());
+        if (overlayDomain == null) return;
+        java.util.Optional<String> hop = manager.getRoutingTable().findNextHop(overlayDomain);
+        if (hop.isPresent() && hop.get().equals(overlayDomain)) return;   // direct peer — native S2S by design
+        Log.warn("FED-LEAK: {} {} -> {} fell through to native S2S (overlay dest {}, nextHop={}, routes={}) xml={}",
+                 packet.getClass().getSimpleName(), packet.getFrom(), to, overlayDomain,
+                 hop.orElse("NONE"), manager.getRoutingTable().getAll(), packet.toXML());
+    }
+
+    /**
+     * Logs an error stanza arriving FROM an overlay domain — for a non-adjacent peer this is
+     * almost always Openfire's local bounce after a failed native-S2S attempt (from/to swapped,
+     * original payload embedded), i.e. the post-mortem of a leaked stanza.
+     */
+    private void logOverlayBounce(Packet packet) {
+        boolean isError = (packet instanceof IQ iq && iq.getType() == IQ.Type.error)
+                || (packet instanceof Message m && m.getType() == Message.Type.error)
+                || (packet instanceof Presence p && p.getType() == Presence.Type.error);
+        if (!isError || packet.getFrom() == null) return;
+        if (isFederationProtocolStanza(packet)) return;
+        String overlayDomain = overlayDomainOf(packet.getFrom().getDomain());
+        if (overlayDomain == null) return;
+        org.dom4j.Element err = packet.getElement().element("error");
+        String condition = "?";
+        if (err != null) {
+            for (org.dom4j.Element child : err.elements()) {
+                if (!"text".equals(child.getName())) { condition = child.getName(); break; }
+            }
+        }
+        Log.warn("FED-LEAK-BOUNCE: error '{}' from overlay domain {} back to {} — native S2S delivery failed for xml={}",
+                 condition, overlayDomain, packet.getTo(), packet.toXML());
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
