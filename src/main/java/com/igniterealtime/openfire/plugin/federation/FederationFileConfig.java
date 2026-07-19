@@ -28,7 +28,7 @@ import java.util.Set;
  * <pre>{@code
  * <jive>
  *   <federation>
- *     <files enabled="true" maxSizeMB="25" retentionDays="90"/>
+ *     <files enabled="true" maxSizeMB="25" retentionDays="90" storageDir="config/federation-files"/>
  *     <peers>
  *       <peer domain="2502-xmpp.example.net" untrusted="false"/>
  *       <peer domain="2506-xmpp.example.net" untrusted="true">
@@ -93,7 +93,7 @@ public class FederationFileConfig {
         }
 
         List<String> warnings = new ArrayList<>();
-        int settingsUpdated = applyFiles(fedEl.element("files"), warnings);
+        int settingsUpdated = applyFiles(manager, fedEl.element("files"), warnings);
 
         int peersAdded = 0, peersUpdated = 0;
         Element peersEl = fedEl.element("peers");
@@ -134,11 +134,11 @@ public class FederationFileConfig {
     // ── file-sharing settings ────────────────────────────────────────────────
 
     /**
-     * Applies a {@code <files enabled maxSizeMB retentionDays/>} element to the file-relay
-     * properties. Same declare-only semantics as the rest of the block: attributes the file
-     * doesn't mention are never touched. Returns the number of settings actually changed.
+     * Applies a {@code <files enabled maxSizeMB retentionDays storageDir/>} element to the
+     * file-relay properties. Same declare-only semantics as the rest of the block: attributes the
+     * file doesn't mention are never touched. Returns the number of settings actually changed.
      */
-    private int applyFiles(Element filesEl, List<String> warnings) {
+    private int applyFiles(FederationManager manager, Element filesEl, List<String> warnings) {
         if (filesEl == null) return 0;
         int updated = 0;
 
@@ -153,6 +153,27 @@ public class FederationFileConfig {
 
         updated += applyIntSetting(filesEl, "maxSizeMB", FederationProperties.FILES_MAX_MB, 1, warnings);
         updated += applyIntSetting(filesEl, "retentionDays", FederationProperties.FILES_RETENTION_DAYS, 1, warnings);
+
+        String dirAttr = filesEl.attributeValue("storageDir");
+        if (dirAttr != null) {
+            String declared = dirAttr.strip();
+            if (declared.isEmpty()) {
+                warn(warnings, "<files> storageDir is empty, skipped");
+            } else if (!declared.equals(FederationProperties.FILES_STORAGE_DIR.getValue())) {
+                String previous = FederationProperties.FILES_STORAGE_DIR.getValue();
+                FederationProperties.FILES_STORAGE_DIR.setValue(declared);
+                // On a "Reload now" the relay is already running — move the store immediately.
+                // During plugin start ingest runs after the relay too, so this is always live.
+                String moveError = manager.getFileRelay() != null
+                        ? manager.getFileRelay().storageDirChanged() : null;
+                if (moveError != null) {
+                    FederationProperties.FILES_STORAGE_DIR.setValue(previous);
+                    warn(warnings, "<files> storageDir='" + declared + "' rejected: " + moveError);
+                } else {
+                    updated++;
+                }
+            }
+        }
         return updated;
     }
 

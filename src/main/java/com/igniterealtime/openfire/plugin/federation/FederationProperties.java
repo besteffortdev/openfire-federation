@@ -178,9 +178,18 @@ public final class FederationProperties {
     public static final SystemProperty<Integer> FILES_CHUNK_DELAY_MS =
         intProp("plugin.federation.files.chunkDelayMs", 20, 0);
 
-    /** Days a relayed file is kept in <openfireHome>/federation-files before purge. */
+    /** Days a relayed file is kept in the relay store (see {@link #FILES_STORAGE_DIR}) before purge. */
     public static final SystemProperty<Integer> FILES_RETENTION_DAYS =
         intProp("plugin.federation.files.retentionDays", 90, 1);
+
+    /**
+     * Directory where relayed file content is stored. A relative path resolves against the
+     * Openfire home directory (e.g. the default becomes
+     * {@code /usr/share/openfire/config/federation-files} on a stock install); an absolute path
+     * is used as-is. Changing it live moves existing complete entries to the new location.
+     */
+    public static final SystemProperty<String> FILES_STORAGE_DIR =
+        stringProp("plugin.federation.files.storageDir", "config/federation-files");
 
     /**
      * Base URL peers' rewritten links use to reach OUR download endpoint. Blank (default) derives

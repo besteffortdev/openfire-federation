@@ -1,5 +1,6 @@
 package com.igniterealtime.openfire.plugin.federation.files;
 
+import com.igniterealtime.openfire.plugin.federation.FederationProperties;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,10 +18,12 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Disk-backed store for federated file content, addressed by the relay id (SHA-256 hex of the
- * original upload URL).  Lives in {@code <openfireHome>/federation-files/}: each entry is a
- * content file named {@code <id>} plus a {@code <id>.meta} properties sidecar (name, mime, size,
- * sha256, storedAt).  In-flight transfers assemble into {@code <id>.part} and are atomically
- * moved into place on completion, so the index only ever sees verified, complete entries.
+ * original upload URL).  Lives in the directory named by {@code plugin.federation.files.storageDir}
+ * (relative paths resolve against the Openfire home; default {@code config/federation-files}):
+ * each entry is a content file named {@code <id>} plus a {@code <id>.meta} properties sidecar
+ * (name, mime, size, sha256, storedAt).  In-flight transfers assemble into {@code <id>.part} and
+ * are atomically moved into place on completion, so the index only ever sees verified, complete
+ * entries.
  */
 final class FileRelayStore {
 
@@ -29,11 +32,63 @@ final class FileRelayStore {
     record StoredFile(String id, String name, String mime, long size, String sha256, long storedAt) {}
 
     private final Map<String, StoredFile> index = new ConcurrentHashMap<>();
-    private Path baseDir;
+    private volatile Path baseDir;
 
-    void init() throws IOException {
-        baseDir = JiveGlobals.getHomePath().resolve("federation-files");
-        Files.createDirectories(baseDir);
+    static Path resolveConfiguredDir() {
+        String configured = FederationProperties.FILES_STORAGE_DIR.getValue();
+        if (configured == null || configured.isBlank()) {
+            configured = FederationProperties.FILES_STORAGE_DIR.getDefaultValue();
+        }
+        Path p = Path.of(configured.strip());
+        return p.isAbsolute() ? p : JiveGlobals.getHomePath().resolve(p);
+    }
+
+    synchronized void init() throws IOException {
+        Path dir = resolveConfiguredDir();
+        Files.createDirectories(dir);
+        baseDir = dir;
+        int loaded = reindex();
+        Log.info("File relay store initialised at {} — {} file(s)", baseDir, loaded);
+    }
+
+    /**
+     * Re-resolves the configured directory and, when it changed, moves every complete entry
+     * there and re-indexes. In-flight {@code .part} files stay behind (those transfers fail and
+     * re-request into the new location). Returns null on success, else an error message —
+     * on failure the store keeps serving from the old directory.
+     */
+    synchronized String reopenIfMoved() {
+        Path newDir = resolveConfiguredDir();
+        Path oldDir = baseDir;
+        if (oldDir == null || newDir.equals(oldDir)) return null;
+        try {
+            Files.createDirectories(newDir);
+            int moved = 0;
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(oldDir, "*.meta")) {
+                for (Path meta : ds) {
+                    String fileName = meta.getFileName().toString();
+                    String id = fileName.substring(0, fileName.length() - ".meta".length());
+                    Path content = oldDir.resolve(id);
+                    if (Files.isRegularFile(content)) {
+                        Files.move(content, newDir.resolve(id), StandardCopyOption.REPLACE_EXISTING);
+                        Files.move(meta, newDir.resolve(fileName), StandardCopyOption.REPLACE_EXISTING);
+                        moved++;
+                    }
+                }
+            }
+            baseDir = newDir;
+            int loaded = reindex();
+            Log.info("File relay store moved from {} to {} — {} entrie(s) migrated, {} indexed",
+                    oldDir, newDir, moved, loaded);
+            return null;
+        } catch (Exception e) {
+            Log.error("Could not move file relay store from {} to {}: {}", oldDir, newDir, e.getMessage(), e);
+            return "Could not use directory '" + newDir + "': " + e.getMessage();
+        }
+    }
+
+    private int reindex() throws IOException {
+        index.clear();
         int loaded = 0;
         try (DirectoryStream<Path> ds = Files.newDirectoryStream(baseDir, "*.meta")) {
             for (Path meta : ds) {
@@ -44,7 +99,7 @@ final class FileRelayStore {
                 }
             }
         }
-        Log.info("File relay store initialised at {} — {} file(s)", baseDir, loaded);
+        return loaded;
     }
 
     boolean has(String id)      { return index.containsKey(id); }

@@ -144,6 +144,15 @@ public class FileRelayManager {
         registerServlet();
     }
 
+    /**
+     * Applies a changed {@code files.storageDir} property: moves the store (and its complete
+     * entries) to the newly-configured directory. Returns null on success, else an error message
+     * (the store then keeps serving from its previous directory).
+     */
+    public String storageDirChanged() {
+        return store.reopenIfMoved();
+    }
+
     public void stop() {
         if (exec != null) exec.shutdownNow();
         unregisterServlet();

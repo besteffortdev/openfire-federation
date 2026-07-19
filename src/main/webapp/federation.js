@@ -107,7 +107,7 @@ function renderAll(data) {
     updateKeepaliveInput(data.keepaliveSeconds);
     updateReconnectInput(data.reconnectSeconds);
     updateMappingPingInput(data.mappingPingSeconds);
-    updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays);
+    updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays, data.filesStorageDir);
     updateAllowlistToggle(data.peerAllowlist);
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
@@ -611,7 +611,7 @@ function saveMappingPing() {
 
 // ── File sharing settings ─────────────────────────────────────────────────────
 
-function updateFilesSettings(enabled, maxSizeMB, retentionDays) {
+function updateFilesSettings(enabled, maxSizeMB, retentionDays, storageDir) {
     const cb  = document.getElementById('files-toggle');
     const lbl = document.getElementById('files-state');
     if (cb && document.activeElement !== cb) cb.checked = !!enabled;
@@ -624,6 +624,10 @@ function updateFilesSettings(enabled, maxSizeMB, retentionDays) {
     const retInp = document.getElementById('files-retention-input');
     if (retInp && document.activeElement !== retInp) {
         retInp.value = retentionDays != null ? retentionDays : 90;
+    }
+    const dirInp = document.getElementById('files-storagedir-input');
+    if (dirInp && document.activeElement !== dirInp) {
+        dirInp.value = storageDir != null ? storageDir : 'config/federation-files';
     }
 }
 
@@ -666,6 +670,25 @@ function saveFilesRetention() {
         .then(result => {
             if (result && result.ok) {
                 flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesStorageDir() {
+    const inp = document.getElementById('files-storagedir-input');
+    const dir = (inp ? inp.value : '').trim();
+    if (!dir) {
+        alert('Storage directory cannot be empty.');
+        return;
+    }
+    post({ action: 'set-files-storage-dir', dir })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            } else if (result && result.error) {
+                alert(result.error);
                 refresh();
             }
         });

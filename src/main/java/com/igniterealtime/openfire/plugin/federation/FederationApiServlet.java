@@ -381,6 +381,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"filesEnabled\":").append(FederationProperties.FILES_ENABLED.getValue()).append(",");
         sb.append("\"filesMaxSizeMB\":").append(FederationProperties.FILES_MAX_MB.getValue()).append(",");
         sb.append("\"filesRetentionDays\":").append(FederationProperties.FILES_RETENTION_DAYS.getValue()).append(",");
+        sb.append("\"filesStorageDir\":\"").append(esc(FederationProperties.FILES_STORAGE_DIR.getValue())).append("\",");
 
         // ── file-based config (openfire.xml <federation> block) ─────────────────
         FederationFileConfig.IngestResult fcResult = mgr.getFileConfig().lastResult();
@@ -888,6 +889,26 @@ public class FederationApiServlet extends HttpServlet {
                 } catch (NumberFormatException e) {
                     out.print("{\"error\":\"days must be an integer\"}");
                 }
+                return;
+            }
+            case "set-files-storage-dir": {
+                String dir = req.getParameter("dir");
+                if (dir == null || dir.isBlank()) {
+                    out.print("{\"error\":\"dir required\"}");
+                    return;
+                }
+                String previous = FederationProperties.FILES_STORAGE_DIR.getValue();
+                FederationProperties.FILES_STORAGE_DIR.setValue(dir.strip());
+                // Move the store now; if the new directory is unusable, roll the property back
+                // so the UI keeps showing where files are actually served from.
+                String moveError = mgr.getFileRelay() != null ? mgr.getFileRelay().storageDirChanged() : null;
+                if (moveError != null) {
+                    FederationProperties.FILES_STORAGE_DIR.setValue(previous);
+                    out.print("{\"error\":\"" + esc(moveError) + "\"}");
+                    return;
+                }
+                out.print("{\"ok\":true,\"filesStorageDir\":\""
+                        + esc(FederationProperties.FILES_STORAGE_DIR.getValue()) + "\"}");
                 return;
             }
             case "push-bookmarks": {
