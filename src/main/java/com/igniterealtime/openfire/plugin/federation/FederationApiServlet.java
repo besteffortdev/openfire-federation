@@ -378,6 +378,9 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"directoryPublish\":").append(FederationProperties.DIRECTORY_PUBLISH.getValue()).append(",");
         sb.append("\"bookmarkPush\":").append(FederationProperties.BOOKMARK_PUSH.getValue()).append(",");
         sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
+        sb.append("\"filesEnabled\":").append(FederationProperties.FILES_ENABLED.getValue()).append(",");
+        sb.append("\"filesMaxSizeMB\":").append(FederationProperties.FILES_MAX_MB.getValue()).append(",");
+        sb.append("\"filesRetentionDays\":").append(FederationProperties.FILES_RETENTION_DAYS.getValue()).append(",");
 
         // ── file-based config (openfire.xml <federation> block) ─────────────────
         FederationFileConfig.IngestResult fcResult = mgr.getFileConfig().lastResult();
@@ -390,6 +393,7 @@ public class FederationApiServlet extends HttpServlet {
           .append("\"peersUpdated\":").append(fcResult.peersUpdated()).append(",")
           .append("\"roomsUpdated\":").append(fcResult.roomsUpdated()).append(",")
           .append("\"mappingsRequested\":").append(fcResult.mappingsRequested()).append(",")
+          .append("\"settingsUpdated\":").append(fcResult.settingsUpdated()).append(",")
           .append("\"warnings\":[");
         boolean fw = true;
         for (String w : fcResult.warnings()) {
@@ -762,6 +766,7 @@ public class FederationApiServlet extends HttpServlet {
                   .append("\"peersUpdated\":").append(r.peersUpdated()).append(",")
                   .append("\"roomsUpdated\":").append(r.roomsUpdated()).append(",")
                   .append("\"mappingsRequested\":").append(r.mappingsRequested()).append(",")
+                  .append("\"settingsUpdated\":").append(r.settingsUpdated()).append(",")
                   .append("\"warnings\":[");
                 boolean fw = true;
                 for (String w : r.warnings()) {
@@ -835,6 +840,54 @@ public class FederationApiServlet extends HttpServlet {
                 // Push (or, when turning off, withdraw with an empty list) to peers immediately.
                 mgr.pushBookmarks();
                 out.print("{\"ok\":true,\"bookmarkPush\":" + FederationProperties.BOOKMARK_PUSH.getValue() + "}");
+                return;
+            }
+            case "set-files-enabled": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.FILES_ENABLED.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"filesEnabled\":" + FederationProperties.FILES_ENABLED.getValue() + "}");
+                return;
+            }
+            case "set-files-max-size": {
+                String mbParam = req.getParameter("mb");
+                if (mbParam == null || mbParam.isBlank()) {
+                    out.print("{\"error\":\"mb required\"}");
+                    return;
+                }
+                try {
+                    int mb = Integer.parseInt(mbParam.strip());
+                    if (mb < 1) {
+                        out.print("{\"error\":\"mb must be at least 1\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_MAX_MB.setValue(mb);
+                    out.print("{\"ok\":true,\"filesMaxSizeMB\":" + FederationProperties.FILES_MAX_MB.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"mb must be an integer\"}");
+                }
+                return;
+            }
+            case "set-files-retention": {
+                String daysParam = req.getParameter("days");
+                if (daysParam == null || daysParam.isBlank()) {
+                    out.print("{\"error\":\"days required\"}");
+                    return;
+                }
+                try {
+                    int days = Integer.parseInt(daysParam.strip());
+                    if (days < 1) {
+                        out.print("{\"error\":\"days must be at least 1\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_RETENTION_DAYS.setValue(days);
+                    out.print("{\"ok\":true,\"filesRetentionDays\":" + FederationProperties.FILES_RETENTION_DAYS.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"days must be an integer\"}");
+                }
                 return;
             }
             case "push-bookmarks": {

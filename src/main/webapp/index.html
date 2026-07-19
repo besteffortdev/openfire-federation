@@ -510,6 +510,63 @@
         </div>
 
         <div class="section-box">
+            <div class="section-box-header">File sharing</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Federate file shares (HTTP File Upload)</div>
+                        <div class="setting-desc">
+                            When enabled (default), a file shared via HTTP File Upload is relayed over
+                            the federation to exactly the servers whose users receive the message
+                            (mapped-room peers, a 1:1 recipient's home — never broadcast), re-hosted
+                            there, and the link is rewritten so every client downloads from its own
+                            server. Local-only traffic never leaves; transit hops never store a copy.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="files-toggle" onchange="saveFilesEnabled()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="files-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Maximum file size</div>
+                        <div class="setting-desc">
+                            Largest file the relay will stage, transfer, or accept from a peer.
+                            Files above the cap keep their original (origin-server) link.
+                            Minimum: 1 MB. Default: 25 MB.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="files-maxsize-input" class="num-input"
+                               min="1" max="2048" step="1">
+                        <span class="setting-state">MB</span>
+                        <button class="btn btn-primary btn-small" onclick="saveFilesMaxSize()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">File retention</div>
+                        <div class="setting-desc">
+                            How long a relayed file stays in this server's
+                            <code>federation-files</code> store (and its rewritten link keeps working)
+                            before it is purged. Minimum: 1 day. Default: 90 days.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="files-retention-input" class="num-input"
+                               min="1" max="3650" step="1">
+                        <span class="setting-state">days</span>
+                        <button class="btn btn-primary btn-small" onclick="saveFilesRetention()">Save</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
             <div class="section-box-header">Security &amp; presence</div>
             <div class="section-box-body">
                 <div class="setting">

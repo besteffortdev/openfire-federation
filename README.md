@@ -113,6 +113,8 @@ own `conf/openfire.xml` — the same bootstrap file Openfire itself uses for set
 <jive>
   ...
   <federation>
+    <!-- optional: file-share federation settings (only declared attributes are applied) -->
+    <files enabled="true" maxSizeMB="25" retentionDays="90"/>
     <peers>
       <peer domain="2502-xmpp.example.net" untrusted="false"/>
       <peer domain="2506-xmpp.example.net" untrusted="true">
@@ -137,8 +139,9 @@ own `conf/openfire.xml` — the same bootstrap file Openfire itself uses for set
 The block is read **once on every plugin start**, and again on demand from the **Reload now** button in
 Settings → *Config file (openfire.xml)*. It is **safe‑upsert, never destructive**: it only adds peers/
 mappings that don't exist yet and updates the specific fields it declares (`untrusted`, `exposedServers`,
-`federated`, `autoAccept`, `visibleTo`); anything already in the database but absent from the file — a peer
-added by hand, a mapping not listed — is left alone. Re‑running it (restart or **Reload now**) is idempotent.
+`federated`, `autoAccept`, `visibleTo`, and the `<files>` attributes `enabled`/`maxSizeMB`/`retentionDays`);
+anything already in the database but absent from the file — a peer added by hand, a mapping not listed —
+is left alone. Re‑running it (restart or **Reload now**) is idempotent.
 
 Notes:
 - `autoAccept="true"` is the "room‑sharing" toggle — the same one the Rooms tab labels *Sharing
@@ -164,11 +167,11 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
 | `plugin.federation.peerAllowlist` | `true` | Secure‑by‑default trust mode. Only configured peers may drive federation; every action from any other peer is rejected. Set `false` for open federation. See [Security](#security). |
-| `plugin.federation.files.enabled` | `true` | Federate HTTP File Upload shares: relay content to the servers that deliver the message and rewrite the link to their local `/federation-files` endpoint (HTTP‑bind port). |
-| `plugin.federation.files.maxSizeMB` | `25` | Largest file the relay will stage, transfer, or accept. |
+| `plugin.federation.files.enabled` | `true` | Federate HTTP File Upload shares: relay content to the servers that deliver the message and rewrite the link to their local `/federation-files` endpoint (HTTP‑bind port). Also in Settings → *File sharing*. |
+| `plugin.federation.files.maxSizeMB` | `25` | Largest file the relay will stage, transfer, or accept. Also in Settings → *File sharing*. |
 | `plugin.federation.files.chunkBytes` | `131072` | Raw bytes per `file-chunk` IQ (base64 adds ~33%; keep well under the S2S stanza‑size limit). |
 | `plugin.federation.files.chunkDelayMs` | `20` | Pause between chunk sends so a big file can't starve chat traffic on the link. |
-| `plugin.federation.files.retentionDays` | `30` | Days a relayed file is kept in `<openfireHome>/federation-files` before purge. |
+| `plugin.federation.files.retentionDays` | `90` | Days a relayed file is kept in `<openfireHome>/federation-files` before purge. Also in Settings → *File sharing*. |
 | `plugin.federation.files.publicUrlBase` | *(auto)* | Base URL for rewritten links to this server's download endpoint. Blank derives `https://<domain>:<http-bind-secure-port>/federation-files`; set explicitly behind a proxy. |
 | `plugin.federation.files.extraLocalHosts` | *(empty)* | Extra comma‑separated host names that also identify THIS server's upload URLs (when the upload plugin announces a different address). |
 | `plugin.federation.files.uploadPathMarker` | `/httpfileupload/` | Path fragment identifying an upload‑service URL; blank accepts any path on a local host. |

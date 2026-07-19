@@ -107,6 +107,7 @@ function renderAll(data) {
     updateKeepaliveInput(data.keepaliveSeconds);
     updateReconnectInput(data.reconnectSeconds);
     updateMappingPingInput(data.mappingPingSeconds);
+    updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays);
     updateAllowlistToggle(data.peerAllowlist);
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
@@ -511,7 +512,8 @@ function renderFileConfig(fc) {
         summaryEl.textContent = fc.blockPresent
             ? ('+' + (fc.peersAdded || 0) + ' peer(s) added, ' + (fc.peersUpdated || 0)
                + ' peer field(s) updated, ' + (fc.roomsUpdated || 0) + ' room(s) updated, '
-               + (fc.mappingsRequested || 0) + ' mapping(s) requested.')
+               + (fc.mappingsRequested || 0) + ' mapping(s) requested, '
+               + (fc.settingsUpdated || 0) + ' setting(s) updated.')
             : 'No <federation> block found in openfire.xml — nothing to ingest.';
     }
 
@@ -599,6 +601,68 @@ function saveMappingPing() {
         return;
     }
     post({ action: 'set-mapping-ping', seconds })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+// ── File sharing settings ─────────────────────────────────────────────────────
+
+function updateFilesSettings(enabled, maxSizeMB, retentionDays) {
+    const cb  = document.getElementById('files-toggle');
+    const lbl = document.getElementById('files-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Federated' : 'Off';
+
+    const sizeInp = document.getElementById('files-maxsize-input');
+    if (sizeInp && document.activeElement !== sizeInp) {
+        sizeInp.value = maxSizeMB != null ? maxSizeMB : 25;
+    }
+    const retInp = document.getElementById('files-retention-input');
+    if (retInp && document.activeElement !== retInp) {
+        retInp.value = retentionDays != null ? retentionDays : 90;
+    }
+}
+
+function saveFilesEnabled() {
+    const cb = document.getElementById('files-toggle');
+    if (!cb) return;
+    post({ action: 'set-files-enabled', enabled: cb.checked })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesMaxSize() {
+    const inp = document.getElementById('files-maxsize-input');
+    const mb = parseInt(inp ? inp.value : '', 10);
+    if (isNaN(mb) || mb < 1) {
+        alert('Maximum file size must be at least 1 MB.');
+        return;
+    }
+    post({ action: 'set-files-max-size', mb })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesRetention() {
+    const inp = document.getElementById('files-retention-input');
+    const days = parseInt(inp ? inp.value : '', 10);
+    if (isNaN(days) || days < 1) {
+        alert('File retention must be at least 1 day.');
+        return;
+    }
+    post({ action: 'set-files-retention', days })
         .then(result => {
             if (result && result.ok) {
                 flashSaved('Saved ✓');

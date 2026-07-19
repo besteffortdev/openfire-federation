@@ -180,7 +180,7 @@ public final class FederationProperties {
 
     /** Days a relayed file is kept in <openfireHome>/federation-files before purge. */
     public static final SystemProperty<Integer> FILES_RETENTION_DAYS =
-        intProp("plugin.federation.files.retentionDays", 30, 1);
+        intProp("plugin.federation.files.retentionDays", 90, 1);
 
     /**
      * Base URL peers' rewritten links use to reach OUR download endpoint. Blank (default) derives
