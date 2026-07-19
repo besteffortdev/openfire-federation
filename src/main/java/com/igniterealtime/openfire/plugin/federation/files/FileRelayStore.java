@@ -1,7 +1,6 @@
 package com.igniterealtime.openfire.plugin.federation.files;
 
 import com.igniterealtime.openfire.plugin.federation.FederationProperties;
-import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,8 +17,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Disk-backed store for federated file content, addressed by the relay id (SHA-256 hex of the
- * original upload URL).  Lives in the directory named by {@code plugin.federation.files.storageDir}
- * (relative paths resolve against the Openfire home; default {@code config/federation-files}):
+ * original upload URL).  Lives in the absolute directory named by
+ * {@code plugin.federation.files.storageDir} (default {@code /var/lib/openfire/federation-files}):
  * each entry is a content file named {@code <id>} plus a {@code <id>.meta} properties sidecar
  * (name, mime, size, sha256, storedAt).  In-flight transfers assemble into {@code <id>.part} and
  * are atomically moved into place on completion, so the index only ever sees verified, complete
@@ -36,11 +35,16 @@ final class FileRelayStore {
 
     static Path resolveConfiguredDir() {
         String configured = FederationProperties.FILES_STORAGE_DIR.getValue();
-        if (configured == null || configured.isBlank()) {
-            configured = FederationProperties.FILES_STORAGE_DIR.getDefaultValue();
-        }
+        String fallback = FederationProperties.FILES_STORAGE_DIR.getDefaultValue();
+        if (configured == null || configured.isBlank()) configured = fallback;
         Path p = Path.of(configured.strip());
-        return p.isAbsolute() ? p : JiveGlobals.getHomePath().resolve(p);
+        if (!p.isAbsolute()) {
+            // The setting is defined as a full path; a relative value can only get here by being
+            // written straight into the system property, bypassing the validated surfaces.
+            Log.warn("files.storageDir '{}' is not an absolute path — using default {}", configured, fallback);
+            p = Path.of(fallback);
+        }
+        return p;
     }
 
     synchronized void init() throws IOException {

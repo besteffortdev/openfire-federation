@@ -897,6 +897,10 @@ public class FederationApiServlet extends HttpServlet {
                     out.print("{\"error\":\"dir required\"}");
                     return;
                 }
+                if (!java.nio.file.Path.of(dir.strip()).isAbsolute()) {
+                    out.print("{\"error\":\"dir must be a full path (e.g. /var/lib/openfire/federation-files)\"}");
+                    return;
+                }
                 String previous = FederationProperties.FILES_STORAGE_DIR.getValue();
                 FederationProperties.FILES_STORAGE_DIR.setValue(dir.strip());
                 // Move the store now; if the new directory is unusable, roll the property back

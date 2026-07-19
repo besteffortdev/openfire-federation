@@ -114,7 +114,7 @@ own `conf/openfire.xml` — the same bootstrap file Openfire itself uses for set
   ...
   <federation>
     <!-- optional: file-share federation settings (only declared attributes are applied) -->
-    <files enabled="true" maxSizeMB="25" retentionDays="90" storageDir="config/federation-files"/>
+    <files enabled="true" maxSizeMB="25" retentionDays="90" storageDir="/var/lib/openfire/federation-files"/>
     <peers>
       <peer domain="2502-xmpp.example.net" untrusted="false"/>
       <peer domain="2506-xmpp.example.net" untrusted="true">
@@ -172,7 +172,7 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.files.chunkBytes` | `131072` | Raw bytes per `file-chunk` IQ (base64 adds ~33%; keep well under the S2S stanza‑size limit). |
 | `plugin.federation.files.chunkDelayMs` | `20` | Pause between chunk sends so a big file can't starve chat traffic on the link. |
 | `plugin.federation.files.retentionDays` | `90` | Days a relayed file is kept in the storage directory before purge. Also in Settings → *File sharing*. |
-| `plugin.federation.files.storageDir` | `config/federation-files` | Where relayed file content is stored. Relative paths resolve against the Openfire home (default → `/usr/share/openfire/config/federation-files`); absolute paths are used as‑is. Changing it live moves existing files. Also in Settings → *File sharing*. |
+| `plugin.federation.files.storageDir` | `/var/lib/openfire/federation-files` | Full path of the directory where relayed file content is stored. Changing it live moves existing files. Also in Settings → *File sharing*. |
 | `plugin.federation.files.publicUrlBase` | *(auto)* | Base URL for rewritten links to this server's download endpoint. Blank derives `https://<domain>:<http-bind-secure-port>/federation-files`; set explicitly behind a proxy. |
 | `plugin.federation.files.extraLocalHosts` | *(empty)* | Extra comma‑separated host names that also identify THIS server's upload URLs (when the upload plugin announces a different address). |
 | `plugin.federation.files.uploadPathMarker` | `/httpfileupload/` | Path fragment identifying an upload‑service URL; blank accepts any path on a local host. |

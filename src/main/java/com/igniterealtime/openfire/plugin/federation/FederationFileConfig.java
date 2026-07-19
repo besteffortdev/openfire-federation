@@ -28,7 +28,7 @@ import java.util.Set;
  * <pre>{@code
  * <jive>
  *   <federation>
- *     <files enabled="true" maxSizeMB="25" retentionDays="90" storageDir="config/federation-files"/>
+ *     <files enabled="true" maxSizeMB="25" retentionDays="90" storageDir="/var/lib/openfire/federation-files"/>
  *     <peers>
  *       <peer domain="2502-xmpp.example.net" untrusted="false"/>
  *       <peer domain="2506-xmpp.example.net" untrusted="true">
@@ -159,6 +159,8 @@ public class FederationFileConfig {
             String declared = dirAttr.strip();
             if (declared.isEmpty()) {
                 warn(warnings, "<files> storageDir is empty, skipped");
+            } else if (!java.nio.file.Path.of(declared).isAbsolute()) {
+                warn(warnings, "<files> storageDir='" + declared + "' must be a full path, skipped");
             } else if (!declared.equals(FederationProperties.FILES_STORAGE_DIR.getValue())) {
                 String previous = FederationProperties.FILES_STORAGE_DIR.getValue();
                 FederationProperties.FILES_STORAGE_DIR.setValue(declared);

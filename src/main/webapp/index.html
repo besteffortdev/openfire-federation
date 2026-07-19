@@ -567,16 +567,15 @@
                     <div class="setting-main">
                         <div class="setting-title">Storage directory</div>
                         <div class="setting-desc">
-                            Where relayed file content is kept on disk. A relative path is under the
-                            Openfire home directory (e.g. <code>config/federation-files</code> →
-                            <code>/usr/share/openfire/config/federation-files</code>); an absolute
-                            path is used as-is. Saving moves the existing files to the new location.
+                            Full path of the folder where relayed file content is kept on disk.
+                            Default: <code>/var/lib/openfire/federation-files</code>.
+                            Saving moves the existing files to the new location.
                         </div>
                     </div>
                     <div class="setting-ctl">
                         <input type="text" id="files-storagedir-input" class="num-input"
                                style="width:240px;text-align:left"
-                               placeholder="config/federation-files">
+                               placeholder="/var/lib/openfire/federation-files">
                         <button class="btn btn-primary btn-small" onclick="saveFilesStorageDir()">Save</button>
                     </div>
                 </div>

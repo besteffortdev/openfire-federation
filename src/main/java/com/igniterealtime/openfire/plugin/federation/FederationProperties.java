@@ -183,13 +183,12 @@ public final class FederationProperties {
         intProp("plugin.federation.files.retentionDays", 90, 1);
 
     /**
-     * Directory where relayed file content is stored. A relative path resolves against the
-     * Openfire home directory (e.g. the default becomes
-     * {@code /usr/share/openfire/config/federation-files} on a stock install); an absolute path
-     * is used as-is. Changing it live moves existing complete entries to the new location.
+     * Full (absolute) path of the directory where relayed file content is stored. Changing it
+     * live moves existing complete entries to the new location. A non-absolute value is ignored
+     * (the default is used instead) — the UI and openfire.xml ingest reject one up front.
      */
     public static final SystemProperty<String> FILES_STORAGE_DIR =
-        stringProp("plugin.federation.files.storageDir", "config/federation-files");
+        stringProp("plugin.federation.files.storageDir", "/var/lib/openfire/federation-files");
 
     /**
      * Base URL peers' rewritten links use to reach OUR download endpoint. Blank (default) derives

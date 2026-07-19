@@ -627,7 +627,7 @@ function updateFilesSettings(enabled, maxSizeMB, retentionDays, storageDir) {
     }
     const dirInp = document.getElementById('files-storagedir-input');
     if (dirInp && document.activeElement !== dirInp) {
-        dirInp.value = storageDir != null ? storageDir : 'config/federation-files';
+        dirInp.value = storageDir != null ? storageDir : '/var/lib/openfire/federation-files';
     }
 }
 
@@ -680,6 +680,10 @@ function saveFilesStorageDir() {
     const dir = (inp ? inp.value : '').trim();
     if (!dir) {
         alert('Storage directory cannot be empty.');
+        return;
+    }
+    if (!/^(\/|[A-Za-z]:[\\/])/.test(dir)) {
+        alert('Please enter a full path, e.g. /var/lib/openfire/federation-files.');
         return;
     }
     post({ action: 'set-files-storage-dir', dir })
