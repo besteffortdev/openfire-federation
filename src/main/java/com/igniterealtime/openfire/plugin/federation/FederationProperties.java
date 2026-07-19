@@ -61,6 +61,22 @@ public final class FederationProperties {
         }
     }
 
+    /** String twin of {@link #boolProp}; also survives a stale registration. */
+    @SuppressWarnings("unchecked")
+    private static SystemProperty<String> stringProp(String key, String defaultValue) {
+        try {
+            return SystemProperty.Builder.ofType(String.class)
+                .setKey(key)
+                .setPlugin(PLUGIN)
+                .setDefaultValue(defaultValue)
+                .setDynamic(true)
+                .build();
+        } catch (IllegalArgumentException alreadyRegistered) {
+            return (SystemProperty<String>) SystemProperty.getProperty(key)
+                .orElseThrow(() -> alreadyRegistered);
+        }
+    }
+
     /**
      * Peer trust gate (secure by default). When true, only configured peers
      * (see {@link PeerRegistry#isApproved}) may drive federation; actions from any other server are
@@ -137,6 +153,57 @@ public final class FederationProperties {
     /** End-to-end mapping probe interval (seconds); 0 disables (effective values below 15 are clamped). */
     public static final SystemProperty<Integer> MAPPING_PING_SECONDS =
         intProp("plugin.federation.mappingPingSeconds", 30, 0);
+
+    // ── Transparent file-share federation (fed-file relay) ─────────────────────
+
+    /**
+     * Federate HTTP File Upload shares (ON by default). A message whose URL points at THIS server's
+     * upload service gets relayed content-wise to exactly the servers that deliver it (mapped-room
+     * peers / a 1:1 recipient's home), where the URL is rewritten to that server's own
+     * {@code /federation-files} endpoint — transparent to clients. Scoping follows the message:
+     * local-only traffic never leaves, transit hops never store.
+     */
+    public static final SystemProperty<Boolean> FILES_ENABLED =
+        boolProp("plugin.federation.files.enabled", true, true);
+
+    /** Maximum size (MB) of a file the relay will stage, transfer, or accept. */
+    public static final SystemProperty<Integer> FILES_MAX_MB =
+        intProp("plugin.federation.files.maxSizeMB", 25, 1);
+
+    /** Raw bytes per file-chunk IQ (base64 adds ~33%; keep well under the S2S stanza-size limit). */
+    public static final SystemProperty<Integer> FILES_CHUNK_BYTES =
+        intProp("plugin.federation.files.chunkBytes", 131072, 16384);
+
+    /** Pause (ms) between chunk sends so a large file cannot starve chat traffic on the link. */
+    public static final SystemProperty<Integer> FILES_CHUNK_DELAY_MS =
+        intProp("plugin.federation.files.chunkDelayMs", 20, 0);
+
+    /** Days a relayed file is kept in <openfireHome>/federation-files before purge. */
+    public static final SystemProperty<Integer> FILES_RETENTION_DAYS =
+        intProp("plugin.federation.files.retentionDays", 30, 1);
+
+    /**
+     * Base URL peers' rewritten links use to reach OUR download endpoint. Blank (default) derives
+     * {@code https://<xmpp-domain>:<http-bind-secure-port>/federation-files}; set explicitly when
+     * clients reach the HTTP-bind port through a proxy or a different host name.
+     */
+    public static final SystemProperty<String> FILES_PUBLIC_URL =
+        stringProp("plugin.federation.files.publicUrlBase", "");
+
+    /**
+     * Extra host names (comma-separated) that also identify THIS server's upload URLs, in addition
+     * to the XMPP domain and the server host name — for setups where the upload plugin announces a
+     * distinct address.
+     */
+    public static final SystemProperty<String> FILES_EXTRA_LOCAL_HOSTS =
+        stringProp("plugin.federation.files.extraLocalHosts", "");
+
+    /**
+     * Path fragment that identifies an upload-service URL (blank = accept any path on a local
+     * host). Matches the stock Openfire HTTP File Upload plugin's context by default.
+     */
+    public static final SystemProperty<String> FILES_UPLOAD_PATH_MARKER =
+        stringProp("plugin.federation.files.uploadPathMarker", "/httpfileupload/");
 
     /** Touching this class triggers the static field initialisers above, registering every property. */
     public static void register() { /* no-op; class load does the work */ }

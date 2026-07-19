@@ -119,6 +119,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             throw new PacketRejectedException("Suppressed spurious not-allowed bounce for an overlay-relayed stanza");
         }
 
+        // A message annotated with a fed-file share by ANOTHER server, about to be delivered to a
+        // local user (native S2S from a direct peer, or a local room's re-broadcast of an overlay
+        // share): rewrite its upload URL to our own download endpoint and pull the content.
+        rewriteInboundFileShare(packet);
+
         // Computed once per packet: every check below needs it, and each lookup streams over
         // the MUC services — this interceptor runs on every stanza the server touches.
         boolean toLocalConference = isConferenceDomain(packet.getTo().getDomain());
@@ -145,6 +150,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // (join/leave presence, groupchat/PM, MUC IQ) over the overlay so a user can reach a remote
         // room directly — even an ad-hoc/private one that was never advertised as a mapping.
         relayRemoteMuc(packet, session, toLocalConference);
+
+        // 1:1 file share to a DIRECT peer: the message itself travels over native S2S (untouched by
+        // the relays above), but its upload URL is still unreachable for the peer's clients — annotate
+        // it so the receiving side rewrites the URL and pulls the content over the overlay.
+        annotateDirectPeerFileShare(packet, session, toLocalConference);
     }
 
     // ── Message forwarding ────────────────────────────────────────────────────
@@ -159,8 +169,15 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (roomJid == null) return;
 
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
+        if (mappings.isEmpty()) return;
+
+        // A message carrying a URL on OUR upload service gets a fed-file annotation on the
+        // forwarded copies (never the local original), and its content is staged for peers to
+        // pull — the transparent-file-share half of the mapping forwarders.
+        org.dom4j.Element fileAnn = manager.getFileRelay() != null
+                ? manager.getFileRelay().annotationForOutbound(msg) : null;
         for (RoomMapping mapping : mappings) {
-            forwardToMapped(msg, mapping);
+            forwardToMapped(msg, mapping, fileAnn);
         }
     }
 
@@ -178,13 +195,13 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
         for (RoomMapping mapping : mappings) {
-            forwardToMapped(pres, mapping);
+            forwardToMapped(pres, mapping, null);
         }
     }
 
     // ── Shared forwarding logic ────────────────────────────────────────────────
 
-    private void forwardToMapped(Packet packet, RoomMapping mapping) {
+    private void forwardToMapped(Packet packet, RoomMapping mapping, org.dom4j.Element fileAnn) {
         String localDomain  = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String remoteDomain = mapping.remoteDomain();
 
@@ -192,6 +209,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         try {
             Packet copy = copyPacket(packet);
+            if (fileAnn != null) copy.getElement().add(fileAnn.createCopy());
             XMPPServer.getInstance().getPacketRouter().route(
                 FederationStanzaFactory.mucForward(
                     nextHop, remoteDomain, mapping.remoteRoomJid(), localDomain, localDomain, copy)
@@ -264,10 +282,66 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         }
 
         stampFrom(msg, session);
+        // Transparent file share: if the message carries a URL on our upload service, annotate it
+        // so the destination rewrites the URL locally and pulls the content over the overlay.
+        // Covers plain 1:1 chat AND a local room's broadcast to an overlay-joined remote occupant.
+        if (manager.getFileRelay() != null) {
+            manager.getFileRelay().annotateOutboundInPlace(msg);
+        }
         if (manager.forwardDirectMessage(msg)) {
             Log.info("Relayed message {} -> {} over overlay (multi-hop)", msg.getFrom(), to);
             throw new PacketRejectedException("Relayed over federation overlay to " + toDomain);
         }
+    }
+
+    // ── Transparent file shares (fed-file annotation) ──────────────────────────
+
+    /**
+     * Origin half for messages that travel over NATIVE S2S: a locally-originated 1:1 message to a
+     * user on a DIRECT peer never passes the overlay relays above, but its upload URL is just as
+     * unreachable for the peer's clients — annotate it in place (the annotation rides the native
+     * S2S stanza) and stage the content so the peer can pull it over the overlay.
+     */
+    private void annotateDirectPeerFileShare(Packet packet, Session session, boolean toLocalConference) {
+        if (!(packet instanceof Message msg)) return;
+        if (manager.getFileRelay() == null) return;
+        Message.Type type = msg.getType();
+        if (type != Message.Type.chat && type != Message.Type.normal) return;
+        JID to = msg.getTo();
+        if (to == null || to.getNode() == null) return;
+        if (toLocalConference) return;
+        if (XMPPServer.getInstance().isLocal(to)) return;               // stays local — never annotate
+        String toDomain = to.getDomain();
+        // Only the direct-peer case: multi-hop targets were annotated on the relay path above.
+        boolean directPeer = manager.getRoutingTable().findNextHop(toDomain)
+                                    .map(nextHop -> nextHop.equals(toDomain))
+                                    .orElse(false);
+        if (!directPeer) return;
+        stampFrom(msg, session);
+        JID from = msg.getFrom();
+        if (from == null || !XMPPServer.getInstance().isLocal(from)) return;
+        manager.getFileRelay().annotateOutboundInPlace(msg);
+    }
+
+    /**
+     * Destination half for messages that arrive OUTSIDE the overlay envelopes: a fed-file-annotated
+     * message about to reach a local user — over native S2S from a direct peer, or re-broadcast by
+     * a local MUC room that an overlay share was injected into.  Rewrites the URL to our download
+     * endpoint (registering the overlay pull) and strips the annotation.  Overlay deliveries are
+     * rewritten at their own unwrap points and arrive here already marked/annotation-free; a copy
+     * bound for a REMOTE user is deliberately left annotated so the next server rewrites for itself.
+     */
+    private void rewriteInboundFileShare(Packet packet) {
+        if (!(packet instanceof Message msg)) return;
+        if (manager.getFileRelay() == null) return;
+        JID to = msg.getTo();
+        if (to == null || to.getNode() == null) return;
+        if (!XMPPServer.getInstance().isLocal(to)) return;
+        if (manager.getFileRelay().annotationOf(msg.getElement()) == null) return;
+        String fromDomain = msg.getFrom() != null ? msg.getFrom().getDomain() : null;
+        // rewriteInPlace strips the annotation in every case and leaves the URL untouched when the
+        // annotating origin is ourselves (our own share echoed back — the original URL is correct).
+        manager.getFileRelay().rewriteInPlace(msg, fromDomain);
     }
 
     /**

@@ -31,6 +31,11 @@ that have no direct link. End users do nothing special — they just join their 
   (ideal for an edge server fronting a partner network); the admin API is CSRF‑protected. See [Security](#security).
 - **Admin console UI** — manage peers, watch the routing table and S2S sessions, and federate rooms from a
   dedicated **Federation** tab.
+- **Transparent file sharing** — HTTP File Upload (XEP‑0363) shares work across the federation with zero
+  client changes: the file's content is relayed over the overlay to exactly the servers whose users can see
+  the message (mapped‑room peers, a 1:1 recipient's home — never a broadcast), re‑hosted there, and the link
+  is rewritten so every client downloads from its **own** server. Local‑only traffic never leaves; transit
+  hops forward chunks without storing a copy.
 
 ---
 
@@ -159,6 +164,14 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
 | `plugin.federation.peerAllowlist` | `true` | Secure‑by‑default trust mode. Only configured peers may drive federation; every action from any other peer is rejected. Set `false` for open federation. See [Security](#security). |
+| `plugin.federation.files.enabled` | `true` | Federate HTTP File Upload shares: relay content to the servers that deliver the message and rewrite the link to their local `/federation-files` endpoint (HTTP‑bind port). |
+| `plugin.federation.files.maxSizeMB` | `25` | Largest file the relay will stage, transfer, or accept. |
+| `plugin.federation.files.chunkBytes` | `131072` | Raw bytes per `file-chunk` IQ (base64 adds ~33%; keep well under the S2S stanza‑size limit). |
+| `plugin.federation.files.chunkDelayMs` | `20` | Pause between chunk sends so a big file can't starve chat traffic on the link. |
+| `plugin.federation.files.retentionDays` | `30` | Days a relayed file is kept in `<openfireHome>/federation-files` before purge. |
+| `plugin.federation.files.publicUrlBase` | *(auto)* | Base URL for rewritten links to this server's download endpoint. Blank derives `https://<domain>:<http-bind-secure-port>/federation-files`; set explicitly behind a proxy. |
+| `plugin.federation.files.extraLocalHosts` | *(empty)* | Extra comma‑separated host names that also identify THIS server's upload URLs (when the upload plugin announces a different address). |
+| `plugin.federation.files.uploadPathMarker` | `/httpfileupload/` | Path fragment identifying an upload‑service URL; blank accepts any path on a local host. |
 
 ### Note on `disableS2SIdle`
 

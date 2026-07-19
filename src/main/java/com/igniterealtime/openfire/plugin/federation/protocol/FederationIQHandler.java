@@ -114,6 +114,8 @@ public class FederationIQHandler extends IQHandler {
             case "iq-forward"          -> handleIqForward(fromDomain, child);
             case "user-directory"      -> handleUserDirectory(fromDomain, child);
             case "bookmark-push"       -> handleBookmarkPush(fromDomain, child);
+            case "file-request", "file-offer", "file-chunk", "file-error"
+                                       -> handleFileRelay(child.getName(), fromDomain, child);
             default -> Log.warn("Unknown federation action '{}' from {}", child.getName(), fromDomain);
         }
 
@@ -836,6 +838,11 @@ public class FederationIQHandler extends IQHandler {
                 Log.info("direct-forward: delivered MUC message {} -> {} (from {})", msg.getFrom(), mto, fromDomain);
                 return;
             }
+            // File share in a 1:1: rewrite the upload URL to our own download endpoint and pull
+            // the content over the overlay before handing the message to the recipient.
+            if (manager.getFileRelay() != null) {
+                manager.getFileRelay().rewriteInPlace(msg, fromDomain);
+            }
             FederationStanzaFactory.markAsForwarded(msg);
             FederationStanzaFactory.directDeliver(msg);
             Log.info("direct-forward: delivered 1:1 {} -> {} (from {})", msg.getFrom(), msg.getTo(), fromDomain);
@@ -1117,12 +1124,42 @@ public class FederationIQHandler extends IQHandler {
     private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {
         try {
             switch (payloadEl.getName()) {
-                case "message"  -> injectMessage(payloadEl, targetRoom);
+                case "message"  -> injectMessage(payloadEl, targetRoom, fromDomain, src);
                 case "presence" -> injectPresence(payloadEl, targetRoom, fromDomain, src);
                 default -> Log.warn("injectLocally: unexpected payload type '{}'", payloadEl.getName());
             }
         } catch (Exception e) {
             Log.warn("Failed to inject forwarded MUC packet: {}", e.getMessage(), e);
+        }
+    }
+
+    // ── file relay (transparent HTTP-upload federation) ────────────────────────
+
+    /**
+     * Dispatches a file-* element: relays it toward its destination when we are a transit hop
+     * (subject to the untrusted-peer exposure gate, like every other routed federation stanza),
+     * otherwise hands it to the {@link com.igniterealtime.openfire.plugin.federation.files.FileRelayManager}.
+     */
+    private void handleFileRelay(String element, String fromDomain, Element el) {
+        var relay = manager.getFileRelay();
+        if (relay == null) return;
+        String destination = el.attributeValue("destination");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (destination != null && !localDomain.equals(destination)) {
+            if (!untrustedAllowsServer(fromDomain, destination)) {
+                Log.warn("SECURITY: dropping {} from untrusted peer {} toward non-exposed server {}",
+                         element, fromDomain, destination);
+                return;
+            }
+            relay.relayToward(element, el, fromDomain);
+            return;
+        }
+        switch (element) {
+            case "file-request" -> relay.handleFileRequest(fromDomain, el);
+            case "file-offer"   -> relay.handleFileOffer(fromDomain, el);
+            case "file-chunk"   -> relay.handleFileChunk(fromDomain, el);
+            case "file-error"   -> relay.handleFileError(fromDomain, el);
+            default -> { }
         }
     }
 
@@ -1198,7 +1235,7 @@ public class FederationIQHandler extends IQHandler {
      * Delivers a forwarded groupchat message directly to each occupant of the
      * target room, bypassing MUC's non-occupant check entirely.
      */
-    private void injectMessage(Element msgEl, String targetRoom) {
+    private void injectMessage(Element msgEl, String targetRoom, String fromDomain, String src) {
         MUCRoom room = findLocalRoom(targetRoom);
         if (room == null) {
             Log.warn("injectMessage: room {} not found locally", targetRoom);
@@ -1218,10 +1255,21 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
 
+        // A file share rides in with a fed-file annotation: deliver a copy whose URL points at
+        // OUR download endpoint (registering the overlay pull), while the untouched original
+        // continues to fan-out so downstream servers can rewrite for themselves.  The mapped
+        // entry server (src) and the relay neighbour are pull fallbacks when the annotating
+        // origin itself is not routable from here (filtered edges).
+        Element deliverEl = msgEl;
+        if (manager.getFileRelay() != null) {
+            Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, src, fromDomain);
+            if (rewritten != null) deliverEl = rewritten;
+        }
+
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;
 
         for (MUCOccupant occupant : occupants) {
-            Element copy = msgEl.createCopy();
+            Element copy = deliverEl.createCopy();
             copy.addAttribute("from", virtualFrom);
             copy.addAttribute("to",   occupant.getUserAddress().toString());
             Message delivery = new Message(copy);

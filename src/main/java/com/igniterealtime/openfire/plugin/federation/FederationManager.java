@@ -63,6 +63,7 @@ public class FederationManager {
     private final UserDirectory          userDirectory   = new UserDirectory();
     private final BookmarkInjector       bookmarkInjector = new BookmarkInjector();
     private final FederationFileConfig   fileConfig      = new FederationFileConfig();
+    private       com.igniterealtime.openfire.plugin.federation.files.FileRelayManager fileRelay;
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
     private       FederationPacketInterceptor interceptor;
@@ -76,6 +77,10 @@ public class FederationManager {
         peerRegistry.load();
         roomManager.load();
         roomDefaults.load();
+
+        // Transparent HTTP-upload federation: staging store, overlay pull protocol, download servlet.
+        fileRelay = new com.igniterealtime.openfire.plugin.federation.files.FileRelayManager(this);
+        fileRelay.start();
 
         iqHandler   = new FederationIQHandler(this);
         interceptor = new FederationPacketInterceptor(this);
@@ -317,6 +322,8 @@ public class FederationManager {
             InterceptorManager.getInstance().removeInterceptor(interceptor);
 
         bookmarkInjector.shutdown();
+
+        if (fileRelay != null) fileRelay.stop();
 
         Log.info("Federation plugin stopped.");
     }
@@ -2267,4 +2274,5 @@ public class FederationManager {
     public RoomDefaultsManager    getRoomDefaults()  { return roomDefaults;  }
     public UserDirectory          getUserDirectory() { return userDirectory; }
     public BookmarkInjector       getBookmarkInjector() { return bookmarkInjector; }
+    public com.igniterealtime.openfire.plugin.federation.files.FileRelayManager getFileRelay() { return fileRelay; }
 }
