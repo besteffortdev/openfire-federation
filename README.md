@@ -214,6 +214,11 @@ those definitions — bring the container up once while online to seed the initi
 of signatures), after that it keeps working with no network access at all. Use Settings → *File sharing* →
 *Test connection* to confirm the plugin can reach it before turning `avEnabled` on.
 
+Settings → *File sharing* also lists *Recently scanned files (ClamAV)* — the last 200 received files this
+server has scanned (time, name, size, sending peer, verdict, and AV detail), newest first. It's in-memory
+only (transit hops are never scanned or listed, and the list resets on plugin reload/restart) — a quick way
+to confirm scanning is actually happening and see what, if anything, has been caught.
+
 ### Note on `disableS2SIdle`
 
 XMPP S2S (RFC 6120) uses a **separate one‑way socket per direction**, and Openfire 5.x does **not** implement

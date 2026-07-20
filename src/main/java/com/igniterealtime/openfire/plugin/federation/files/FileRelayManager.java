@@ -33,9 +33,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.BitSet;
+import java.util.Deque;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -113,11 +115,22 @@ public class FileRelayManager {
         void touch() { lastActivity = System.currentTimeMillis(); }
     }
 
+    /**
+     * One AV scan outcome for the admin UI's "recently scanned files" table — newest first,
+     * in-memory only (reset on plugin reload/restart, same as the rest of this class's state).
+     * {@code verdict} is {@link ClamAvClient.Verdict#name()}.
+     */
+    public record ScanLogEntry(long when, String fileName, long sizeBytes, String origin,
+                                String verdict, String detail) { }
+
+    private static final int SCAN_LOG_MAX = 200;
+
     private final FederationManager manager;
     private final FileRelayStore store = new FileRelayStore();
     private final ConcurrentHashMap<String, Transfer> transfers = new ConcurrentHashMap<>();
     /** id → requester domains waiting for our copy to complete (hub store-and-forward). */
     private final ConcurrentHashMap<String, Set<String>> parkedRequests = new ConcurrentHashMap<>();
+    private final Deque<ScanLogEntry> scanLog = new ArrayDeque<>();
     private ScheduledExecutorService exec;
     private ServletContextHandler servletContext;
     private volatile SSLSocketFactory trustAllFactory;
@@ -156,6 +169,18 @@ public class FileRelayManager {
     /** Pings the configured clamd endpoint (admin UI "Test connection" action). */
     public boolean testAvConnection() {
         return ClamAvClient.ping();
+    }
+
+    private synchronized void recordScan(String fileName, long sizeBytes, String origin,
+                                          String verdict, String detail) {
+        scanLog.addFirst(new ScanLogEntry(System.currentTimeMillis(), fileName, sizeBytes,
+                origin == null ? "" : origin, verdict, detail == null ? "" : detail));
+        if (scanLog.size() > SCAN_LOG_MAX) scanLog.removeLast();
+    }
+
+    /** Most recent AV scan outcomes, newest first (admin UI). */
+    public synchronized List<ScanLogEntry> recentAvScans() {
+        return new ArrayList<>(scanLog);
     }
 
     public void stop() {
@@ -669,6 +694,7 @@ public class FileRelayManager {
             }
             if (FederationProperties.FILES_AV_ENABLED.getValue()) {
                 ClamAvClient.ScanResult scan = ClamAvClient.scan(store.partPath(t.id));
+                recordScan(t.name, t.size, t.origin, scan.verdict().name(), scan.detail());
                 switch (scan.verdict()) {
                     case INFECTED -> Log.warn("File relay: AV detected '{}' in received file {} — discarding",
                                                scan.detail(), t.name);

@@ -109,6 +109,7 @@ function renderAll(data) {
     updateMappingPingInput(data.mappingPingSeconds);
     updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays, data.filesStorageDir,
         data.filesAllowedExtensions, data.filesAvEnabled, data.filesAvHost, data.filesAvPort);
+    renderAvScanLog(data.avScanLog || []);
     updateAllowlistToggle(data.peerAllowlist);
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
@@ -949,6 +950,40 @@ function renderRouting(entries) {
             <td>${r.hops}</td>
             <td class="ts">${new Date(r.updatedAt).toLocaleTimeString()}</td>
             <td>${denyBtn}</td>
+        </tr>`;
+    }).join('');
+}
+
+/** Human-readable byte size (matches the precision used elsewhere on the page: 1 decimal above 1 KB). */
+function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function renderAvScanLog(entries) {
+    const tbody = document.getElementById('av-scan-tbody');
+    if (!tbody) return;
+    if (entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No files scanned yet.</td></tr>';
+        return;
+    }
+    // Server already returns newest-first; keep that order.
+    tbody.innerHTML = entries.map(e => {
+        const verdict = String(e.verdict || '').toUpperCase();
+        const badgeClass = verdict === 'CLEAN' ? 'badge-scan-clean'
+                          : verdict === 'INFECTED' ? 'badge-scan-infected'
+                          : 'badge-scan-error';
+        const label = verdict === 'CLEAN' ? 'clean' : verdict === 'INFECTED' ? 'infected' : 'error';
+        return `
+        <tr>
+            <td class="ts">${new Date(e.when).toLocaleString()}</td>
+            <td>${escHtml(e.name)}</td>
+            <td>${fmtBytes(e.size)}</td>
+            <td>${escHtml(e.origin)}</td>
+            <td><span class="badge ${badgeClass}">${label}</span></td>
+            <td>${escHtml(e.detail)}</td>
         </tr>`;
     }).join('');
 }

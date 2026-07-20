@@ -388,6 +388,25 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"filesAvPort\":").append(FederationProperties.FILES_AV_PORT.getValue()).append(",");
         sb.append("\"filesAvTimeoutMs\":").append(FederationProperties.FILES_AV_TIMEOUT_MS.getValue()).append(",");
 
+        // ── AV scan log (files recently examined by ClamAV, newest first) ───────
+        sb.append("\"avScanLog\":[");
+        if (mgr.getFileRelay() != null) {
+            boolean fav = true;
+            for (var e : mgr.getFileRelay().recentAvScans()) {
+                if (!fav) sb.append(",");
+                fav = false;
+                sb.append("{")
+                  .append("\"when\":").append(e.when()).append(",")
+                  .append("\"name\":\"").append(esc(e.fileName())).append("\",")
+                  .append("\"size\":").append(e.sizeBytes()).append(",")
+                  .append("\"origin\":\"").append(esc(e.origin())).append("\",")
+                  .append("\"verdict\":\"").append(esc(e.verdict())).append("\",")
+                  .append("\"detail\":\"").append(esc(e.detail())).append("\"")
+                  .append("}");
+            }
+        }
+        sb.append("],");
+
         // ── file-based config (openfire.xml <federation> block) ─────────────────
         FederationFileConfig.IngestResult fcResult = mgr.getFileConfig().lastResult();
         Long fcLoadedAt = mgr.getFileConfig().lastLoadedAtMillis();

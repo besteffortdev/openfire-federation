@@ -270,6 +270,9 @@
         .badge-tls    { background: var(--red-soft);     color: var(--red-ink);   margin-left: 4px; }
         .badge-tls-ok { background: var(--green-soft);   color: var(--green-ink); margin-left: 4px; }
         .badge-untrusted { background: var(--red-soft);  color: var(--red-ink);   margin-left: 8px; }
+        .badge-scan-clean    { background: var(--green-soft); color: var(--green-ink); }
+        .badge-scan-infected { background: var(--red-soft);   color: var(--red-ink); }
+        .badge-scan-error    { background: var(--amber-soft); color: var(--amber-ink); }
 
         /* ══ Untrusted exposed-room editor ═══════════════════════════ */
         .exposed-editor-row td { background: var(--surface); }
@@ -637,6 +640,36 @@
                 </div>
             </div>
         </div>
+
+        <div class="section-box">
+            <div class="section-box-header">
+                Recently scanned files (ClamAV)
+                <span class="count-chip" data-count-for="av-scan-tbody"></span>
+                <input class="filter-input" data-target="av-scan-tbody" placeholder="Filter files…">
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>File</th>
+                            <th>Size</th>
+                            <th>From</th>
+                            <th>Result</th>
+                            <th>Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody id="av-scan-tbody">
+                        <tr><td colspan="6" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <p class="panel-foot">
+            Only received files (ingress) are scanned — a transit hop never decodes content, and
+            this list is kept in memory only (the last 200 entries; cleared on plugin reload or
+            restart). Populates once virus scanning is turned on above.
+        </p>
 
         <div class="section-box">
             <div class="section-box-header">Security &amp; presence</div>
