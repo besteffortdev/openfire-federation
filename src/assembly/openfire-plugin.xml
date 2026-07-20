@@ -46,5 +46,25 @@
                 <include>${project.groupId}:${project.artifactId}</include>
             </includes>
         </dependencySet>
+        <!--
+            Bundled (non-provided) runtime dependencies — currently just the content-sniffing
+            library used by the file-relay ingress type-verification gate. Explicit include (not a
+            scope filter): Maven's ScopeArtifactFilter treats "compile" as "everything visible on
+            the compile classpath", which would also sweep in every provided-scope dep above and
+            duplicate them alongside Openfire's own classloader copies. useTransitiveDependencies
+            pulls tika-core's own transitive (commons-io) along automatically.
+        -->
+        <dependencySet>
+            <outputDirectory>lib</outputDirectory>
+            <useProjectArtifact>false</useProjectArtifact>
+            <useTransitiveDependencies>true</useTransitiveDependencies>
+            <includes>
+                <!-- useTransitiveDependencies pulls commons-io into CONSIDERATION, but the
+                     includes filter is still applied per-artifact — it must be listed too, or
+                     it's silently dropped and tika-core throws NoClassDefFoundError at runtime. -->
+                <include>org.apache.tika:tika-core</include>
+                <include>commons-io:commons-io</include>
+            </includes>
+        </dependencySet>
     </dependencySets>
 </assembly>

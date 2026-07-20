@@ -213,6 +213,41 @@ public final class FederationProperties {
     public static final SystemProperty<String> FILES_UPLOAD_PATH_MARKER =
         stringProp("plugin.federation.files.uploadPathMarker", "/httpfileupload/");
 
+    /**
+     * Comma-separated file extensions the relay will stage (egress, at the origin) or accept
+     * (ingress, at the destination — defense in depth against a peer whose own filter is absent
+     * or bypassed). Blank means nothing is allowed (secure by default); a single {@code *} entry
+     * allows everything. Extensions are matched case-insensitively; a leading dot is tolerated.
+     * Never applied to transit hops — see {@code FileRelayManager.relayToward}, which forwards
+     * file-* elements without ever decoding their content.
+     */
+    public static final SystemProperty<String> FILES_ALLOWED_EXTENSIONS =
+        stringProp("plugin.federation.files.allowedExtensions",
+            "jpg,jpeg,png,gif,webp,bmp,svg,heic,mp4,mov,webm,mkv,avi,mp3,m4a,wav,ogg,flac,"
+          + "pdf,txt,csv,json,xml,doc,docx,xls,xlsx,ppt,pptx,odt,ods,odp,zip,rar,7z,tar,gz");
+
+    /**
+     * Scan received file content with ClamAV before it becomes servable to a local recipient
+     * (OFF by default — requires a reachable {@code clamd}; see {@link #FILES_AV_HOST}). Applied
+     * only at the destination (ingress), never to transit hops. A scan that cannot complete
+     * (clamd unreachable, protocol error) is treated as a failure — the relay fails closed rather
+     * than serving unscanned content when this is on.
+     */
+    public static final SystemProperty<Boolean> FILES_AV_ENABLED =
+        boolProp("plugin.federation.files.avEnabled", false, true);
+
+    /** Hostname of the clamd INSTREAM endpoint. Default matches the docker-compose sidecar's service name. */
+    public static final SystemProperty<String> FILES_AV_HOST =
+        stringProp("plugin.federation.files.avHost", "clamav");
+
+    /** Port of the clamd INSTREAM endpoint (3310 is ClamAV's default). */
+    public static final SystemProperty<Integer> FILES_AV_PORT =
+        intProp("plugin.federation.files.avPort", 3310, 1);
+
+    /** Socket connect/read timeout (ms) for a single clamd scan. */
+    public static final SystemProperty<Integer> FILES_AV_TIMEOUT_MS =
+        intProp("plugin.federation.files.avTimeoutMs", 30_000, 1_000);
+
     /** Touching this class triggers the static field initialisers above, registering every property. */
     public static void register() { /* no-op; class load does the work */ }
 

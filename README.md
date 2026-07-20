@@ -36,6 +36,12 @@ that have no direct link. End users do nothing special — they just join their 
   the message (mapped‑room peers, a 1:1 recipient's home — never a broadcast), re‑hosted there, and the link
   is rewritten so every client downloads from its **own** server. Local‑only traffic never leaves; transit
   hops forward chunks without storing a copy.
+- **File type filtering & content verification** — an admin‑configured extension allowlist gates what a
+  server will stage for outbound relay (origin) and accept from a peer (destination); received content is
+  additionally sniffed by magic number (Apache Tika) and rejected if it doesn't match its claimed extension
+  (e.g. an executable renamed to `.jpg`). Optional ClamAV integration scans received content before it's
+  servable to a local recipient. All of this applies only at the origin/destination — a transit hop relays
+  file chunks without ever decoding them, so it's completely unaffected. See [Security](#security).
 
 ---
 
@@ -176,6 +182,37 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.files.publicUrlBase` | *(auto)* | Base URL for rewritten links to this server's download endpoint. Blank derives `https://<domain>:<http-bind-secure-port>/federation-files`; set explicitly behind a proxy. |
 | `plugin.federation.files.extraLocalHosts` | *(empty)* | Extra comma‑separated host names that also identify THIS server's upload URLs (when the upload plugin announces a different address). |
 | `plugin.federation.files.uploadPathMarker` | `/httpfileupload/` | Path fragment identifying an upload‑service URL; blank accepts any path on a local host. |
+| `plugin.federation.files.allowedExtensions` | *(curated list — see Settings)* | Comma‑separated extensions the relay will stage (egress) or accept (ingress). Blank allows nothing; `*` allows everything. Also in Settings → *File sharing*. |
+| `plugin.federation.files.avEnabled` | `false` | Scan received file content with ClamAV before it's servable to a local recipient. Requires a reachable `clamd` (see below). A scan that can't complete is treated as a failure — fails closed. Also in Settings → *File sharing*. |
+| `plugin.federation.files.avHost` | `clamav` | Hostname of the clamd INSTREAM endpoint. Default matches the sidecar service name in the [docker-compose example](#optional-clamav-sidecar-docker-compose) below. |
+| `plugin.federation.files.avPort` | `3310` | Port of the clamd INSTREAM endpoint. |
+| `plugin.federation.files.avTimeoutMs` | `30000` | Socket connect/read timeout (ms) for a single clamd scan. |
+
+### Optional: ClamAV sidecar (docker-compose)
+
+`avEnabled` needs a `clamd` daemon reachable from the Openfire container. If you run Openfire under Docker
+Compose, add the official ClamAV image as a sidecar on the same network — no ports need publishing to the
+host, only the Openfire container needs to reach it:
+
+```yaml
+services:
+  xmpp:
+    image: "openfire:5.1.0"
+    # ...existing xmpp service config...
+
+  clamav:
+    image: clamav/clamav:stable
+    container_name: xmpp-clamav
+    restart: unless-stopped
+    volumes:
+      - ./clamav-db:/var/lib/clamav   # persists signature definitions across restarts
+```
+
+Scanning itself is fully offline: `clamd` scans against whatever signature database it already has on disk
+regardless of current connectivity. The sidecar's bundled `freshclam` only needs the network to *refresh*
+those definitions — bring the container up once while online to seed the initial database (a few hundred MB
+of signatures), after that it keeps working with no network access at all. Use Settings → *File sharing* →
+*Test connection* to confirm the plugin can reach it before turning `avEnabled` on.
 
 ### Note on `disableS2SIdle`
 
@@ -283,6 +320,17 @@ The federation trust boundary is enforced at several points:
 - **Identity.** Remote users are injected under their home‑qualified nick, and the plugin drops any forwarded
   stanza claiming to originate from a **local** user (anti‑spoofing). As with any federation, peers are trusted
   to represent **their own** users honestly — a compromised peer can still misrepresent users of domains it relays.
+- **File type filtering & scanning.** `plugin.federation.files.allowedExtensions` (Settings → *File sharing*)
+  gates what a server will stage for outbound relay (egress, at the origin) and accept from a peer (ingress, at
+  the destination — defense in depth against a peer whose own filter is absent, bypassed, or an older plugin
+  version). At the destination, received content is additionally sniffed by magic number (no filename hint) and
+  rejected on a confident mismatch against the claimed extension — e.g. an executable renamed to `.jpg` is caught
+  even though `.exe` was never on the allowlist to begin with; a generic sniff result (plain text, unrecognized
+  binary) is inconclusive and not treated as a mismatch. Optional ClamAV scanning (`avEnabled`, off by default)
+  adds a real signature‑based scan of received content before it becomes servable; a scan that can't complete
+  (clamd unreachable) fails closed rather than serving unscanned content. None of this touches a transit hop —
+  `relayToward` forwards file‑\* elements without ever decoding their content, so a purely‑relaying server is
+  unaffected regardless of configuration.
 
 ---
 

@@ -382,6 +382,11 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"filesMaxSizeMB\":").append(FederationProperties.FILES_MAX_MB.getValue()).append(",");
         sb.append("\"filesRetentionDays\":").append(FederationProperties.FILES_RETENTION_DAYS.getValue()).append(",");
         sb.append("\"filesStorageDir\":\"").append(esc(FederationProperties.FILES_STORAGE_DIR.getValue())).append("\",");
+        sb.append("\"filesAllowedExtensions\":\"").append(esc(FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue())).append("\",");
+        sb.append("\"filesAvEnabled\":").append(FederationProperties.FILES_AV_ENABLED.getValue()).append(",");
+        sb.append("\"filesAvHost\":\"").append(esc(FederationProperties.FILES_AV_HOST.getValue())).append("\",");
+        sb.append("\"filesAvPort\":").append(FederationProperties.FILES_AV_PORT.getValue()).append(",");
+        sb.append("\"filesAvTimeoutMs\":").append(FederationProperties.FILES_AV_TIMEOUT_MS.getValue()).append(",");
 
         // ── file-based config (openfire.xml <federation> block) ─────────────────
         FederationFileConfig.IngestResult fcResult = mgr.getFileConfig().lastResult();
@@ -913,6 +918,80 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 out.print("{\"ok\":true,\"filesStorageDir\":\""
                         + esc(FederationProperties.FILES_STORAGE_DIR.getValue()) + "\"}");
+                return;
+            }
+            case "set-files-allowed-extensions": {
+                String extensions = req.getParameter("extensions");
+                if (extensions == null) {
+                    out.print("{\"error\":\"extensions required\"}");
+                    return;
+                }
+                FederationProperties.FILES_ALLOWED_EXTENSIONS.setValue(extensions.strip());
+                out.print("{\"ok\":true,\"filesAllowedExtensions\":\""
+                        + esc(FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue()) + "\"}");
+                return;
+            }
+            case "set-files-av-enabled": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.FILES_AV_ENABLED.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"filesAvEnabled\":" + FederationProperties.FILES_AV_ENABLED.getValue() + "}");
+                return;
+            }
+            case "set-files-av-host": {
+                String host = req.getParameter("host");
+                if (host == null || host.isBlank()) {
+                    out.print("{\"error\":\"host required\"}");
+                    return;
+                }
+                FederationProperties.FILES_AV_HOST.setValue(host.strip());
+                out.print("{\"ok\":true,\"filesAvHost\":\"" + esc(FederationProperties.FILES_AV_HOST.getValue()) + "\"}");
+                return;
+            }
+            case "set-files-av-port": {
+                String portParam = req.getParameter("port");
+                if (portParam == null || portParam.isBlank()) {
+                    out.print("{\"error\":\"port required\"}");
+                    return;
+                }
+                try {
+                    int port = Integer.parseInt(portParam.strip());
+                    if (port < 1 || port > 65535) {
+                        out.print("{\"error\":\"port must be between 1 and 65535\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_AV_PORT.setValue(port);
+                    out.print("{\"ok\":true,\"filesAvPort\":" + FederationProperties.FILES_AV_PORT.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"port must be an integer\"}");
+                }
+                return;
+            }
+            case "set-files-av-timeout": {
+                String msParam = req.getParameter("ms");
+                if (msParam == null || msParam.isBlank()) {
+                    out.print("{\"error\":\"ms required\"}");
+                    return;
+                }
+                try {
+                    int ms = Integer.parseInt(msParam.strip());
+                    if (ms < 1000) {
+                        out.print("{\"error\":\"timeout must be at least 1000 ms\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_AV_TIMEOUT_MS.setValue(ms);
+                    out.print("{\"ok\":true,\"filesAvTimeoutMs\":" + FederationProperties.FILES_AV_TIMEOUT_MS.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"ms must be an integer\"}");
+                }
+                return;
+            }
+            case "test-av-connection": {
+                boolean reachable = mgr.getFileRelay() != null && mgr.getFileRelay().testAvConnection();
+                out.print("{\"ok\":true,\"reachable\":" + reachable + "}");
                 return;
             }
             case "push-bookmarks": {

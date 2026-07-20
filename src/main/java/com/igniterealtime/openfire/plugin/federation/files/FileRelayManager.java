@@ -153,6 +153,11 @@ public class FileRelayManager {
         return store.reopenIfMoved();
     }
 
+    /** Pings the configured clamd endpoint (admin UI "Test connection" action). */
+    public boolean testAvConnection() {
+        return ClamAvClient.ping();
+    }
+
     public void stop() {
         if (exec != null) exec.shutdownNow();
         unregisterServlet();
@@ -311,6 +316,14 @@ public class FileRelayManager {
     /** Downloads the upload-service URL (loopback, self-signed certs accepted) into the store. */
     private void fetchLocalUpload(Transfer t) {
         if (store.has(t.id)) { transfers.remove(t.id, t); return; }
+        if (!FileTypePolicy.isExtensionAllowed(t.name)) {
+            Log.warn("File relay: refusing to stage '{}' for outbound relay — extension not on "
+                   + "the allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
+            t.state = State.FAILED;
+            t.touch();
+            failParked(t.id, "policy-rejected");
+            return;
+        }
         String sha256;
         long total = 0;
         String mime = "application/octet-stream";
@@ -638,6 +651,32 @@ public class FileRelayManager {
                 if (!t.sha256.equalsIgnoreCase(actual)) {
                     Log.warn("File relay: hash mismatch for {} — expected {}, got {}; discarding",
                              t.id, t.sha256, actual);
+                    failTransfer(t);
+                    return;
+                }
+            }
+            // Ingress gates — apply only here, at the actual point of delivery to a local
+            // recipient. Never reached by a pure transit hop (relayToward never decodes content).
+            if (!FileTypePolicy.isExtensionAllowed(t.name)) {
+                Log.warn("File relay: rejecting received file '{}' — extension not on the "
+                       + "allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
+                failTransfer(t);
+                return;
+            }
+            if (!FileTypePolicy.matchesContent(store.partPath(t.id), t.name)) {
+                failTransfer(t);   // matchesContent already logged the specific mismatch
+                return;
+            }
+            if (FederationProperties.FILES_AV_ENABLED.getValue()) {
+                ClamAvClient.ScanResult scan = ClamAvClient.scan(store.partPath(t.id));
+                switch (scan.verdict()) {
+                    case INFECTED -> Log.warn("File relay: AV detected '{}' in received file {} — discarding",
+                                               scan.detail(), t.name);
+                    case ERROR    -> Log.warn("File relay: AV scan unavailable for {} ({}) — "
+                                             + "discarding (fails closed)", t.name, scan.detail());
+                    case CLEAN    -> { }
+                }
+                if (scan.verdict() != ClamAvClient.Verdict.CLEAN) {
                     failTransfer(t);
                     return;
                 }

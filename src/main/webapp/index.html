@@ -579,6 +579,62 @@
                         <button class="btn btn-primary btn-small" onclick="saveFilesStorageDir()">Save</button>
                     </div>
                 </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Allowed file extensions</div>
+                        <div class="setting-desc">
+                            Comma-separated list of extensions the relay will stage (egress, from a
+                            local upload) or accept (ingress, from a peer). Applies only at the
+                            origin and destination — a transit hop relays without ever decoding
+                            content, so this never affects traffic just passing through. Blank
+                            allows nothing; <code>*</code> allows everything.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="text" id="files-extensions-input" class="num-input"
+                               style="width:360px;text-align:left"
+                               placeholder="jpg,jpeg,png,gif,pdf,txt,...">
+                        <button class="btn btn-primary btn-small" onclick="saveFilesAllowedExtensions()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Virus scan received files (ClamAV)</div>
+                        <div class="setting-desc">
+                            When enabled, a file's content is scanned by a <code>clamd</code>
+                            daemon before it becomes servable to a local recipient (destination
+                            only — never a transit hop). A scan that cannot complete (clamd
+                            unreachable) is treated as a failure: the relay fails closed rather
+                            than serving unscanned content while this is on.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="files-av-toggle" onchange="saveFilesAvEnabled()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="files-av-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">ClamAV endpoint</div>
+                        <div class="setting-desc">
+                            Host and port of the clamd INSTREAM endpoint. Default
+                            <code>clamav:3310</code> matches the sidecar container added to this
+                            server's docker-compose.yml, reachable on the same bridge network.
+                        </div>
+                    </div>
+                    <div class="setting-ctl" style="flex-wrap:wrap;gap:6px">
+                        <input type="text" id="files-av-host-input" class="num-input"
+                               style="width:140px;text-align:left" placeholder="clamav">
+                        <input type="number" id="files-av-port-input" class="num-input"
+                               style="width:90px" min="1" max="65535" step="1" placeholder="3310">
+                        <button class="btn btn-primary btn-small" onclick="saveFilesAvEndpoint()">Save</button>
+                        <button class="btn btn-small" onclick="testFilesAvConnection()">Test connection</button>
+                        <span id="files-av-test-result" class="setting-state"></span>
+                    </div>
+                </div>
             </div>
         </div>
 

@@ -107,7 +107,8 @@ function renderAll(data) {
     updateKeepaliveInput(data.keepaliveSeconds);
     updateReconnectInput(data.reconnectSeconds);
     updateMappingPingInput(data.mappingPingSeconds);
-    updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays, data.filesStorageDir);
+    updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays, data.filesStorageDir,
+        data.filesAllowedExtensions, data.filesAvEnabled, data.filesAvHost, data.filesAvPort);
     updateAllowlistToggle(data.peerAllowlist);
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
@@ -611,7 +612,8 @@ function saveMappingPing() {
 
 // ── File sharing settings ─────────────────────────────────────────────────────
 
-function updateFilesSettings(enabled, maxSizeMB, retentionDays, storageDir) {
+function updateFilesSettings(enabled, maxSizeMB, retentionDays, storageDir,
+                              allowedExtensions, avEnabled, avHost, avPort) {
     const cb  = document.getElementById('files-toggle');
     const lbl = document.getElementById('files-state');
     if (cb && document.activeElement !== cb) cb.checked = !!enabled;
@@ -629,6 +631,81 @@ function updateFilesSettings(enabled, maxSizeMB, retentionDays, storageDir) {
     if (dirInp && document.activeElement !== dirInp) {
         dirInp.value = storageDir != null ? storageDir : '/var/lib/openfire/federation-files';
     }
+    const extInp = document.getElementById('files-extensions-input');
+    if (extInp && document.activeElement !== extInp) {
+        extInp.value = allowedExtensions != null ? allowedExtensions : '';
+    }
+    const avCb  = document.getElementById('files-av-toggle');
+    const avLbl = document.getElementById('files-av-state');
+    if (avCb && document.activeElement !== avCb) avCb.checked = !!avEnabled;
+    if (avLbl) avLbl.textContent = avEnabled ? 'Scanning' : 'Off';
+
+    const avHostInp = document.getElementById('files-av-host-input');
+    if (avHostInp && document.activeElement !== avHostInp) {
+        avHostInp.value = avHost != null ? avHost : 'clamav';
+    }
+    const avPortInp = document.getElementById('files-av-port-input');
+    if (avPortInp && document.activeElement !== avPortInp) {
+        avPortInp.value = avPort != null ? avPort : 3310;
+    }
+}
+
+function saveFilesAllowedExtensions() {
+    const inp = document.getElementById('files-extensions-input');
+    const extensions = (inp ? inp.value : '').trim();
+    post({ action: 'set-files-allowed-extensions', extensions })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesAvEnabled() {
+    const cb = document.getElementById('files-av-toggle');
+    if (!cb) return;
+    post({ action: 'set-files-av-enabled', enabled: cb.checked })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesAvEndpoint() {
+    const hostInp = document.getElementById('files-av-host-input');
+    const portInp = document.getElementById('files-av-port-input');
+    const host = (hostInp ? hostInp.value : '').trim();
+    const port = parseInt(portInp ? portInp.value : '', 10);
+    if (!host) {
+        alert('ClamAV host cannot be empty.');
+        return;
+    }
+    if (isNaN(port) || port < 1 || port > 65535) {
+        alert('ClamAV port must be between 1 and 65535.');
+        return;
+    }
+    Promise.all([
+        post({ action: 'set-files-av-host', host }),
+        post({ action: 'set-files-av-port', port })
+    ]).then(results => {
+        if (results.every(r => r && r.ok)) {
+            flashSaved('Saved ✓');
+            refresh();
+        }
+    });
+}
+
+function testFilesAvConnection() {
+    const result = document.getElementById('files-av-test-result');
+    if (result) result.textContent = 'Testing…';
+    post({ action: 'test-av-connection' })
+        .then(res => {
+            if (!result) return;
+            result.textContent = (res && res.reachable) ? '✓ reachable' : '✗ unreachable';
+        });
 }
 
 function saveFilesEnabled() {

@@ -273,6 +273,16 @@
         pending and must be re‑accepted (the lower‑domain side auto‑re‑requests on reconnect).</li>
     <li><strong>Admin API CSRF.</strong> This tab's actions are protected by a double‑submit token. After
         upgrading the plugin, reload an already‑open Federation tab once so it picks up the new token.</li>
+    <li><strong>File type filtering &amp; scanning.</strong> The <em>File sharing</em> settings section's allowed‑
+        extensions list gates what this server will stage for outbound relay (origin) and accept from a peer
+        (destination — defense in depth against a peer whose own filter is off or bypassed). At the destination,
+        received content is also sniffed by magic number and rejected on a confident mismatch against its claimed
+        extension (e.g. an executable renamed to <code>.jpg</code>); an inconclusive sniff (plain text, unrecognised
+        binary) is not treated as a mismatch. Optional ClamAV scanning (off by default; needs a reachable
+        <code>clamd</code> — see the <em>File sharing</em> section for the endpoint fields and a <em>Test
+        connection</em> button) scans received content before it becomes servable; a scan that can't complete fails
+        closed rather than serving unscanned content. A transit hop never decodes file content at all, so none of
+        this affects traffic just passing through.</li>
 </ul>
 
 <h2>Managing peers</h2>
