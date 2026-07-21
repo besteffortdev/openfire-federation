@@ -1608,13 +1608,32 @@ public class FederationManager {
             Presence copy = new Presence(pres.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.presenceForward(nextHop, destDomain, localDomain, copy));
-            Log.debug("presence-forward: {} {} -> {} via {} (dest {})",
-                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), nextHop, destDomain);
+            Log.debug("presence-forward: {} {} -> {} via {} (dest {}) avatarHash={}",
+                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), nextHop, destDomain,
+                      avatarHashOf(pres));
             return true;
         } catch (Exception e) {
             Log.warn("Failed to forward presence to {}: {}", destDomain, e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Diagnostic only (see [[architecture-protocol]] avatar-hash investigation): reports whether a
+     * presence being relayed actually carries XEP-0153's {@code vcard-temp:x:update} photo hash, and
+     * what it is. Distinguishes "no x:update element at all" (client didn't advertise one — e.g. a
+     * bare subscribe/subscribed presence, or one from a client that has nothing to advertise) from
+     * "x:update present but empty" (client is signaling no avatar) from an actual hash.
+     */
+    private String avatarHashOf(Presence pres) {
+        for (Element xEl : pres.getElement().elements("x")) {
+            if (!"vcard-temp:x:update".equals(xEl.getNamespaceURI())) continue;
+            Element photo = xEl.element("photo");
+            if (photo == null) return "x-present,no-photo-el";
+            String hash = photo.getTextTrim();
+            return hash.isEmpty() ? "x-present,empty-photo" : hash;
+        }
+        return "no-x-update-element";
     }
 
     /**

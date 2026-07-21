@@ -937,8 +937,9 @@ public class FederationIQHandler extends IQHandler {
             }
             FederationStanzaFactory.markAsForwarded(pres);
             XMPPServer.getInstance().getPacketRouter().route(pres);   // let Openfire's roster engine handle it
-            Log.info("presence-forward: delivered 1:1 {} {} -> {} (from {})",
-                     pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), fromDomain);
+            Log.info("presence-forward: delivered 1:1 {} {} -> {} (from {}) avatarHash={}",
+                     pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), fromDomain,
+                     avatarHashOf(pres));
         } else {
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
             manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
@@ -1594,6 +1595,22 @@ public class FederationIQHandler extends IQHandler {
             Log.debug("syncLocalOccupantsToRemote: pushed {} occupant(s) + virtuals from {} to {}",
                       occupants.size(), localRoom, remoteRoomJid);
         }
+    }
+
+    /**
+     * Diagnostic only (see [[architecture-protocol]] avatar-hash investigation): mirrors
+     * {@link FederationManager#avatarHashOf} on the receiving end of presence-forward, so a hash
+     * present at the origin can be confirmed to have survived the hop-to-hop relay unmodified.
+     */
+    private String avatarHashOf(Presence pres) {
+        for (Element xEl : pres.getElement().elements("x")) {
+            if (!"vcard-temp:x:update".equals(xEl.getNamespaceURI())) continue;
+            Element photo = xEl.element("photo");
+            if (photo == null) return "x-present,no-photo-el";
+            String hash = photo.getTextTrim();
+            return hash.isEmpty() ? "x-present,empty-photo" : hash;
+        }
+        return "no-x-update-element";
     }
 
     /** Derives a stable MUC nick from a full JID: "user@domain" (no resource). */
