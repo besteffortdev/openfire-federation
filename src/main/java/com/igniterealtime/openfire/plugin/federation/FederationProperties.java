@@ -61,6 +61,22 @@ public final class FederationProperties {
         }
     }
 
+    /** String twin of {@link #boolProp}; also survives a stale registration. */
+    @SuppressWarnings("unchecked")
+    private static SystemProperty<String> stringProp(String key, String defaultValue) {
+        try {
+            return SystemProperty.Builder.ofType(String.class)
+                .setKey(key)
+                .setPlugin(PLUGIN)
+                .setDefaultValue(defaultValue)
+                .setDynamic(true)
+                .build();
+        } catch (IllegalArgumentException alreadyRegistered) {
+            return (SystemProperty<String>) SystemProperty.getProperty(key)
+                .orElseThrow(() -> alreadyRegistered);
+        }
+    }
+
     /**
      * Peer trust gate (secure by default). When true, only configured peers
      * (see {@link PeerRegistry#isApproved}) may drive federation; actions from any other server are
@@ -137,6 +153,100 @@ public final class FederationProperties {
     /** End-to-end mapping probe interval (seconds); 0 disables (effective values below 15 are clamped). */
     public static final SystemProperty<Integer> MAPPING_PING_SECONDS =
         intProp("plugin.federation.mappingPingSeconds", 30, 0);
+
+    // ── Transparent file-share federation (fed-file relay) ─────────────────────
+
+    /**
+     * Federate HTTP File Upload shares (ON by default). A message whose URL points at THIS server's
+     * upload service gets relayed content-wise to exactly the servers that deliver it (mapped-room
+     * peers / a 1:1 recipient's home), where the URL is rewritten to that server's own
+     * {@code /federation-files} endpoint — transparent to clients. Scoping follows the message:
+     * local-only traffic never leaves, transit hops never store.
+     */
+    public static final SystemProperty<Boolean> FILES_ENABLED =
+        boolProp("plugin.federation.files.enabled", true, true);
+
+    /** Maximum size (MB) of a file the relay will stage, transfer, or accept. */
+    public static final SystemProperty<Integer> FILES_MAX_MB =
+        intProp("plugin.federation.files.maxSizeMB", 25, 1);
+
+    /** Raw bytes per file-chunk IQ (base64 adds ~33%; keep well under the S2S stanza-size limit). */
+    public static final SystemProperty<Integer> FILES_CHUNK_BYTES =
+        intProp("plugin.federation.files.chunkBytes", 131072, 16384);
+
+    /** Pause (ms) between chunk sends so a large file cannot starve chat traffic on the link. */
+    public static final SystemProperty<Integer> FILES_CHUNK_DELAY_MS =
+        intProp("plugin.federation.files.chunkDelayMs", 20, 0);
+
+    /** Days a relayed file is kept in the relay store (see {@link #FILES_STORAGE_DIR}) before purge. */
+    public static final SystemProperty<Integer> FILES_RETENTION_DAYS =
+        intProp("plugin.federation.files.retentionDays", 90, 1);
+
+    /**
+     * Full (absolute) path of the directory where relayed file content is stored. Changing it
+     * live moves existing complete entries to the new location. A non-absolute value is ignored
+     * (the default is used instead) — the UI and openfire.xml ingest reject one up front.
+     */
+    public static final SystemProperty<String> FILES_STORAGE_DIR =
+        stringProp("plugin.federation.files.storageDir", "/var/lib/openfire/federation-files");
+
+    /**
+     * Base URL peers' rewritten links use to reach OUR download endpoint. Blank (default) derives
+     * {@code https://<xmpp-domain>:<http-bind-secure-port>/federation-files}; set explicitly when
+     * clients reach the HTTP-bind port through a proxy or a different host name.
+     */
+    public static final SystemProperty<String> FILES_PUBLIC_URL =
+        stringProp("plugin.federation.files.publicUrlBase", "");
+
+    /**
+     * Extra host names (comma-separated) that also identify THIS server's upload URLs, in addition
+     * to the XMPP domain and the server host name — for setups where the upload plugin announces a
+     * distinct address.
+     */
+    public static final SystemProperty<String> FILES_EXTRA_LOCAL_HOSTS =
+        stringProp("plugin.federation.files.extraLocalHosts", "");
+
+    /**
+     * Path fragment that identifies an upload-service URL (blank = accept any path on a local
+     * host). Matches the stock Openfire HTTP File Upload plugin's context by default.
+     */
+    public static final SystemProperty<String> FILES_UPLOAD_PATH_MARKER =
+        stringProp("plugin.federation.files.uploadPathMarker", "/httpfileupload/");
+
+    /**
+     * Comma-separated file extensions the relay will stage (egress, at the origin) or accept
+     * (ingress, at the destination — defense in depth against a peer whose own filter is absent
+     * or bypassed). Blank means nothing is allowed (secure by default); a single {@code *} entry
+     * allows everything. Extensions are matched case-insensitively; a leading dot is tolerated.
+     * Never applied to transit hops — see {@code FileRelayManager.relayToward}, which forwards
+     * file-* elements without ever decoding their content.
+     */
+    public static final SystemProperty<String> FILES_ALLOWED_EXTENSIONS =
+        stringProp("plugin.federation.files.allowedExtensions",
+            "jpg,jpeg,png,gif,webp,bmp,svg,heic,mp4,mov,webm,mkv,avi,mp3,m4a,wav,ogg,flac,"
+          + "pdf,txt,csv,json,xml,doc,docx,xls,xlsx,ppt,pptx,odt,ods,odp,zip,rar,7z,tar,gz");
+
+    /**
+     * Scan received file content with ClamAV before it becomes servable to a local recipient
+     * (OFF by default — requires a reachable {@code clamd}; see {@link #FILES_AV_HOST}). Applied
+     * only at the destination (ingress), never to transit hops. A scan that cannot complete
+     * (clamd unreachable, protocol error) is treated as a failure — the relay fails closed rather
+     * than serving unscanned content when this is on.
+     */
+    public static final SystemProperty<Boolean> FILES_AV_ENABLED =
+        boolProp("plugin.federation.files.avEnabled", false, true);
+
+    /** Hostname of the clamd INSTREAM endpoint. Default matches the docker-compose sidecar's service name. */
+    public static final SystemProperty<String> FILES_AV_HOST =
+        stringProp("plugin.federation.files.avHost", "clamav");
+
+    /** Port of the clamd INSTREAM endpoint (3310 is ClamAV's default). */
+    public static final SystemProperty<Integer> FILES_AV_PORT =
+        intProp("plugin.federation.files.avPort", 3310, 1);
+
+    /** Socket connect/read timeout (ms) for a single clamd scan. */
+    public static final SystemProperty<Integer> FILES_AV_TIMEOUT_MS =
+        intProp("plugin.federation.files.avTimeoutMs", 30_000, 1_000);
 
     /** Touching this class triggers the static field initialisers above, registering every property. */
     public static void register() { /* no-op; class load does the work */ }

@@ -7,7 +7,7 @@
 
     <groupId>com.igniterealtime.openfire.plugin</groupId>
     <artifactId>federation</artifactId>
-    <version>1.8.10</version>
+    <version>1.9.11</version>
     <packaging>jar</packaging>
 
     <name>Openfire Federation Plugin</name>
@@ -50,6 +50,15 @@
             <version>2.1.4</version>
             <scope>provided</scope>
         </dependency>
+
+        <!-- Jetty EE8 servlet context — provided at runtime by Openfire's embedded Jetty 12;
+             needed to mount the /federation-files download endpoint on the HTTP-bind port. -->
+        <dependency>
+            <groupId>org.eclipse.jetty.ee8</groupId>
+            <artifactId>jetty-ee8-servlet</artifactId>
+            <version>12.0.35</version>
+            <scope>provided</scope>
+        </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
@@ -63,6 +72,16 @@
             <artifactId>jetty-servlet-api</artifactId>
             <version>4.0.9</version>
             <scope>provided</scope>
+        </dependency>
+
+        <!-- Content-sniffing (magic-byte) MIME detection for the ingress file-type verification
+             gate — NOT provided by Openfire, so this one IS bundled into lib/ by the assembly
+             (see src/assembly/openfire-plugin.xml). tika-core alone (not tika-parsers) only pulls
+             in commons-io transitively; no parser plugins, no network calls, fully offline. -->
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-core</artifactId>
+            <version>2.9.2</version>
         </dependency>
     </dependencies>
 

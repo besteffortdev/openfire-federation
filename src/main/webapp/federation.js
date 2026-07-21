@@ -107,6 +107,10 @@ function renderAll(data) {
     updateKeepaliveInput(data.keepaliveSeconds);
     updateReconnectInput(data.reconnectSeconds);
     updateMappingPingInput(data.mappingPingSeconds);
+    updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays, data.filesStorageDir,
+        data.filesAllowedExtensions, data.filesAvEnabled, data.filesAvHost, data.filesAvPort);
+    renderAvScanLog(data.avScanLog || []);
+    renderRejectedFiles(data.rejectedFiles || []);
     updateAllowlistToggle(data.peerAllowlist);
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
@@ -511,7 +515,8 @@ function renderFileConfig(fc) {
         summaryEl.textContent = fc.blockPresent
             ? ('+' + (fc.peersAdded || 0) + ' peer(s) added, ' + (fc.peersUpdated || 0)
                + ' peer field(s) updated, ' + (fc.roomsUpdated || 0) + ' room(s) updated, '
-               + (fc.mappingsRequested || 0) + ' mapping(s) requested.')
+               + (fc.mappingsRequested || 0) + ' mapping(s) requested, '
+               + (fc.settingsUpdated || 0) + ' setting(s) updated.')
             : 'No <federation> block found in openfire.xml — nothing to ingest.';
     }
 
@@ -602,6 +607,171 @@ function saveMappingPing() {
         .then(result => {
             if (result && result.ok) {
                 flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+// ── File sharing settings ─────────────────────────────────────────────────────
+
+function updateFilesSettings(enabled, maxSizeMB, retentionDays, storageDir,
+                              allowedExtensions, avEnabled, avHost, avPort) {
+    const cb  = document.getElementById('files-toggle');
+    const lbl = document.getElementById('files-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Federated' : 'Off';
+
+    const sizeInp = document.getElementById('files-maxsize-input');
+    if (sizeInp && document.activeElement !== sizeInp) {
+        sizeInp.value = maxSizeMB != null ? maxSizeMB : 25;
+    }
+    const retInp = document.getElementById('files-retention-input');
+    if (retInp && document.activeElement !== retInp) {
+        retInp.value = retentionDays != null ? retentionDays : 90;
+    }
+    const dirInp = document.getElementById('files-storagedir-input');
+    if (dirInp && document.activeElement !== dirInp) {
+        dirInp.value = storageDir != null ? storageDir : '/var/lib/openfire/federation-files';
+    }
+    const extInp = document.getElementById('files-extensions-input');
+    if (extInp && document.activeElement !== extInp) {
+        extInp.value = allowedExtensions != null ? allowedExtensions : '';
+    }
+    const avCb  = document.getElementById('files-av-toggle');
+    const avLbl = document.getElementById('files-av-state');
+    if (avCb && document.activeElement !== avCb) avCb.checked = !!avEnabled;
+    if (avLbl) avLbl.textContent = avEnabled ? 'Scanning' : 'Off';
+
+    const avHostInp = document.getElementById('files-av-host-input');
+    if (avHostInp && document.activeElement !== avHostInp) {
+        avHostInp.value = avHost != null ? avHost : 'clamav';
+    }
+    const avPortInp = document.getElementById('files-av-port-input');
+    if (avPortInp && document.activeElement !== avPortInp) {
+        avPortInp.value = avPort != null ? avPort : 3310;
+    }
+}
+
+function saveFilesAllowedExtensions() {
+    const inp = document.getElementById('files-extensions-input');
+    const extensions = (inp ? inp.value : '').trim();
+    post({ action: 'set-files-allowed-extensions', extensions })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesAvEnabled() {
+    const cb = document.getElementById('files-av-toggle');
+    if (!cb) return;
+    post({ action: 'set-files-av-enabled', enabled: cb.checked })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesAvEndpoint() {
+    const hostInp = document.getElementById('files-av-host-input');
+    const portInp = document.getElementById('files-av-port-input');
+    const host = (hostInp ? hostInp.value : '').trim();
+    const port = parseInt(portInp ? portInp.value : '', 10);
+    if (!host) {
+        alert('ClamAV host cannot be empty.');
+        return;
+    }
+    if (isNaN(port) || port < 1 || port > 65535) {
+        alert('ClamAV port must be between 1 and 65535.');
+        return;
+    }
+    Promise.all([
+        post({ action: 'set-files-av-host', host }),
+        post({ action: 'set-files-av-port', port })
+    ]).then(results => {
+        if (results.every(r => r && r.ok)) {
+            flashSaved('Saved ✓');
+            refresh();
+        }
+    });
+}
+
+function testFilesAvConnection() {
+    const result = document.getElementById('files-av-test-result');
+    if (result) result.textContent = 'Testing…';
+    post({ action: 'test-av-connection' })
+        .then(res => {
+            if (!result) return;
+            result.textContent = (res && res.reachable) ? '✓ reachable' : '✗ unreachable';
+        });
+}
+
+function saveFilesEnabled() {
+    const cb = document.getElementById('files-toggle');
+    if (!cb) return;
+    post({ action: 'set-files-enabled', enabled: cb.checked })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesMaxSize() {
+    const inp = document.getElementById('files-maxsize-input');
+    const mb = parseInt(inp ? inp.value : '', 10);
+    if (isNaN(mb) || mb < 1) {
+        alert('Maximum file size must be at least 1 MB.');
+        return;
+    }
+    post({ action: 'set-files-max-size', mb })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesRetention() {
+    const inp = document.getElementById('files-retention-input');
+    const days = parseInt(inp ? inp.value : '', 10);
+    if (isNaN(days) || days < 1) {
+        alert('File retention must be at least 1 day.');
+        return;
+    }
+    post({ action: 'set-files-retention', days })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesStorageDir() {
+    const inp = document.getElementById('files-storagedir-input');
+    const dir = (inp ? inp.value : '').trim();
+    if (!dir) {
+        alert('Storage directory cannot be empty.');
+        return;
+    }
+    if (!/^(\/|[A-Za-z]:[\\/])/.test(dir)) {
+        alert('Please enter a full path, e.g. /var/lib/openfire/federation-files.');
+        return;
+    }
+    post({ action: 'set-files-storage-dir', dir })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            } else if (result && result.error) {
+                alert(result.error);
                 refresh();
             }
         });
@@ -781,6 +951,82 @@ function renderRouting(entries) {
             <td>${r.hops}</td>
             <td class="ts">${new Date(r.updatedAt).toLocaleTimeString()}</td>
             <td>${denyBtn}</td>
+        </tr>`;
+    }).join('');
+}
+
+/** Human-readable byte size (matches the precision used elsewhere on the page: 1 decimal above 1 KB). */
+function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function renderAvScanLog(entries) {
+    const tbody = document.getElementById('av-scan-tbody');
+    if (!tbody) return;
+    if (entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No files scanned yet.</td></tr>';
+        return;
+    }
+    // Server already returns newest-first; keep that order.
+    tbody.innerHTML = entries.map(e => {
+        const verdict = String(e.verdict || '').toUpperCase();
+        const badgeClass = verdict === 'CLEAN' ? 'badge-scan-clean'
+                          : verdict === 'INFECTED' ? 'badge-scan-infected'
+                          : 'badge-scan-error';
+        const label = verdict === 'CLEAN' ? 'clean' : verdict === 'INFECTED' ? 'infected' : 'error';
+        return `
+        <tr>
+            <td class="ts">${new Date(e.when).toLocaleString()}</td>
+            <td>${escHtml(e.name)}</td>
+            <td>${fmtBytes(e.size)}</td>
+            <td>${escHtml(e.origin)}</td>
+            <td><span class="badge ${badgeClass}">${label}</span></td>
+            <td>${escHtml(e.detail)}</td>
+        </tr>`;
+    }).join('');
+}
+
+const REJECTION_REASON_LABELS = {
+    EXTENSION_NOT_ALLOWED: 'extension not allowed',
+    CONTENT_MISMATCH: 'content mismatch',
+    HASH_MISMATCH: 'hash mismatch',
+    AV_INFECTED: 'AV: infected',
+    AV_ERROR: 'AV: scan error',
+};
+const REJECTION_REASON_BADGE = {
+    EXTENSION_NOT_ALLOWED: 'badge-reject-policy',
+    CONTENT_MISMATCH: 'badge-reject-security',
+    HASH_MISMATCH: 'badge-reject-security',
+    AV_INFECTED: 'badge-reject-security',
+    AV_ERROR: 'badge-reject-policy',
+};
+
+function renderRejectedFiles(entries) {
+    const tbody = document.getElementById('rejected-files-tbody');
+    if (!tbody) return;
+    if (entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No files rejected yet.</td></tr>';
+        return;
+    }
+    // Server already returns newest-first; keep that order.
+    tbody.innerHTML = entries.map(e => {
+        const reason = String(e.reason || '');
+        const reasonLabel = REJECTION_REASON_LABELS[reason] || reason.toLowerCase();
+        const reasonBadge = REJECTION_REASON_BADGE[reason] || 'badge-reject-policy';
+        const stageLabel = e.stage === 'egress' ? 'egress (outbound)' : 'ingress (inbound)';
+        const stageBadge = e.stage === 'egress' ? 'badge-out' : 'badge-in';
+        return `
+        <tr>
+            <td class="ts">${new Date(e.when).toLocaleString()}</td>
+            <td>${escHtml(e.name)}</td>
+            <td>${e.size > 0 ? fmtBytes(e.size) : '—'}</td>
+            <td>${escHtml(e.origin)}</td>
+            <td><span class="badge ${stageBadge}">${stageLabel}</span></td>
+            <td><span class="badge ${reasonBadge}">${escHtml(reasonLabel)}</span></td>
+            <td>${escHtml(e.detail)}</td>
         </tr>`;
     }).join('');
 }

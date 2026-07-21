@@ -27,6 +27,12 @@ public class FederationRoutingTable {
     private final ConcurrentHashMap<String, RouteEntry> table = new ConcurrentHashMap<>();
     /** peer domain → destinations learned from that peer (for cleanup) */
     private final ConcurrentHashMap<String, Set<String>> routesLearnedFrom = new ConcurrentHashMap<>();
+    /**
+     * Every destination that has EVER had a route since plugin start — never pruned. Lets the
+     * leak diagnostics (and later the reject-and-bounce guard) recognise a stanza aimed at an
+     * overlay domain even while its route is momentarily absent from {@link #table}.
+     */
+    private final Set<String> everRoutable = ConcurrentHashMap.newKeySet();
 
     /**
      * Registers a directly-connected peer (hop count = 1).
@@ -34,6 +40,7 @@ public class FederationRoutingTable {
      */
     public void addDirectPeer(String domain) {
         table.put(domain, new RouteEntry(domain, domain, 1));
+        everRoutable.add(domain);
         // Do NOT add to routesLearnedFrom — direct routes are owned by addDirectPeer/removePeer,
         // not by gossip. A peer never advertises itself in routing-updates, so adding it here
         // would cause the stale-withdrawal check to delete the direct route on every update.
@@ -67,6 +74,7 @@ public class FederationRoutingTable {
 
             if (current == null || candidate < current.hops()) {
                 table.put(dest, new RouteEntry(dest, fromPeer, candidate));
+                everRoutable.add(dest);
                 learnedSet.add(dest);
                 changed.add(dest);
                 Log.debug("Routing: {} via {} in {} hop(s)", dest, fromPeer, candidate);
@@ -153,6 +161,15 @@ public class FederationRoutingTable {
 
     public boolean isReachable(String destination) {
         return table.containsKey(destination);
+    }
+
+    /**
+     * True if {@code destination} has had a route at ANY point since plugin start, even if the
+     * table has no entry for it right now.  Used to tell "overlay peer whose route blipped"
+     * apart from "genuinely external XMPP domain" in the native-S2S leak diagnostics.
+     */
+    public boolean wasEverRoutable(String destination) {
+        return everRoutable.contains(destination);
     }
 
     /** Snapshot of the full table for UI display. */

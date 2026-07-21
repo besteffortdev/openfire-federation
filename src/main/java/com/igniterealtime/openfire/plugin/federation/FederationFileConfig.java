@@ -28,6 +28,7 @@ import java.util.Set;
  * <pre>{@code
  * <jive>
  *   <federation>
+ *     <files enabled="true" maxSizeMB="25" retentionDays="90" storageDir="/var/lib/openfire/federation-files"/>
  *     <peers>
  *       <peer domain="2502-xmpp.example.net" untrusted="false"/>
  *       <peer domain="2506-xmpp.example.net" untrusted="true">
@@ -52,8 +53,9 @@ public class FederationFileConfig {
     private static final int MAX_WARNINGS = 20;
 
     public record IngestResult(boolean blockPresent, int peersAdded, int peersUpdated,
-                                int roomsUpdated, int mappingsRequested, List<String> warnings) {
-        static final IngestResult EMPTY = new IngestResult(false, 0, 0, 0, 0, List.of());
+                                int roomsUpdated, int mappingsRequested, int settingsUpdated,
+                                List<String> warnings) {
+        static final IngestResult EMPTY = new IngestResult(false, 0, 0, 0, 0, 0, List.of());
     }
 
     private volatile IngestResult lastResult = IngestResult.EMPTY;
@@ -91,6 +93,8 @@ public class FederationFileConfig {
         }
 
         List<String> warnings = new ArrayList<>();
+        int settingsUpdated = applyFiles(manager, fedEl.element("files"), warnings);
+
         int peersAdded = 0, peersUpdated = 0;
         Element peersEl = fedEl.element("peers");
         if (peersEl != null) {
@@ -112,10 +116,10 @@ public class FederationFileConfig {
         }
 
         IngestResult result = new IngestResult(true, peersAdded, peersUpdated, roomsUpdated,
-                mappingsRequested, List.copyOf(warnings));
+                mappingsRequested, settingsUpdated, List.copyOf(warnings));
         Log.info("Ingested federation config from {}: {} peer(s) added, {} peer field(s) updated, "
-                + "{} room(s) updated, {} mapping(s) requested{}",
-                file, peersAdded, peersUpdated, roomsUpdated, mappingsRequested,
+                + "{} room(s) updated, {} mapping(s) requested, {} setting(s) updated{}",
+                file, peersAdded, peersUpdated, roomsUpdated, mappingsRequested, settingsUpdated,
                 warnings.isEmpty() ? "" : ", " + warnings.size() + " warning(s)");
         for (String w : warnings) Log.warn("federation config: {}", w);
         return remember(result);
@@ -125,6 +129,75 @@ public class FederationFileConfig {
         lastResult = r;
         lastLoadedAtMillis = System.currentTimeMillis();
         return r;
+    }
+
+    // ── file-sharing settings ────────────────────────────────────────────────
+
+    /**
+     * Applies a {@code <files enabled maxSizeMB retentionDays storageDir/>} element to the
+     * file-relay properties. Same declare-only semantics as the rest of the block: attributes the
+     * file doesn't mention are never touched. Returns the number of settings actually changed.
+     */
+    private int applyFiles(FederationManager manager, Element filesEl, List<String> warnings) {
+        if (filesEl == null) return 0;
+        int updated = 0;
+
+        String enabledAttr = filesEl.attributeValue("enabled");
+        if (enabledAttr != null) {
+            boolean declared = Boolean.parseBoolean(enabledAttr.strip());
+            if (FederationProperties.FILES_ENABLED.getValue() != declared) {
+                FederationProperties.FILES_ENABLED.setValue(declared);
+                updated++;
+            }
+        }
+
+        updated += applyIntSetting(filesEl, "maxSizeMB", FederationProperties.FILES_MAX_MB, 1, warnings);
+        updated += applyIntSetting(filesEl, "retentionDays", FederationProperties.FILES_RETENTION_DAYS, 1, warnings);
+
+        String dirAttr = filesEl.attributeValue("storageDir");
+        if (dirAttr != null) {
+            String declared = dirAttr.strip();
+            if (declared.isEmpty()) {
+                warn(warnings, "<files> storageDir is empty, skipped");
+            } else if (!java.nio.file.Path.of(declared).isAbsolute()) {
+                warn(warnings, "<files> storageDir='" + declared + "' must be a full path, skipped");
+            } else if (!declared.equals(FederationProperties.FILES_STORAGE_DIR.getValue())) {
+                String previous = FederationProperties.FILES_STORAGE_DIR.getValue();
+                FederationProperties.FILES_STORAGE_DIR.setValue(declared);
+                // On a "Reload now" the relay is already running — move the store immediately.
+                // During plugin start ingest runs after the relay too, so this is always live.
+                String moveError = manager.getFileRelay() != null
+                        ? manager.getFileRelay().storageDirChanged() : null;
+                if (moveError != null) {
+                    FederationProperties.FILES_STORAGE_DIR.setValue(previous);
+                    warn(warnings, "<files> storageDir='" + declared + "' rejected: " + moveError);
+                } else {
+                    updated++;
+                }
+            }
+        }
+        return updated;
+    }
+
+    /** Returns 1 when the attribute is present, valid, and different from the stored value. */
+    private int applyIntSetting(Element el, String attr, org.jivesoftware.util.SystemProperty<Integer> prop,
+                                int min, List<String> warnings) {
+        String raw = el.attributeValue(attr);
+        if (raw == null) return 0;
+        int declared;
+        try {
+            declared = Integer.parseInt(raw.strip());
+        } catch (NumberFormatException e) {
+            warn(warnings, "<files> " + attr + "='" + raw + "' is not an integer, skipped");
+            return 0;
+        }
+        if (declared < min) {
+            warn(warnings, "<files> " + attr + "=" + declared + " is below the minimum of " + min + ", skipped");
+            return 0;
+        }
+        if (prop.getValue() == declared) return 0;
+        prop.setValue(declared);
+        return 1;
     }
 
     // ── peers ────────────────────────────────────────────────────────────────

@@ -430,6 +430,90 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    // ── file relay (transparent HTTP-upload federation) ─────────────────────────
+
+    /**
+     * Asks {@code destination} (the server believed to hold the content) to stream file {@code id}
+     * back to {@code origin} (the requester — us).  Routed hop-by-hop like a mapping probe.
+     */
+    public static IQ fileRequest(String nextHop, String destination, String origin,
+                                 String id, String via) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element req = fed.addElement("file-request");
+        req.addAttribute("destination", destination);
+        req.addAttribute("origin",      origin);
+        req.addAttribute("id",          id);
+        if (via != null && !via.isEmpty()) req.addAttribute("via", via);
+        return iq;
+    }
+
+    /**
+     * Transfer header sent by a content holder before its chunk stream: authoritative metadata and
+     * chunk geometry so the requester can assemble (and verify) the file offset-addressed.
+     */
+    public static IQ fileOffer(String nextHop, String destination, String origin, String id,
+                               String name, String mime, long size, String sha256,
+                               int chunkSize, int totalChunks, String via) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element offer = fed.addElement("file-offer");
+        offer.addAttribute("destination", destination);
+        offer.addAttribute("origin",      origin);
+        offer.addAttribute("id",          id);
+        offer.addAttribute("name",        name != null ? name : "file");
+        offer.addAttribute("mime",        mime != null ? mime : "application/octet-stream");
+        offer.addAttribute("size",        Long.toString(size));
+        if (sha256 != null && !sha256.isEmpty()) offer.addAttribute("sha256", sha256);
+        offer.addAttribute("chunkSize",   Integer.toString(chunkSize));
+        offer.addAttribute("totalChunks", Integer.toString(totalChunks));
+        if (via != null && !via.isEmpty()) offer.addAttribute("via", via);
+        return iq;
+    }
+
+    /** One base64 slice of a file transfer ({@code seq} of the offer's {@code totalChunks}). */
+    public static IQ fileChunk(String nextHop, String destination, String origin, String id,
+                               int seq, String dataB64, String via) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element chunk = fed.addElement("file-chunk");
+        chunk.addAttribute("destination", destination);
+        chunk.addAttribute("origin",      origin);
+        chunk.addAttribute("id",          id);
+        chunk.addAttribute("seq",         Integer.toString(seq));
+        if (via != null && !via.isEmpty()) chunk.addAttribute("via", via);
+        chunk.setText(dataB64);
+        return iq;
+    }
+
+    /** Negative reply to a file-request (e.g. {@code not-found}) so the requester stops waiting. */
+    public static IQ fileError(String nextHop, String destination, String origin, String id,
+                               String reason, String via) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element err = fed.addElement("file-error");
+        err.addAttribute("destination", destination);
+        err.addAttribute("origin",      origin);
+        err.addAttribute("id",          id);
+        if (reason != null && !reason.isEmpty()) err.addAttribute("reason", reason);
+        if (via != null && !via.isEmpty())       err.addAttribute("via", via);
+        return iq;
+    }
+
+    /**
+     * Re-emits an unchanged file-* element toward the next hop with an updated {@code via} trail —
+     * the transit-relay path.  The payload (chunk data included) is copied verbatim, so an
+     * intermediate organisation forwards bytes without ever materialising the file.
+     */
+    public static IQ fileRelay(String nextHop, Element fileElement, String newVia) {
+        IQ iq = base(nextHop);
+        Element fed = iq.setChildElement("federation", NS);
+        Element copy = fileElement.createCopy();
+        copy.addAttribute("via", newVia);
+        fed.add(copy);
+        return iq;
+    }
+
     /**
      * Delivers a packet directly to the recipient's ClientSession, bypassing the
      * packet router and all PacketInterceptors (including MUC's non-occupant check).

@@ -270,6 +270,11 @@
         .badge-tls    { background: var(--red-soft);     color: var(--red-ink);   margin-left: 4px; }
         .badge-tls-ok { background: var(--green-soft);   color: var(--green-ink); margin-left: 4px; }
         .badge-untrusted { background: var(--red-soft);  color: var(--red-ink);   margin-left: 8px; }
+        .badge-scan-clean    { background: var(--green-soft); color: var(--green-ink); }
+        .badge-scan-infected { background: var(--red-soft);   color: var(--red-ink); }
+        .badge-scan-error    { background: var(--amber-soft); color: var(--amber-ink); }
+        .badge-reject-policy   { background: var(--amber-soft); color: var(--amber-ink); }
+        .badge-reject-security { background: var(--red-soft);   color: var(--red-ink); }
 
         /* ══ Untrusted exposed-room editor ═══════════════════════════ */
         .exposed-editor-row td { background: var(--surface); }
@@ -340,6 +345,7 @@
         <button class="fed-tab"        data-tab="routing">Routing Table</button>
         <button class="fed-tab"        data-tab="rooms">Rooms <span id="rooms-tab-badge" class="badge badge-untrusted" style="display:none"></span></button>
         <button class="fed-tab"        data-tab="users">Users</button>
+        <button class="fed-tab"        data-tab="files">Files</button>
         <button class="fed-tab"        data-tab="settings">Settings</button>
     </div>
 
@@ -848,6 +854,219 @@
                 <p class="empty">Loading…</p>
             </div>
         </div>
+
+    </div>
+
+    <!-- ── Files panel ───────────────────────────────────────────────────────── -->
+    <div id="panel-files" class="fed-panel">
+
+        <div class="fed-subtabs">
+            <button class="fed-subtab active" data-subtab="files-sharing">File Sharing</button>
+            <button class="fed-subtab"        data-subtab="files-activity">Activity Log</button>
+        </div>
+
+        <!-- ·· File Sharing ·············································· -->
+        <div id="subpanel-files-sharing" class="fed-subpanel active">
+
+        <div class="section-box">
+            <div class="section-box-header">File sharing</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Federate file shares (HTTP File Upload)</div>
+                        <div class="setting-desc">
+                            When enabled (default), a file shared via HTTP File Upload is relayed over
+                            the federation to exactly the servers whose users receive the message
+                            (mapped-room peers, a 1:1 recipient's home — never broadcast), re-hosted
+                            there, and the link is rewritten so every client downloads from its own
+                            server. Local-only traffic never leaves; transit hops never store a copy.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="files-toggle" onchange="saveFilesEnabled()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="files-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Maximum file size</div>
+                        <div class="setting-desc">
+                            Largest file the relay will stage, transfer, or accept from a peer.
+                            Files above the cap keep their original (origin-server) link.
+                            Minimum: 1 MB. Default: 25 MB.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="files-maxsize-input" class="num-input"
+                               min="1" max="2048" step="1">
+                        <span class="setting-state">MB</span>
+                        <button class="btn btn-primary btn-small" onclick="saveFilesMaxSize()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">File retention</div>
+                        <div class="setting-desc">
+                            How long a relayed file stays in this server's
+                            <code>federation-files</code> store (and its rewritten link keeps working)
+                            before it is purged. Minimum: 1 day. Default: 90 days.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="files-retention-input" class="num-input"
+                               min="1" max="3650" step="1">
+                        <span class="setting-state">days</span>
+                        <button class="btn btn-primary btn-small" onclick="saveFilesRetention()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Storage directory</div>
+                        <div class="setting-desc">
+                            Full path of the folder where relayed file content is kept on disk.
+                            Default: <code>/var/lib/openfire/federation-files</code>.
+                            Saving moves the existing files to the new location.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="text" id="files-storagedir-input" class="num-input"
+                               style="width:240px;text-align:left"
+                               placeholder="/var/lib/openfire/federation-files">
+                        <button class="btn btn-primary btn-small" onclick="saveFilesStorageDir()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Allowed file extensions</div>
+                        <div class="setting-desc">
+                            Comma-separated list of extensions the relay will stage (egress, from a
+                            local upload) or accept (ingress, from a peer). Applies only at the
+                            origin and destination — a transit hop relays without ever decoding
+                            content, so this never affects traffic just passing through. Blank
+                            allows nothing; <code>*</code> allows everything.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="text" id="files-extensions-input" class="num-input"
+                               style="width:360px;text-align:left"
+                               placeholder="jpg,jpeg,png,gif,pdf,txt,...">
+                        <button class="btn btn-primary btn-small" onclick="saveFilesAllowedExtensions()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Virus scan received files (ClamAV)</div>
+                        <div class="setting-desc">
+                            When enabled, a file's content is scanned by a <code>clamd</code>
+                            daemon before it becomes servable to a local recipient (destination
+                            only — never a transit hop). A scan that cannot complete (clamd
+                            unreachable) is treated as a failure: the relay fails closed rather
+                            than serving unscanned content while this is on.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="files-av-toggle" onchange="saveFilesAvEnabled()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="files-av-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">ClamAV endpoint</div>
+                        <div class="setting-desc">
+                            Host and port of the clamd INSTREAM endpoint. Default
+                            <code>clamav:3310</code> matches the sidecar container added to this
+                            server's docker-compose.yml, reachable on the same bridge network.
+                        </div>
+                    </div>
+                    <div class="setting-ctl" style="flex-wrap:wrap;gap:6px">
+                        <input type="text" id="files-av-host-input" class="num-input"
+                               style="width:140px;text-align:left" placeholder="clamav">
+                        <input type="number" id="files-av-port-input" class="num-input"
+                               style="width:90px" min="1" max="65535" step="1" placeholder="3310">
+                        <button class="btn btn-primary btn-small" onclick="saveFilesAvEndpoint()">Save</button>
+                        <button class="btn btn-small" onclick="testFilesAvConnection()">Test connection</button>
+                        <span id="files-av-test-result" class="setting-state"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        </div><!-- /subpanel-files-sharing -->
+
+        <!-- ·· Activity Log ·············································· -->
+        <div id="subpanel-files-activity" class="fed-subpanel">
+
+        <div class="section-box">
+            <div class="section-box-header">
+                Recently scanned files (ClamAV)
+                <span class="count-chip" data-count-for="av-scan-tbody"></span>
+                <input class="filter-input" data-target="av-scan-tbody" placeholder="Filter files…">
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>File</th>
+                            <th>Size</th>
+                            <th>From</th>
+                            <th>Result</th>
+                            <th>Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody id="av-scan-tbody">
+                        <tr><td colspan="6" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <p class="panel-foot">
+            Only received files (ingress) are scanned — a transit hop never decodes content, and
+            this list is kept in memory only (the last 200 entries; cleared on plugin reload or
+            restart). Populates once virus scanning is turned on above.
+        </p>
+
+        <div class="section-box">
+            <div class="section-box-header">
+                Rejected files
+                <span class="count-chip" data-count-for="rejected-files-tbody"></span>
+                <input class="filter-input" data-target="rejected-files-tbody" placeholder="Filter files…">
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>File</th>
+                            <th>Size</th>
+                            <th>Peer</th>
+                            <th>Stage</th>
+                            <th>Reason</th>
+                            <th>Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rejected-files-tbody">
+                        <tr><td colspan="7" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <p class="panel-foot">
+            Every file this server has blocked, from any gate: the allowed-extensions list (egress,
+            before it's ever offered to a peer, or ingress as defense in depth), the content-vs-
+            extension sniff check, a SHA-256 mismatch, or the virus scanner. A file rejected here
+            never reaches the AV scan above (extension/content checks run first), so this is the
+            place to look when a peer reports a download that never arrives. In memory only (last
+            200 entries; cleared on plugin reload or restart).
+        </p>
+
+        </div><!-- /subpanel-files-activity -->
 
     </div>
 

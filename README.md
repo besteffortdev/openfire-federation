@@ -31,6 +31,17 @@ that have no direct link. End users do nothing special — they just join their 
   (ideal for an edge server fronting a partner network); the admin API is CSRF‑protected. See [Security](#security).
 - **Admin console UI** — manage peers, watch the routing table and S2S sessions, and federate rooms from a
   dedicated **Federation** tab.
+- **Transparent file sharing** — HTTP File Upload (XEP‑0363) shares work across the federation with zero
+  client changes: the file's content is relayed over the overlay to exactly the servers whose users can see
+  the message (mapped‑room peers, a 1:1 recipient's home — never a broadcast), re‑hosted there, and the link
+  is rewritten so every client downloads from its **own** server. Local‑only traffic never leaves; transit
+  hops forward chunks without storing a copy.
+- **File type filtering & content verification** — an admin‑configured extension allowlist gates what a
+  server will stage for outbound relay (origin) and accept from a peer (destination); received content is
+  additionally sniffed by magic number (Apache Tika) and rejected if it doesn't match its claimed extension
+  (e.g. an executable renamed to `.jpg`). Optional ClamAV integration scans received content before it's
+  servable to a local recipient. All of this applies only at the origin/destination — a transit hop relays
+  file chunks without ever decoding them, so it's completely unaffected. See [Security](#security).
 
 ---
 
@@ -108,6 +119,8 @@ own `conf/openfire.xml` — the same bootstrap file Openfire itself uses for set
 <jive>
   ...
   <federation>
+    <!-- optional: file-share federation settings (only declared attributes are applied) -->
+    <files enabled="true" maxSizeMB="25" retentionDays="90" storageDir="/var/lib/openfire/federation-files"/>
     <peers>
       <peer domain="2502-xmpp.example.net" untrusted="false"/>
       <peer domain="2506-xmpp.example.net" untrusted="true">
@@ -132,8 +145,9 @@ own `conf/openfire.xml` — the same bootstrap file Openfire itself uses for set
 The block is read **once on every plugin start**, and again on demand from the **Reload now** button in
 Settings → *Config file (openfire.xml)*. It is **safe‑upsert, never destructive**: it only adds peers/
 mappings that don't exist yet and updates the specific fields it declares (`untrusted`, `exposedServers`,
-`federated`, `autoAccept`, `visibleTo`); anything already in the database but absent from the file — a peer
-added by hand, a mapping not listed — is left alone. Re‑running it (restart or **Reload now**) is idempotent.
+`federated`, `autoAccept`, `visibleTo`, and the `<files>` attributes `enabled`/`maxSizeMB`/`retentionDays`/`storageDir`);
+anything already in the database but absent from the file — a peer added by hand, a mapping not listed —
+is left alone. Re‑running it (restart or **Reload now**) is idempotent.
 
 Notes:
 - `autoAccept="true"` is the "room‑sharing" toggle — the same one the Rooms tab labels *Sharing
@@ -159,6 +173,51 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
 | `plugin.federation.peerAllowlist` | `true` | Secure‑by‑default trust mode. Only configured peers may drive federation; every action from any other peer is rejected. Set `false` for open federation. See [Security](#security). |
+| `plugin.federation.files.enabled` | `true` | Federate HTTP File Upload shares: relay content to the servers that deliver the message and rewrite the link to their local `/federation-files` endpoint (HTTP‑bind port). Also in the *Files* tab. |
+| `plugin.federation.files.maxSizeMB` | `25` | Largest file the relay will stage, transfer, or accept. Also in the *Files* tab. |
+| `plugin.federation.files.chunkBytes` | `131072` | Raw bytes per `file-chunk` IQ (base64 adds ~33%; keep well under the S2S stanza‑size limit). |
+| `plugin.federation.files.chunkDelayMs` | `20` | Pause between chunk sends so a big file can't starve chat traffic on the link. |
+| `plugin.federation.files.retentionDays` | `90` | Days a relayed file is kept in the storage directory before purge. Also in the *Files* tab. |
+| `plugin.federation.files.storageDir` | `/var/lib/openfire/federation-files` | Full path of the directory where relayed file content is stored. Changing it live moves existing files. Also in the *Files* tab. |
+| `plugin.federation.files.publicUrlBase` | *(auto)* | Base URL for rewritten links to this server's download endpoint. Blank derives `https://<domain>:<http-bind-secure-port>/federation-files`; set explicitly behind a proxy. |
+| `plugin.federation.files.extraLocalHosts` | *(empty)* | Extra comma‑separated host names that also identify THIS server's upload URLs (when the upload plugin announces a different address). |
+| `plugin.federation.files.uploadPathMarker` | `/httpfileupload/` | Path fragment identifying an upload‑service URL; blank accepts any path on a local host. |
+| `plugin.federation.files.allowedExtensions` | *(curated list — see Settings)* | Comma‑separated extensions the relay will stage (egress) or accept (ingress). Blank allows nothing; `*` allows everything. Also in the *Files* tab. |
+| `plugin.federation.files.avEnabled` | `false` | Scan received file content with ClamAV before it's servable to a local recipient. Requires a reachable `clamd` (see below). A scan that can't complete is treated as a failure — fails closed. Also in the *Files* tab. |
+| `plugin.federation.files.avHost` | `clamav` | Hostname of the clamd INSTREAM endpoint. Default matches the sidecar service name in the [docker-compose example](#optional-clamav-sidecar-docker-compose) below. |
+| `plugin.federation.files.avPort` | `3310` | Port of the clamd INSTREAM endpoint. |
+| `plugin.federation.files.avTimeoutMs` | `30000` | Socket connect/read timeout (ms) for a single clamd scan. |
+
+### Optional: ClamAV sidecar (docker-compose)
+
+`avEnabled` needs a `clamd` daemon reachable from the Openfire container. If you run Openfire under Docker
+Compose, add the official ClamAV image as a sidecar on the same network — no ports need publishing to the
+host, only the Openfire container needs to reach it:
+
+```yaml
+services:
+  xmpp:
+    image: "openfire:5.1.0"
+    # ...existing xmpp service config...
+
+  clamav:
+    image: clamav/clamav:stable
+    container_name: xmpp-clamav
+    restart: unless-stopped
+    volumes:
+      - ./clamav-db:/var/lib/clamav   # persists signature definitions across restarts
+```
+
+Scanning itself is fully offline: `clamd` scans against whatever signature database it already has on disk
+regardless of current connectivity. The sidecar's bundled `freshclam` only needs the network to *refresh*
+those definitions — bring the container up once while online to seed the initial database (a few hundred MB
+of signatures), after that it keeps working with no network access at all. Use the *Files* tab →
+*Test connection* to confirm the plugin can reach it before turning `avEnabled` on.
+
+the *Files* tab also lists *Recently scanned files (ClamAV)* — the last 200 received files this
+server has scanned (time, name, size, sending peer, verdict, and AV detail), newest first. It's in-memory
+only (transit hops are never scanned or listed, and the list resets on plugin reload/restart) — a quick way
+to confirm scanning is actually happening and see what, if anything, has been caught.
 
 ### Note on `disableS2SIdle`
 
@@ -266,6 +325,17 @@ The federation trust boundary is enforced at several points:
 - **Identity.** Remote users are injected under their home‑qualified nick, and the plugin drops any forwarded
   stanza claiming to originate from a **local** user (anti‑spoofing). As with any federation, peers are trusted
   to represent **their own** users honestly — a compromised peer can still misrepresent users of domains it relays.
+- **File type filtering & scanning.** `plugin.federation.files.allowedExtensions` (the *Files* tab)
+  gates what a server will stage for outbound relay (egress, at the origin) and accept from a peer (ingress, at
+  the destination — defense in depth against a peer whose own filter is absent, bypassed, or an older plugin
+  version). At the destination, received content is additionally sniffed by magic number (no filename hint) and
+  rejected on a confident mismatch against the claimed extension — e.g. an executable renamed to `.jpg` is caught
+  even though `.exe` was never on the allowlist to begin with; a generic sniff result (plain text, unrecognized
+  binary) is inconclusive and not treated as a mismatch. Optional ClamAV scanning (`avEnabled`, off by default)
+  adds a real signature‑based scan of received content before it becomes servable; a scan that can't complete
+  (clamd unreachable) fails closed rather than serving unscanned content. None of this touches a transit hop —
+  `relayToward` forwards file‑\* elements without ever decoding their content, so a purely‑relaying server is
+  unaffected regardless of configuration.
 
 ---
 

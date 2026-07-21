@@ -378,6 +378,54 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"directoryPublish\":").append(FederationProperties.DIRECTORY_PUBLISH.getValue()).append(",");
         sb.append("\"bookmarkPush\":").append(FederationProperties.BOOKMARK_PUSH.getValue()).append(",");
         sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
+        sb.append("\"filesEnabled\":").append(FederationProperties.FILES_ENABLED.getValue()).append(",");
+        sb.append("\"filesMaxSizeMB\":").append(FederationProperties.FILES_MAX_MB.getValue()).append(",");
+        sb.append("\"filesRetentionDays\":").append(FederationProperties.FILES_RETENTION_DAYS.getValue()).append(",");
+        sb.append("\"filesStorageDir\":\"").append(esc(FederationProperties.FILES_STORAGE_DIR.getValue())).append("\",");
+        sb.append("\"filesAllowedExtensions\":\"").append(esc(FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue())).append("\",");
+        sb.append("\"filesAvEnabled\":").append(FederationProperties.FILES_AV_ENABLED.getValue()).append(",");
+        sb.append("\"filesAvHost\":\"").append(esc(FederationProperties.FILES_AV_HOST.getValue())).append("\",");
+        sb.append("\"filesAvPort\":").append(FederationProperties.FILES_AV_PORT.getValue()).append(",");
+        sb.append("\"filesAvTimeoutMs\":").append(FederationProperties.FILES_AV_TIMEOUT_MS.getValue()).append(",");
+
+        // ── AV scan log (files recently examined by ClamAV, newest first) ───────
+        sb.append("\"avScanLog\":[");
+        if (mgr.getFileRelay() != null) {
+            boolean fav = true;
+            for (var e : mgr.getFileRelay().recentAvScans()) {
+                if (!fav) sb.append(",");
+                fav = false;
+                sb.append("{")
+                  .append("\"when\":").append(e.when()).append(",")
+                  .append("\"name\":\"").append(esc(e.fileName())).append("\",")
+                  .append("\"size\":").append(e.sizeBytes()).append(",")
+                  .append("\"origin\":\"").append(esc(e.origin())).append("\",")
+                  .append("\"verdict\":\"").append(esc(e.verdict())).append("\",")
+                  .append("\"detail\":\"").append(esc(e.detail())).append("\"")
+                  .append("}");
+            }
+        }
+        sb.append("],");
+
+        // ── Rejected files (extension/content/hash/AV — egress + ingress, newest first) ──
+        sb.append("\"rejectedFiles\":[");
+        if (mgr.getFileRelay() != null) {
+            boolean frej = true;
+            for (var e : mgr.getFileRelay().recentRejections()) {
+                if (!frej) sb.append(",");
+                frej = false;
+                sb.append("{")
+                  .append("\"when\":").append(e.when()).append(",")
+                  .append("\"name\":\"").append(esc(e.fileName())).append("\",")
+                  .append("\"size\":").append(e.sizeBytes()).append(",")
+                  .append("\"origin\":\"").append(esc(e.origin())).append("\",")
+                  .append("\"stage\":\"").append(esc(e.stage())).append("\",")
+                  .append("\"reason\":\"").append(esc(e.reason())).append("\",")
+                  .append("\"detail\":\"").append(esc(e.detail())).append("\"")
+                  .append("}");
+            }
+        }
+        sb.append("],");
 
         // ── file-based config (openfire.xml <federation> block) ─────────────────
         FederationFileConfig.IngestResult fcResult = mgr.getFileConfig().lastResult();
@@ -390,6 +438,7 @@ public class FederationApiServlet extends HttpServlet {
           .append("\"peersUpdated\":").append(fcResult.peersUpdated()).append(",")
           .append("\"roomsUpdated\":").append(fcResult.roomsUpdated()).append(",")
           .append("\"mappingsRequested\":").append(fcResult.mappingsRequested()).append(",")
+          .append("\"settingsUpdated\":").append(fcResult.settingsUpdated()).append(",")
           .append("\"warnings\":[");
         boolean fw = true;
         for (String w : fcResult.warnings()) {
@@ -762,6 +811,7 @@ public class FederationApiServlet extends HttpServlet {
                   .append("\"peersUpdated\":").append(r.peersUpdated()).append(",")
                   .append("\"roomsUpdated\":").append(r.roomsUpdated()).append(",")
                   .append("\"mappingsRequested\":").append(r.mappingsRequested()).append(",")
+                  .append("\"settingsUpdated\":").append(r.settingsUpdated()).append(",")
                   .append("\"warnings\":[");
                 boolean fw = true;
                 for (String w : r.warnings()) {
@@ -835,6 +885,152 @@ public class FederationApiServlet extends HttpServlet {
                 // Push (or, when turning off, withdraw with an empty list) to peers immediately.
                 mgr.pushBookmarks();
                 out.print("{\"ok\":true,\"bookmarkPush\":" + FederationProperties.BOOKMARK_PUSH.getValue() + "}");
+                return;
+            }
+            case "set-files-enabled": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.FILES_ENABLED.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"filesEnabled\":" + FederationProperties.FILES_ENABLED.getValue() + "}");
+                return;
+            }
+            case "set-files-max-size": {
+                String mbParam = req.getParameter("mb");
+                if (mbParam == null || mbParam.isBlank()) {
+                    out.print("{\"error\":\"mb required\"}");
+                    return;
+                }
+                try {
+                    int mb = Integer.parseInt(mbParam.strip());
+                    if (mb < 1) {
+                        out.print("{\"error\":\"mb must be at least 1\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_MAX_MB.setValue(mb);
+                    out.print("{\"ok\":true,\"filesMaxSizeMB\":" + FederationProperties.FILES_MAX_MB.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"mb must be an integer\"}");
+                }
+                return;
+            }
+            case "set-files-retention": {
+                String daysParam = req.getParameter("days");
+                if (daysParam == null || daysParam.isBlank()) {
+                    out.print("{\"error\":\"days required\"}");
+                    return;
+                }
+                try {
+                    int days = Integer.parseInt(daysParam.strip());
+                    if (days < 1) {
+                        out.print("{\"error\":\"days must be at least 1\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_RETENTION_DAYS.setValue(days);
+                    out.print("{\"ok\":true,\"filesRetentionDays\":" + FederationProperties.FILES_RETENTION_DAYS.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"days must be an integer\"}");
+                }
+                return;
+            }
+            case "set-files-storage-dir": {
+                String dir = req.getParameter("dir");
+                if (dir == null || dir.isBlank()) {
+                    out.print("{\"error\":\"dir required\"}");
+                    return;
+                }
+                if (!java.nio.file.Path.of(dir.strip()).isAbsolute()) {
+                    out.print("{\"error\":\"dir must be a full path (e.g. /var/lib/openfire/federation-files)\"}");
+                    return;
+                }
+                String previous = FederationProperties.FILES_STORAGE_DIR.getValue();
+                FederationProperties.FILES_STORAGE_DIR.setValue(dir.strip());
+                // Move the store now; if the new directory is unusable, roll the property back
+                // so the UI keeps showing where files are actually served from.
+                String moveError = mgr.getFileRelay() != null ? mgr.getFileRelay().storageDirChanged() : null;
+                if (moveError != null) {
+                    FederationProperties.FILES_STORAGE_DIR.setValue(previous);
+                    out.print("{\"error\":\"" + esc(moveError) + "\"}");
+                    return;
+                }
+                out.print("{\"ok\":true,\"filesStorageDir\":\""
+                        + esc(FederationProperties.FILES_STORAGE_DIR.getValue()) + "\"}");
+                return;
+            }
+            case "set-files-allowed-extensions": {
+                String extensions = req.getParameter("extensions");
+                if (extensions == null) {
+                    out.print("{\"error\":\"extensions required\"}");
+                    return;
+                }
+                FederationProperties.FILES_ALLOWED_EXTENSIONS.setValue(extensions.strip());
+                out.print("{\"ok\":true,\"filesAllowedExtensions\":\""
+                        + esc(FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue()) + "\"}");
+                return;
+            }
+            case "set-files-av-enabled": {
+                String enabled = req.getParameter("enabled");
+                if (enabled == null) {
+                    out.print("{\"error\":\"enabled required\"}");
+                    return;
+                }
+                FederationProperties.FILES_AV_ENABLED.setValue(Boolean.parseBoolean(enabled.strip()));
+                out.print("{\"ok\":true,\"filesAvEnabled\":" + FederationProperties.FILES_AV_ENABLED.getValue() + "}");
+                return;
+            }
+            case "set-files-av-host": {
+                String host = req.getParameter("host");
+                if (host == null || host.isBlank()) {
+                    out.print("{\"error\":\"host required\"}");
+                    return;
+                }
+                FederationProperties.FILES_AV_HOST.setValue(host.strip());
+                out.print("{\"ok\":true,\"filesAvHost\":\"" + esc(FederationProperties.FILES_AV_HOST.getValue()) + "\"}");
+                return;
+            }
+            case "set-files-av-port": {
+                String portParam = req.getParameter("port");
+                if (portParam == null || portParam.isBlank()) {
+                    out.print("{\"error\":\"port required\"}");
+                    return;
+                }
+                try {
+                    int port = Integer.parseInt(portParam.strip());
+                    if (port < 1 || port > 65535) {
+                        out.print("{\"error\":\"port must be between 1 and 65535\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_AV_PORT.setValue(port);
+                    out.print("{\"ok\":true,\"filesAvPort\":" + FederationProperties.FILES_AV_PORT.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"port must be an integer\"}");
+                }
+                return;
+            }
+            case "set-files-av-timeout": {
+                String msParam = req.getParameter("ms");
+                if (msParam == null || msParam.isBlank()) {
+                    out.print("{\"error\":\"ms required\"}");
+                    return;
+                }
+                try {
+                    int ms = Integer.parseInt(msParam.strip());
+                    if (ms < 1000) {
+                        out.print("{\"error\":\"timeout must be at least 1000 ms\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_AV_TIMEOUT_MS.setValue(ms);
+                    out.print("{\"ok\":true,\"filesAvTimeoutMs\":" + FederationProperties.FILES_AV_TIMEOUT_MS.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"ms must be an integer\"}");
+                }
+                return;
+            }
+            case "test-av-connection": {
+                boolean reachable = mgr.getFileRelay() != null && mgr.getFileRelay().testAvConnection();
+                out.print("{\"ok\":true,\"reachable\":" + reachable + "}");
                 return;
             }
             case "push-bookmarks": {
