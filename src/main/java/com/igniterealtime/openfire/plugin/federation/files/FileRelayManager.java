@@ -143,6 +143,19 @@ public class FileRelayManager {
 
     private static final int REJECTION_LOG_MAX = 200;
 
+    /**
+     * file-error {@code reason} codes that mean "definitive policy/security rejection — the same
+     * bytes will fail the same way again." Anything else ({@code not-found}, {@code stage-failed})
+     * is treated as transient/unknown and keeps the existing retry-on-access behavior. Shared by
+     * every hop: since {@link FederationIQHandler#handleFileRelay} already relays a file-error
+     * straight through to its true destination (transit hops never touch it), one server marking a
+     * reason permanent here and every other server recognizing the same code is enough for the
+     * classification to propagate correctly across an arbitrary chain of hops with no wire changes.
+     */
+    private static final Set<String> PERMANENT_REJECT_REASONS = Set.of(
+            "policy-rejected", "extension-not-allowed", "content-mismatch", "hash-mismatch",
+            "av-infected", "av-error");
+
     private final FederationManager manager;
     private final FileRelayStore store = new FileRelayStore();
     private final ConcurrentHashMap<String, Transfer> transfers = new ConcurrentHashMap<>();
@@ -584,6 +597,12 @@ public class FileRelayManager {
             Log.debug("File relay: parked request for {} from {} (local copy {})", id, requester, t.state);
             return;
         }
+        if (t != null && t.rejected) {
+            // Already know this one is permanently rejected (deterministic — same bytes, same
+            // outcome) — answer immediately instead of re-staging only to reject it again.
+            sendError(requester, id, "policy-rejected");
+            return;
+        }
         if (t != null && t.url != null) {
             // A staging attempt of OUR OWN upload failed earlier (upload service momentarily down?)
             // but the content may well still exist — re-stage and serve the peer when it lands.
@@ -689,16 +708,26 @@ public class FileRelayManager {
         }
     }
 
-    /** The holder refused (usually not-found): stop waiting so the servlet can 404 quickly. */
+    /**
+     * The holder refused. For a definitive policy/security reason ({@link #PERMANENT_REJECT_REASONS})
+     * this marks our own copy permanently rejected (so {@link #lookup} stops retrying and the
+     * servlet serves a clear "failed upload check" response) and cascades the same reason to any of
+     * OUR OWN parked requesters — necessary so the rejection reaches every hop in a multi-level hub
+     * chain, not just whichever hop happens to be the true content origin. Anything else (usually
+     * not-found) just stops waiting so the servlet can 404 quickly, same as before.
+     */
     public void handleFileError(String fromDomain, Element el) {
         String id = el.attributeValue("id");
         if (id == null) return;
+        String reason = el.attributeValue("reason", "unspecified");
         Transfer t = transfers.get(id);
         if (t != null && t.state == State.REQUESTED) {
-            Log.info("File relay: holder refused {} ({})", id, el.attributeValue("reason", "unspecified"));
+            Log.info("File relay: holder refused {} ({})", id, reason);
             t.state = State.FAILED;
+            if (PERMANENT_REJECT_REASONS.contains(reason)) t.rejected = true;
             t.touch();
         }
+        if (PERMANENT_REJECT_REASONS.contains(reason)) failParked(id, reason);
     }
 
     /** Must be called with the transfer lock held. */
@@ -713,6 +742,7 @@ public class FileRelayManager {
                     recordRejection(t.name, t.size, t.origin, "ingress", "HASH_MISMATCH",
                             "expected " + t.sha256 + ", got " + actual);
                     failTransfer(t, true);
+                    failParked(t.id, "hash-mismatch");
                     return;
                 }
             }
@@ -724,6 +754,7 @@ public class FileRelayManager {
                 recordRejection(t.name, t.size, t.origin, "ingress", "EXTENSION_NOT_ALLOWED",
                         "not on allowed list: " + FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
                 failTransfer(t, true);
+                failParked(t.id, "extension-not-allowed");
                 return;
             }
             FileTypePolicy.ContentCheck contentCheck = FileTypePolicy.checkContent(store.partPath(t.id), t.name);
@@ -732,26 +763,31 @@ public class FileRelayManager {
                         contentCheck.detectedMime() == null ? "unreadable"
                                 : "sniffs as '" + contentCheck.detectedMime() + "'");
                 failTransfer(t, true);   // checkContent already logged the specific mismatch
+                failParked(t.id, "content-mismatch");
                 return;
             }
             if (FederationProperties.FILES_AV_ENABLED.getValue()) {
                 ClamAvClient.ScanResult scan = ClamAvClient.scan(store.partPath(t.id));
                 recordScan(t.name, t.size, t.origin, scan.verdict().name(), scan.detail());
+                String avWireReason = null;
                 switch (scan.verdict()) {
                     case INFECTED -> {
                         Log.warn("File relay: AV detected '{}' in received file {} — discarding",
                                  scan.detail(), t.name);
                         recordRejection(t.name, t.size, t.origin, "ingress", "AV_INFECTED", scan.detail());
+                        avWireReason = "av-infected";
                     }
                     case ERROR    -> {
                         Log.warn("File relay: AV scan unavailable for {} ({}) — "
                                + "discarding (fails closed)", t.name, scan.detail());
                         recordRejection(t.name, t.size, t.origin, "ingress", "AV_ERROR", scan.detail());
+                        avWireReason = "av-error";
                     }
                     case CLEAN    -> { }
                 }
                 if (scan.verdict() != ClamAvClient.Verdict.CLEAN) {
                     failTransfer(t, true);
+                    failParked(t.id, avWireReason);
                     return;
                 }
             }
