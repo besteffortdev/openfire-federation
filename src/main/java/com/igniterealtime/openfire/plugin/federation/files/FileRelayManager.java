@@ -11,8 +11,11 @@ import org.eclipse.jetty.ee8.servlet.ServletContextHandler;
 import org.eclipse.jetty.ee8.servlet.ServletHolder;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.http.HttpBindManager;
+import org.jivesoftware.openfire.muc.MUCOccupant;
+import org.jivesoftware.openfire.muc.MUCRoom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xmpp.packet.JID;
 import org.xmpp.packet.Message;
 
 import javax.net.ssl.HostnameVerifier;
@@ -37,6 +40,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.BitSet;
+import java.util.Collection;
 import java.util.Deque;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -156,11 +160,22 @@ public class FileRelayManager {
             "policy-rejected", "extension-not-allowed", "content-mismatch", "hash-mismatch",
             "av-infected", "av-error");
 
+    /**
+     * A local room or 1:1 recipient waiting on a file we're pulling for them — recorded purely so
+     * that, if the file turns out to be permanently rejected, we know who to tell. {@code room}
+     * true means {@code jid} is a room's bare JID (notice goes to every current occupant, mimicking
+     * {@code FederationIQHandler.injectMessage}'s occupant-bypass delivery); false means {@code jid}
+     * is a real local user (notice goes to them directly, XEP-0363-style, as a normal chat message).
+     */
+    private record LocalDest(String jid, boolean room) { }
+
     private final FederationManager manager;
     private final FileRelayStore store = new FileRelayStore();
     private final ConcurrentHashMap<String, Transfer> transfers = new ConcurrentHashMap<>();
     /** id → requester domains waiting for our copy to complete (hub store-and-forward). */
     private final ConcurrentHashMap<String, Set<String>> parkedRequests = new ConcurrentHashMap<>();
+    /** id → local rooms/users waiting on it, so a definitive rejection can notify them in-chat. */
+    private final ConcurrentHashMap<String, Set<LocalDest>> localDestinations = new ConcurrentHashMap<>();
     private final Deque<ScanLogEntry> scanLog = new ArrayDeque<>();
     private final Deque<RejectionEntry> rejectionLog = new ArrayDeque<>();
     private ScheduledExecutorService exec;
@@ -457,22 +472,25 @@ public class FileRelayManager {
      * stripped and the upload URL rewritten to this server's own download endpoint, registering the
      * expected content (which triggers the overlay pull).  Returns null when there is nothing to do —
      * callers keep using the original element (which fan-out/relay paths must, so the annotation
-     * survives toward other servers).
+     * survives toward other servers). {@code targetRoomJid} is the local room this share is being
+     * delivered into, so a definitive rejection can notify its occupants — see {@link LocalDest}.
      */
-    public Element rewriteForDelivery(Element msgEl, String... hints) {
+    public Element rewriteForDelivery(Element msgEl, String targetRoomJid, String... hints) {
         if (!enabled() || annotationOf(msgEl) == null) return null;
         Element copy = msgEl.createCopy();
-        rewriteElement(copy, hints);
+        rewriteElement(copy, new LocalDest(targetRoomJid, true), hints);
         return copy;
     }
 
-    /** In-place variant for delivery paths that own their message object. */
+    /** In-place variant for delivery paths that own their message object (a real local 1:1 recipient). */
     public void rewriteInPlace(Message msg, String... hints) {
         if (!enabled() || annotationOf(msg.getElement()) == null) return;
-        rewriteElement(msg.getElement(), hints);
+        JID to = msg.getTo();
+        LocalDest dest = to != null ? new LocalDest(to.toBareJID(), false) : null;
+        rewriteElement(msg.getElement(), dest, hints);
     }
 
-    private void rewriteElement(Element messageEl, String... hints) {
+    private void rewriteElement(Element messageEl, LocalDest dest, String... hints) {
         Element ann = annotationOf(messageEl);
         if (ann == null) return;
         String id     = ann.attributeValue("id");
@@ -483,7 +501,7 @@ public class FileRelayManager {
         if (id == null || !isHexId(id) || url == null || url.isBlank()) return;
         if (origin.equals(localDomain())) return;   // our own share echoed back — original URL is right
 
-        registerExpected(id, name, origin, hints);
+        registerExpected(id, name, origin, dest, hints);
 
         String newUrl = publicUrlFor(id, name);
         for (Element body : messageEl.elements("body")) {
@@ -503,7 +521,10 @@ public class FileRelayManager {
     }
 
     /** Records that {@code id} should exist here and starts (or retries) the overlay pull. */
-    private void registerExpected(String id, String name, String origin, String... hints) {
+    private void registerExpected(String id, String name, String origin, LocalDest dest, String... hints) {
+        if (dest != null) {
+            localDestinations.computeIfAbsent(id, k -> ConcurrentHashMap.newKeySet()).add(dest);
+        }
         if (store.has(id)) return;
         List<String> hintList = new ArrayList<>();
         for (String h : hints) {
@@ -727,7 +748,10 @@ public class FileRelayManager {
             if (PERMANENT_REJECT_REASONS.contains(reason)) t.rejected = true;
             t.touch();
         }
-        if (PERMANENT_REJECT_REASONS.contains(reason)) failParked(id, reason);
+        if (PERMANENT_REJECT_REASONS.contains(reason)) {
+            failParked(id, reason);
+            notifyLocalDestinationsOfRejection(id, t != null ? t.name : null);
+        }
     }
 
     /** Must be called with the transfer lock held. */
@@ -743,6 +767,7 @@ public class FileRelayManager {
                             "expected " + t.sha256 + ", got " + actual);
                     failTransfer(t, true);
                     failParked(t.id, "hash-mismatch");
+                    notifyLocalDestinationsOfRejection(t.id, t.name);
                     return;
                 }
             }
@@ -755,6 +780,7 @@ public class FileRelayManager {
                         "not on allowed list: " + FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
                 failTransfer(t, true);
                 failParked(t.id, "extension-not-allowed");
+                notifyLocalDestinationsOfRejection(t.id, t.name);
                 return;
             }
             FileTypePolicy.ContentCheck contentCheck = FileTypePolicy.checkContent(store.partPath(t.id), t.name);
@@ -764,6 +790,7 @@ public class FileRelayManager {
                                 : "sniffs as '" + contentCheck.detectedMime() + "'");
                 failTransfer(t, true);   // checkContent already logged the specific mismatch
                 failParked(t.id, "content-mismatch");
+                notifyLocalDestinationsOfRejection(t.id, t.name);
                 return;
             }
             if (FederationProperties.FILES_AV_ENABLED.getValue()) {
@@ -788,6 +815,7 @@ public class FileRelayManager {
                 if (scan.verdict() != ClamAvClient.Verdict.CLEAN) {
                     failTransfer(t, true);
                     failParked(t.id, avWireReason);
+                    notifyLocalDestinationsOfRejection(t.id, t.name);
                     return;
                 }
             }
@@ -904,6 +932,62 @@ public class FileRelayManager {
         if (waiting != null) {
             for (String requester : waiting) sendError(requester, id, reason);
         }
+    }
+
+    /**
+     * Tells every local room/user that was waiting on {@code id} that it was permanently rejected —
+     * "destination side" only, by design: the sender's own server (egress rejection) is never
+     * notified here, only wherever a local recipient was actually going to receive the file. A no-op
+     * when nothing local was ever registered for this id (e.g. a pure transit hop, or the origin's
+     * own copy).
+     */
+    private void notifyLocalDestinationsOfRejection(String id, String fileName) {
+        Set<LocalDest> dests = localDestinations.remove(id);
+        if (dests == null || dests.isEmpty()) return;
+        String text = "File failed upload check - see server logs"
+                + (fileName != null && !fileName.isBlank() ? " (" + fileName + ")" : "");
+        for (LocalDest dest : dests) {
+            try {
+                if (dest.room()) {
+                    notifyRoomOccupants(dest.jid(), text);
+                } else {
+                    notifyUser(dest.jid(), text);
+                }
+            } catch (Exception e) {
+                Log.warn("File relay: could not notify {} of rejected file {}: {}", dest.jid(), id, e.getMessage());
+            }
+        }
+    }
+
+    /** Delivers a system-style groupchat notice to every current occupant, mirroring injectMessage. */
+    private void notifyRoomOccupants(String roomJid, String text) {
+        MUCRoom room = manager.findLocalMucRoom(roomJid);
+        if (room == null) return;
+        JID target = new JID(roomJid);
+        JID from = new JID(target.getNode(), target.getDomain(), "System");
+        Collection<MUCOccupant> occupants = room.getOccupants();
+        for (MUCOccupant occupant : occupants) {
+            Message notice = new Message();
+            notice.setType(Message.Type.groupchat);
+            notice.setFrom(from);
+            notice.setTo(occupant.getUserAddress());
+            notice.setBody(text);
+            FederationStanzaFactory.markAsForwarded(notice);
+            FederationStanzaFactory.directDeliver(notice);
+        }
+        Log.info("File relay: notified {} occupant(s) of {} — rejected file", occupants.size(), roomJid);
+    }
+
+    /** Delivers a normal 1:1 chat notice to a local recipient. */
+    private void notifyUser(String userJid, String text) {
+        Message notice = new Message();
+        notice.setType(Message.Type.chat);
+        notice.setFrom(new JID(localDomain()));
+        notice.setTo(new JID(userJid));
+        notice.setBody(text);
+        FederationStanzaFactory.markAsForwarded(notice);
+        FederationStanzaFactory.directDeliver(notice);
+        Log.info("File relay: notified {} — rejected file", userJid);
     }
 
     // ── Servlet support ────────────────────────────────────────────────────────

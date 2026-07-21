@@ -1262,7 +1262,7 @@ public class FederationIQHandler extends IQHandler {
         // origin itself is not routable from here (filtered edges).
         Element deliverEl = msgEl;
         if (manager.getFileRelay() != null) {
-            Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, src, fromDomain);
+            Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, targetRoom, src, fromDomain);
             if (rewritten != null) deliverEl = rewritten;
         }
 
