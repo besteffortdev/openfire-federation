@@ -16,6 +16,10 @@ import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.pep.PEPService;
+import org.jivesoftware.openfire.pep.PEPServiceManager;
+import org.jivesoftware.openfire.pubsub.Node;
+import org.jivesoftware.openfire.pubsub.PublishedItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.IQ;
@@ -958,6 +962,14 @@ public class FederationIQHandler extends IQHandler {
     }
 
     // ── iq-forward (vCard / disco / caps / version / ping / PEP) ───────────────
+    //
+    // Both answerVCardLocally and answerPepItemsLocally exist because Openfire's own handlers for
+    // these two namespaces answer a GET by delivering the reply via the internal deliverer, which
+    // bypasses both the PacketInterceptor and any IQResultListener — so a reply to a multi-hop
+    // requester is handed to (non-existent) native S2S and silently lost. Every other IQ type
+    // (disco, caps, version, ping, Jingle signaling) either targets a specific local session directly
+    // (fresh outbound reply gets caught and relayed back symmetrically like any other stanza) or
+    // doesn't cross federation as a request/reply pair at all, so it needs no special handling here.
 
     /**
      * Relays or delivers a user-addressed IQ carried over the overlay.  Same relay shape as
@@ -996,9 +1008,10 @@ public class FederationIQHandler extends IQHandler {
                 // the internal deliverer — NOT through the PacketInterceptor — so a reply to a multi-hop
                 // requester is handed to (non-existent) native S2S and lost.  We can't rely on Openfire
                 // routing the reply back, so we build the reply ourselves and relay it over the overlay.
-                if (!answerVCardLocally(iq, fromDomain)) {
-                    // Not a vCard request: best-effort local delivery (Openfire may answer it, but its
-                    // reply does not yet relay back over multi-hop — see iq-forward reply limitation).
+                if (!answerVCardLocally(iq, fromDomain) && !answerPepItemsLocally(iq, fromDomain)) {
+                    // Not a vCard or PEP items request: best-effort local delivery (Openfire may answer
+                    // it, but its reply does not yet relay back over multi-hop — see iq-forward reply
+                    // limitation).
                     XMPPServer.getInstance().getPacketRouter().route(iq);
                     Log.info("iq-forward: delivered 1:1 {} {} -> {} (from {}) [reply relay best-effort]",
                              type, iq.getFrom(), iq.getTo(), fromDomain);
@@ -1072,6 +1085,74 @@ public class FederationIQHandler extends IQHandler {
                      contact, request.getFrom(), fromDomain);
         } else {
             Log.warn("iq-forward: built vCard for {} but no route back to {}", contact, request.getFrom());
+        }
+        return true;
+    }
+
+    /**
+     * If {@code request} is a PEP items GET (XEP-0060 pubsub {@code <items node='...'/>}, addressed to
+     * a local user's bare JID) reads the requested node straight out of that user's {@link PEPService}
+     * and relays the result back to the remote requester over the overlay — then returns true. Returns
+     * false for anything else so the caller can fall back to plain local delivery.
+     *
+     * Same rationale as {@link #answerVCardLocally}: Openfire's IQPEPHandler answers a PEP get by
+     * delivering the reply through the internal deliverer, which bypasses the interceptor, so the reply
+     * to a multi-hop requester is lost. We read the node's published item(s) directly instead.
+     *
+     * Deliberately generic across node names, not avatar-only — XEP-0084 avatar metadata/data is the
+     * motivating case (mirrors the {@code vcard-temp} avatar path above for clients that moved off
+     * presence-hash avatars onto PEP), but the same reply-loss bug applies to every PEP node a client
+     * might publish (e.g. OMEMO device-lists/bundles, XEP-0384), and PEP is a personal-*eventing*
+     * protocol — a node's contents are, by design, what its owner published for interested parties to
+     * read. No per-node access-model check is performed, same trust tier as the vCard fetch above.
+     */
+    private boolean answerPepItemsLocally(IQ request, String fromDomain) {
+        if (request.getType() != IQ.Type.get) return false;
+        Element pubsub = request.getChildElement();
+        if (pubsub == null || !"pubsub".equals(pubsub.getName())
+                || !"http://jabber.org/protocol/pubsub".equals(pubsub.getNamespaceURI())) {
+            return false;
+        }
+        Element itemsEl = pubsub.element("items");
+        String node = itemsEl == null ? null : itemsEl.attributeValue("node");
+        if (node == null) return false;
+
+        JID contact = request.getTo();
+        if (contact == null || contact.getNode() == null) return false;
+
+        IQ result = IQ.createResultIQ(request);
+        Element resultItems = result.setChildElement("pubsub", "http://jabber.org/protocol/pubsub")
+                                     .addElement("items");
+        resultItems.addAttribute("node", node);
+
+        try {
+            PEPServiceManager pepServiceManager = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();
+            PEPService pepService = pepServiceManager.getPEPService(contact.asBareJID(), false);
+            Node pepNode = pepService == null ? null : pepService.getNodes().stream()
+                    .filter(n -> node.equals(n.getUniqueIdentifier().getNodeId()))
+                    .findFirst().orElse(null);
+            if (pepNode != null) {
+                Element itemFilter = itemsEl.element("item");
+                String wantedId = itemFilter == null ? null : itemFilter.attributeValue("id");
+                PublishedItem item = wantedId != null ? pepNode.getPublishedItem(wantedId)
+                                                        : pepNode.getLastPublishedItem();
+                if (item != null) {
+                    Element itemEl = resultItems.addElement("item");
+                    itemEl.addAttribute("id", item.getID());
+                    Element payload = item.getPayload();
+                    if (payload != null) itemEl.add(payload.createCopy());
+                }
+            }
+        } catch (Exception e) {
+            Log.warn("iq-forward: failed to read PEP node '{}' for {}: {}", node, contact, e.getMessage());
+        }
+
+        if (manager.forwardDirectIq(result)) {
+            Log.info("iq-forward: answered + relayed PEP node '{}' for {} -> {} (from {})",
+                     node, contact, request.getFrom(), fromDomain);
+        } else {
+            Log.warn("iq-forward: built PEP reply for {} node '{}' but no route back to {}",
+                      contact, node, request.getFrom());
         }
         return true;
     }
