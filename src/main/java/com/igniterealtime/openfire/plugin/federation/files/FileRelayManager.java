@@ -103,6 +103,9 @@ public class FileRelayManager {
         volatile List<String> hints = List.of();
         volatile long size = -1;
         volatile String sha256 = "";
+        /** True for a definitive policy/security rejection (extension, content-sniff, hash, AV) —
+         *  the same bytes would fail again, so {@link #lookup} must never auto-retry one of these. */
+        volatile boolean rejected = false;
         volatile int chunkSize;
         volatile int totalChunks;
         BitSet received;                  // guarded by synchronized(this)
@@ -375,6 +378,7 @@ public class FileRelayManager {
             recordRejection(t.name, 0, t.origin, "egress", "EXTENSION_NOT_ALLOWED",
                     "not on allowed list: " + FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
             t.state = State.FAILED;
+            t.rejected = true;
             t.touch();
             failParked(t.id, "policy-rejected");
             return;
@@ -708,7 +712,7 @@ public class FileRelayManager {
                              t.id, t.sha256, actual);
                     recordRejection(t.name, t.size, t.origin, "ingress", "HASH_MISMATCH",
                             "expected " + t.sha256 + ", got " + actual);
-                    failTransfer(t);
+                    failTransfer(t, true);
                     return;
                 }
             }
@@ -719,7 +723,7 @@ public class FileRelayManager {
                        + "allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
                 recordRejection(t.name, t.size, t.origin, "ingress", "EXTENSION_NOT_ALLOWED",
                         "not on allowed list: " + FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
-                failTransfer(t);
+                failTransfer(t, true);
                 return;
             }
             FileTypePolicy.ContentCheck contentCheck = FileTypePolicy.checkContent(store.partPath(t.id), t.name);
@@ -727,7 +731,7 @@ public class FileRelayManager {
                 recordRejection(t.name, t.size, t.origin, "ingress", "CONTENT_MISMATCH",
                         contentCheck.detectedMime() == null ? "unreadable"
                                 : "sniffs as '" + contentCheck.detectedMime() + "'");
-                failTransfer(t);   // checkContent already logged the specific mismatch
+                failTransfer(t, true);   // checkContent already logged the specific mismatch
                 return;
             }
             if (FederationProperties.FILES_AV_ENABLED.getValue()) {
@@ -747,7 +751,7 @@ public class FileRelayManager {
                     case CLEAN    -> { }
                 }
                 if (scan.verdict() != ClamAvClient.Verdict.CLEAN) {
-                    failTransfer(t);
+                    failTransfer(t, true);
                     return;
                 }
             }
@@ -764,9 +768,18 @@ public class FileRelayManager {
 
     /** Must be called with the transfer lock held (or before the transfer is shared). */
     private void failTransfer(Transfer t) {
+        failTransfer(t, false);
+    }
+
+    /**
+     * @param rejected true for a definitive policy/security rejection — {@link #lookup} will then
+     *                 serve a clear "failed upload check" response instead of silently retrying.
+     */
+    private void failTransfer(Transfer t, boolean rejected) {
         closeQuietly(t);
         store.deletePart(t.id);
         t.state = State.FAILED;
+        if (rejected) t.rejected = true;
         t.touch();
     }
 
@@ -859,16 +872,22 @@ public class FileRelayManager {
 
     // ── Servlet support ────────────────────────────────────────────────────────
 
-    public enum ServeState { OK, PENDING, NOT_FOUND }
+    public enum ServeState { OK, PENDING, REJECTED, NOT_FOUND }
     public record ServeInfo(ServeState state, FileRelayStore.StoredFile file, Path path) {}
 
-    /** Resolves an id for the download servlet; a failed pull is retried (throttled) on access. */
+    /**
+     * Resolves an id for the download servlet. A transient failed pull is retried (throttled) on
+     * access; a definitive policy/security rejection ({@link Transfer#rejected}) never is — the
+     * same bytes would only fail the same way again, so it's reported as {@link ServeState#REJECTED}
+     * instead of silently retried into another 503.
+     */
     public ServeInfo lookup(String id) {
         if (!isHexId(id)) return new ServeInfo(ServeState.NOT_FOUND, null, null);
         FileRelayStore.StoredFile sf = store.get(id);
         if (sf != null) return new ServeInfo(ServeState.OK, sf, store.contentPath(id));
         Transfer t = transfers.get(id);
         if (t == null) return new ServeInfo(ServeState.NOT_FOUND, null, null);
+        if (t.state == State.FAILED && t.rejected) return new ServeInfo(ServeState.REJECTED, null, null);
         if (t.state == State.FAILED
                 && System.currentTimeMillis() - t.lastRequestAt > REQUEST_RETRY_MS) {
             // A user clicked a link whose pull failed (origin was down, path was broken): give the

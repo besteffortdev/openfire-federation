@@ -16,8 +16,12 @@ import javax.servlet.http.HttpServletResponse;
  *
  * Responses: 200 with the content once the overlay pull completed; 503 + Retry-After while the
  * transfer is still in flight (clients/users simply retry — content usually lands within seconds);
- * 404 for ids this server was never told about.  Content is immutable (id = hash of the source
- * URL), so successful responses are cacheable forever.
+ * 403 with a fixed, generic explanation when the file was definitively rejected by a policy or
+ * security check (extension not allowed, content-sniff mismatch, hash mismatch, AV) — deliberately
+ * no detail beyond "see server logs" in this response, since the requester may be on a peer server
+ * we don't fully trust; the specific reason is for a local admin only (Files tab → Activity Log →
+ * Rejected files); 404 for ids this server was never told about. Content is immutable (id = hash
+ * of the source URL), so successful responses are cacheable forever.
  */
 public class FederationFileServlet extends HttpServlet {
 
@@ -77,6 +81,14 @@ public class FederationFileServlet extends HttpServlet {
                 resp.setContentType("text/plain");
                 if (withBody) {
                     resp.getWriter().write("File transfer in progress - retry shortly");
+                }
+            }
+            case REJECTED -> {
+                // Not sendError(): some containers reset headers/body there.
+                resp.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                resp.setContentType("text/plain");
+                if (withBody) {
+                    resp.getWriter().write("File failed upload check - see server logs");
                 }
             }
             default -> resp.sendError(HttpServletResponse.SC_NOT_FOUND);
