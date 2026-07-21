@@ -860,6 +860,14 @@
     <!-- ── Files panel ───────────────────────────────────────────────────────── -->
     <div id="panel-files" class="fed-panel">
 
+        <div class="fed-subtabs">
+            <button class="fed-subtab active" data-subtab="files-sharing">File Sharing</button>
+            <button class="fed-subtab"        data-subtab="files-activity">Activity Log</button>
+        </div>
+
+        <!-- ·· File Sharing ·············································· -->
+        <div id="subpanel-files-sharing" class="fed-subpanel active">
+
         <div class="section-box">
             <div class="section-box-header">File sharing</div>
             <div class="section-box-body">
@@ -989,6 +997,11 @@
             </div>
         </div>
 
+        </div><!-- /subpanel-files-sharing -->
+
+        <!-- ·· Activity Log ·············································· -->
+        <div id="subpanel-files-activity" class="fed-subpanel">
+
         <div class="section-box">
             <div class="section-box-header">
                 Recently scanned files (ClamAV)
@@ -1052,6 +1065,8 @@
             place to look when a peer reports a download that never arrives. In memory only (last
             200 entries; cleared on plugin reload or restart).
         </p>
+
+        </div><!-- /subpanel-files-activity -->
 
     </div>
 
