@@ -12,6 +12,7 @@ import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.auth.UnauthorizedException;
 import org.jivesoftware.openfire.handler.IQHandler;
 import org.jivesoftware.openfire.vcard.VCardManager;
+import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
@@ -1316,17 +1317,24 @@ public class FederationIQHandler extends IQHandler {
             copy.addAttribute("from", virtualFrom);
             copy.addAttribute("to",   room.getJID().toString());
             Message archived = new Message(copy);
+            JID sender = new JID(senderNick);
             // In-memory "replay recent history on join" buffer (classic XEP-0045 muc#history) — every
             // MUC-compliant client requests this automatically, no archiving plugin required. The room's
             // own HistoryStrategy self-governs whether/how much it actually keeps, same as it would for
             // a genuine local occupant's message, so this is unconditional.
             room.getRoomHistory().addMessage(archived);
-            // Persistent conversation log (admin console reporting today; also what a MAM/XEP-0313
-            // provider such as the Monitoring Service plugin reads from, if one is installed — covers
-            // an arbitrarily long gap, not just what fits in the in-memory buffer above).
+            // Persistent conversation log (admin console reporting), gated on the room's own logging toggle.
             if (room.isLogEnabled()) {
-                room.getMUCService().logConversation(room, archived, new JID(senderNick));
+                room.getMUCService().logConversation(room, archived, sender);
             }
+            // A MAM/XEP-0313 provider (e.g. Monitoring Service) builds its own archive off THIS event,
+            // not off the two calls above — its capture hook is a MUCEventListener, which Openfire core
+            // only fires from MUCRoom's own broadcast path. injectMessage delivers via directDeliver()
+            // specifically to bypass that path (avoids reprocessing/loops), so without this call a MAM
+            // provider never learns the message existed, even though muc#history and the conversation
+            // log above already have it. Confirmed against Monitoring Service 2.8.0's source: its
+            // GroupConversationInterceptor is exactly this listener, feeding MAM only from this event.
+            MUCEventDispatcher.messageReceived(room.getJID(), sender, senderNick, archived);
         } catch (Exception e) {
             Log.warn("injectMessage: could not archive message into {} history: {}", room.getJID(), e.getMessage());
         }
