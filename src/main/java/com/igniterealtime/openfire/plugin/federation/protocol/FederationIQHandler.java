@@ -59,15 +59,16 @@ public class FederationIQHandler extends IQHandler {
     /**
      * A groupchat delivery that {@link #injectMessage} couldn't place because its target room had
      * zero local occupants at that exact instant — buffered briefly so a client reconnecting from a
-     * momentary blip (network hiccup, app backgrounding) still gets it, instead of the message (and
-     * any file share riding with it, see {@code FileRelayManager.LocalDest}) being silently lost to
-     * a race between "message arrives" and "recipient reconnects". Flushed by {@link #flushPendingDeliveries}
-     * on the next real local occupant join for that room ({@code MUCEventListener.occupantJoined} —
-     * see {@code RoomCreationListener}); otherwise pruned lazily once {@link #PENDING_DELIVERY_TTL_MS}
+     * momentary blip (network hiccup, app backgrounding) still gets it live, instead of only being
+     * able to retrieve it later via a MAM query (see {@link #archiveToRoomHistory}, which already ran
+     * before this is queued — {@code deliverEl}/{@code virtualFrom} are the already-rewritten,
+     * already-archived form, ready to redeliver as-is). Flushed by {@link #flushPendingDeliveries} on
+     * the next real local occupant join for that room ({@code MUCEventListener.occupantJoined} — see
+     * {@code RoomCreationListener}); otherwise pruned lazily once {@link #PENDING_DELIVERY_TTL_MS}
      * elapses. Bounded per room ({@link #PENDING_DELIVERY_MAX_PER_ROOM}) so a room that just stays
      * empty can't grow this map without limit.
      */
-    private record PendingDelivery(Element msgEl, String fromDomain, String src, long queuedAt) { }
+    private record PendingDelivery(Element deliverEl, String virtualFrom, long queuedAt) { }
 
     private static final long PENDING_DELIVERY_TTL_MS = 60_000;
     private static final int  PENDING_DELIVERY_MAX_PER_ROOM = 20;
@@ -1261,11 +1262,6 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("injectMessage: room {} not found locally", targetRoom);
             return;
         }
-        Collection<MUCOccupant> occupants = room.getOccupants();
-        if (occupants.isEmpty()) {
-            bufferPendingDelivery(targetRoom, msgEl, fromDomain, src);
-            return;
-        }
 
         JID targetJID      = new JID(targetRoom);
         String senderNick  = virtualNick(msgEl.attributeValue("from"));
@@ -1282,7 +1278,9 @@ public class FederationIQHandler extends IQHandler {
         // OUR download endpoint (registering the overlay pull), while the untouched original
         // continues to fan-out so downstream servers can rewrite for themselves.  The mapped
         // entry server (src) and the relay neighbour are pull fallbacks when the annotating
-        // origin itself is not routable from here (filtered edges).
+        // origin itself is not routable from here (filtered edges).  Done up front, unconditionally
+        // on occupancy, so a share into a currently-empty room still starts staging/pulling right
+        // away instead of waiting for someone to reconnect.
         Element deliverEl = msgEl;
         if (manager.getFileRelay() != null) {
             Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, targetRoom, src, fromDomain);
@@ -1291,6 +1289,51 @@ public class FederationIQHandler extends IQHandler {
 
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;
 
+        // Feed the room's own history exactly once, regardless of who (if anyone) is here to see it
+        // live — see archiveToRoomHistory for the two mechanisms this covers (in-memory replay-on-
+        // join, always; persistent log for MAM/admin reporting, if the room has logging on). Together
+        // these handle an arbitrarily long gap, not just PendingDelivery's short reconnect-blip window.
+        archiveToRoomHistory(room, deliverEl, virtualFrom, senderNick);
+
+        Collection<MUCOccupant> occupants = room.getOccupants();
+        if (occupants.isEmpty()) {
+            bufferPendingDelivery(targetRoom, deliverEl, virtualFrom);
+            return;
+        }
+        deliverToOccupants(deliverEl, virtualFrom, occupants);
+        Log.debug("injectMessage: delivered to {} occupant(s) in {}", occupants.size(), targetRoom);
+    }
+
+    /**
+     * Writes {@code deliverEl} into the room's conversation log (backing both classic MUC history
+     * requests and MAM queries) independent of live delivery. {@code sender} is the real remote
+     * user's bare JID behind the virtual room nick — matches what a genuine local occupant's real
+     * JID would be for the same log entry.
+     */
+    private void archiveToRoomHistory(MUCRoom room, Element deliverEl, String virtualFrom, String senderNick) {
+        try {
+            Element copy = deliverEl.createCopy();
+            copy.addAttribute("from", virtualFrom);
+            copy.addAttribute("to",   room.getJID().toString());
+            Message archived = new Message(copy);
+            // In-memory "replay recent history on join" buffer (classic XEP-0045 muc#history) — every
+            // MUC-compliant client requests this automatically, no archiving plugin required. The room's
+            // own HistoryStrategy self-governs whether/how much it actually keeps, same as it would for
+            // a genuine local occupant's message, so this is unconditional.
+            room.getRoomHistory().addMessage(archived);
+            // Persistent conversation log (admin console reporting today; also what a MAM/XEP-0313
+            // provider such as the Monitoring Service plugin reads from, if one is installed — covers
+            // an arbitrarily long gap, not just what fits in the in-memory buffer above).
+            if (room.isLogEnabled()) {
+                room.getMUCService().logConversation(room, archived, new JID(senderNick));
+            }
+        } catch (Exception e) {
+            Log.warn("injectMessage: could not archive message into {} history: {}", room.getJID(), e.getMessage());
+        }
+    }
+
+    /** Delivers one already-rewritten, already-archived message to every given occupant. */
+    private void deliverToOccupants(Element deliverEl, String virtualFrom, Collection<MUCOccupant> occupants) {
         for (MUCOccupant occupant : occupants) {
             Element copy = deliverEl.createCopy();
             copy.addAttribute("from", virtualFrom);
@@ -1299,14 +1342,18 @@ public class FederationIQHandler extends IQHandler {
             FederationStanzaFactory.markAsForwarded(delivery);
             FederationStanzaFactory.directDeliver(delivery);
         }
-        Log.debug("injectMessage: delivered to {} occupant(s) in {}", occupants.size(), targetRoom);
     }
 
-    /** Queues a delivery that arrived to an empty room — see {@link PendingDelivery}. */
-    private void bufferPendingDelivery(String targetRoom, Element msgEl, String fromDomain, String src) {
+    /**
+     * Queues a delivery that arrived to an empty room — a fast path for a brief reconnect blip
+     * (flushed the instant a real occupant rejoins, see {@link #flushPendingDeliveries}); the
+     * durable, unbounded-gap path is {@link #archiveToRoomHistory}, already done by the time this
+     * is called. See {@link PendingDelivery}.
+     */
+    private void bufferPendingDelivery(String targetRoom, Element deliverEl, String virtualFrom) {
         Deque<PendingDelivery> q = pendingRoomDeliveries.computeIfAbsent(targetRoom, k -> new ConcurrentLinkedDeque<>());
         pruneStale(q);
-        q.addLast(new PendingDelivery(msgEl.createCopy(), fromDomain, src, System.currentTimeMillis()));
+        q.addLast(new PendingDelivery(deliverEl.createCopy(), virtualFrom, System.currentTimeMillis()));
         while (q.size() > PENDING_DELIVERY_MAX_PER_ROOM) q.pollFirst();
         Log.debug("injectMessage: room {} empty — buffered delivery ({} pending, {} ms TTL)",
                    targetRoom, q.size(), PENDING_DELIVERY_TTL_MS);
@@ -1324,16 +1371,21 @@ public class FederationIQHandler extends IQHandler {
     /**
      * Called (via {@code RoomCreationListener.occupantJoined}) whenever a real local occupant joins
      * any local MUC room — retries any deliveries that were buffered while {@code roomJid} was
-     * empty. A no-op for the overwhelmingly common case (no backlog for this room).
+     * empty. A no-op for the overwhelmingly common case (no backlog for this room). Delivery only
+     * (no re-archiving — {@link #archiveToRoomHistory} already ran when each entry was queued).
      */
     public void flushPendingDeliveries(String roomJid) {
         Deque<PendingDelivery> q = pendingRoomDeliveries.remove(roomJid);
         if (q == null || q.isEmpty()) return;
         pruneStale(q);
         if (q.isEmpty()) return;
+        MUCRoom room = findLocalRoom(roomJid);
+        if (room == null) return;
+        Collection<MUCOccupant> occupants = room.getOccupants();
+        if (occupants.isEmpty()) return;   // still empty — leave queued for the next join or TTL
         Log.info("injectMessage: {} gained an occupant — delivering {} buffered message(s)", roomJid, q.size());
         for (PendingDelivery pd : q) {
-            injectMessage(pd.msgEl(), roomJid, pd.fromDomain(), pd.src());
+            deliverToOccupants(pd.deliverEl(), pd.virtualFrom(), occupants);
         }
     }
 
