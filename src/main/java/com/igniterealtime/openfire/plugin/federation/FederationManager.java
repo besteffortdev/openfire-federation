@@ -2275,4 +2275,5 @@ public class FederationManager {
     public UserDirectory          getUserDirectory() { return userDirectory; }
     public BookmarkInjector       getBookmarkInjector() { return bookmarkInjector; }
     public com.igniterealtime.openfire.plugin.federation.files.FileRelayManager getFileRelay() { return fileRelay; }
+    public FederationIQHandler    getIQHandler()     { return iqHandler;      }
 }

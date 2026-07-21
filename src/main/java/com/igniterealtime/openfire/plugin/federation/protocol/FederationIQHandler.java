@@ -27,9 +27,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.stream.Collectors;
 
 /**
@@ -52,6 +55,23 @@ public class FederationIQHandler extends IQHandler {
 
     private final IQHandlerInfo   info;
     private final FederationManager manager;
+
+    /**
+     * A groupchat delivery that {@link #injectMessage} couldn't place because its target room had
+     * zero local occupants at that exact instant — buffered briefly so a client reconnecting from a
+     * momentary blip (network hiccup, app backgrounding) still gets it, instead of the message (and
+     * any file share riding with it, see {@code FileRelayManager.LocalDest}) being silently lost to
+     * a race between "message arrives" and "recipient reconnects". Flushed by {@link #flushPendingDeliveries}
+     * on the next real local occupant join for that room ({@code MUCEventListener.occupantJoined} —
+     * see {@code RoomCreationListener}); otherwise pruned lazily once {@link #PENDING_DELIVERY_TTL_MS}
+     * elapses. Bounded per room ({@link #PENDING_DELIVERY_MAX_PER_ROOM}) so a room that just stays
+     * empty can't grow this map without limit.
+     */
+    private record PendingDelivery(Element msgEl, String fromDomain, String src, long queuedAt) { }
+
+    private static final long PENDING_DELIVERY_TTL_MS = 60_000;
+    private static final int  PENDING_DELIVERY_MAX_PER_ROOM = 20;
+    private final ConcurrentHashMap<String, Deque<PendingDelivery>> pendingRoomDeliveries = new ConcurrentHashMap<>();
 
     public FederationIQHandler(FederationManager manager) {
         super("Federation IQ Handler");
@@ -1242,7 +1262,10 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
         Collection<MUCOccupant> occupants = room.getOccupants();
-        if (occupants.isEmpty()) return;
+        if (occupants.isEmpty()) {
+            bufferPendingDelivery(targetRoom, msgEl, fromDomain, src);
+            return;
+        }
 
         JID targetJID      = new JID(targetRoom);
         String senderNick  = virtualNick(msgEl.attributeValue("from"));
@@ -1277,6 +1300,41 @@ public class FederationIQHandler extends IQHandler {
             FederationStanzaFactory.directDeliver(delivery);
         }
         Log.debug("injectMessage: delivered to {} occupant(s) in {}", occupants.size(), targetRoom);
+    }
+
+    /** Queues a delivery that arrived to an empty room — see {@link PendingDelivery}. */
+    private void bufferPendingDelivery(String targetRoom, Element msgEl, String fromDomain, String src) {
+        Deque<PendingDelivery> q = pendingRoomDeliveries.computeIfAbsent(targetRoom, k -> new ConcurrentLinkedDeque<>());
+        pruneStale(q);
+        q.addLast(new PendingDelivery(msgEl.createCopy(), fromDomain, src, System.currentTimeMillis()));
+        while (q.size() > PENDING_DELIVERY_MAX_PER_ROOM) q.pollFirst();
+        Log.debug("injectMessage: room {} empty — buffered delivery ({} pending, {} ms TTL)",
+                   targetRoom, q.size(), PENDING_DELIVERY_TTL_MS);
+    }
+
+    private void pruneStale(Deque<PendingDelivery> q) {
+        long cutoff = System.currentTimeMillis() - PENDING_DELIVERY_TTL_MS;
+        while (true) {
+            PendingDelivery head = q.peekFirst();
+            if (head == null || head.queuedAt() >= cutoff) break;
+            q.pollFirst();
+        }
+    }
+
+    /**
+     * Called (via {@code RoomCreationListener.occupantJoined}) whenever a real local occupant joins
+     * any local MUC room — retries any deliveries that were buffered while {@code roomJid} was
+     * empty. A no-op for the overwhelmingly common case (no backlog for this room).
+     */
+    public void flushPendingDeliveries(String roomJid) {
+        Deque<PendingDelivery> q = pendingRoomDeliveries.remove(roomJid);
+        if (q == null || q.isEmpty()) return;
+        pruneStale(q);
+        if (q.isEmpty()) return;
+        Log.info("injectMessage: {} gained an occupant — delivering {} buffered message(s)", roomJid, q.size());
+        for (PendingDelivery pd : q) {
+            injectMessage(pd.msgEl(), roomJid, pd.fromDomain(), pd.src());
+        }
     }
 
     /**
