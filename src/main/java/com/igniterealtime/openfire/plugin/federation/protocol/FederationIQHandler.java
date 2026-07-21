@@ -1458,6 +1458,14 @@ public class FederationIQHandler extends IQHandler {
                 for (Element statusEl : presEl.elements("status")) {
                     delivery.getElement().addElement("status").setText(statusEl.getText());
                 }
+                // XEP-0153 avatar hash: without this, a client has no signal that the virtual
+                // occupant even has a vCard photo worth fetching, so it never issues a vCard get
+                // in the first place — answerVCardLocally never gets a chance to relay one back.
+                for (Element xEl : presEl.elements("x")) {
+                    if ("vcard-temp:x:update".equals(xEl.getNamespaceURI())) {
+                        delivery.getElement().add(xEl.createCopy());
+                    }
+                }
             }
 
             Element x    = delivery.getElement().addElement("x", "http://jabber.org/protocol/muc#user");
@@ -1556,12 +1564,18 @@ public class FederationIQHandler extends IQHandler {
             for (MUCOccupant occupant : occupants) {
                 Presence sync = new Presence();
                 sync.setFrom(occupant.getUserAddress());
-                // Copy show/status from occupant's last known presence
+                // Copy show/status/avatar-hash from occupant's last known presence (see injectPresence's
+                // vcard-temp:x:update copy for why the avatar hash matters).
                 Element curEl = occupant.getPresence().getElement();
                 Element showEl = curEl.element("show");
                 if (showEl != null) sync.getElement().addElement("show").setText(showEl.getText());
                 for (Element statusEl : curEl.elements("status")) {
                     sync.getElement().addElement("status").setText(statusEl.getText());
+                }
+                for (Element xEl : curEl.elements("x")) {
+                    if ("vcard-temp:x:update".equals(xEl.getNamespaceURI())) {
+                        sync.getElement().add(xEl.createCopy());
+                    }
                 }
                 FederationStanzaFactory.markAsForwarded(sync);
                 try {
