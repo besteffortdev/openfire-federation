@@ -56,6 +56,20 @@ final class FileTypePolicy {
     private static final Set<String> GENERIC_FALLBACK_MIMES =
             Set.of("application/octet-stream", "text/plain");
 
+    /**
+     * ISO-BMFF container family: {@code .m4a}/{@code .m4b}/{@code .m4p}/{@code .m4r} (audio),
+     * {@code .mp4}/{@code .m4v} (video), and {@code .mov} (QuickTime) are all boxes of the same
+     * underlying container format. Tika's magic-byte sniff picks a MIME type from the {@code ftyp}
+     * box's brand, which is not a reliable audio-vs-video signal in practice — real voice-memo
+     * recordings routinely sniff as {@code video/mp4} or {@code video/quicktime} despite carrying
+     * no video track. Treat any extension in this family as consistent with any detected MIME type
+     * in this family, rather than flagging genuine recordings as forged/renamed files.
+     */
+    private static final Set<String> ISO_BMFF_EXTENSIONS =
+            Set.of("mp4", "m4v", "m4a", "m4b", "m4p", "m4r", "mov");
+    private static final Set<String> ISO_BMFF_MIMES =
+            Set.of("video/mp4", "audio/mp4", "video/quicktime");
+
     private FileTypePolicy() {}
 
     /** Extension of {@code fileName}, lowercased and without the dot; "" when there isn't one. */
@@ -109,6 +123,9 @@ final class FileTypePolicy {
             return false;
         }
         if (detected == null || GENERIC_FALLBACK_MIMES.contains(detected)) {
+            return true;
+        }
+        if (ISO_BMFF_MIMES.contains(detected) && ISO_BMFF_EXTENSIONS.contains(ext)) {
             return true;
         }
         try {
