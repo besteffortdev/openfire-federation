@@ -110,6 +110,7 @@ function renderAll(data) {
     updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays, data.filesStorageDir,
         data.filesAllowedExtensions, data.filesAvEnabled, data.filesAvHost, data.filesAvPort);
     renderAvScanLog(data.avScanLog || []);
+    renderRejectedFiles(data.rejectedFiles || []);
     updateAllowlistToggle(data.peerAllowlist);
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
@@ -983,6 +984,48 @@ function renderAvScanLog(entries) {
             <td>${fmtBytes(e.size)}</td>
             <td>${escHtml(e.origin)}</td>
             <td><span class="badge ${badgeClass}">${label}</span></td>
+            <td>${escHtml(e.detail)}</td>
+        </tr>`;
+    }).join('');
+}
+
+const REJECTION_REASON_LABELS = {
+    EXTENSION_NOT_ALLOWED: 'extension not allowed',
+    CONTENT_MISMATCH: 'content mismatch',
+    HASH_MISMATCH: 'hash mismatch',
+    AV_INFECTED: 'AV: infected',
+    AV_ERROR: 'AV: scan error',
+};
+const REJECTION_REASON_BADGE = {
+    EXTENSION_NOT_ALLOWED: 'badge-reject-policy',
+    CONTENT_MISMATCH: 'badge-reject-security',
+    HASH_MISMATCH: 'badge-reject-security',
+    AV_INFECTED: 'badge-reject-security',
+    AV_ERROR: 'badge-reject-policy',
+};
+
+function renderRejectedFiles(entries) {
+    const tbody = document.getElementById('rejected-files-tbody');
+    if (!tbody) return;
+    if (entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No files rejected yet.</td></tr>';
+        return;
+    }
+    // Server already returns newest-first; keep that order.
+    tbody.innerHTML = entries.map(e => {
+        const reason = String(e.reason || '');
+        const reasonLabel = REJECTION_REASON_LABELS[reason] || reason.toLowerCase();
+        const reasonBadge = REJECTION_REASON_BADGE[reason] || 'badge-reject-policy';
+        const stageLabel = e.stage === 'egress' ? 'egress (outbound)' : 'ingress (inbound)';
+        const stageBadge = e.stage === 'egress' ? 'badge-out' : 'badge-in';
+        return `
+        <tr>
+            <td class="ts">${new Date(e.when).toLocaleString()}</td>
+            <td>${escHtml(e.name)}</td>
+            <td>${e.size > 0 ? fmtBytes(e.size) : '—'}</td>
+            <td>${escHtml(e.origin)}</td>
+            <td><span class="badge ${stageBadge}">${stageLabel}</span></td>
+            <td><span class="badge ${reasonBadge}">${escHtml(reasonLabel)}</span></td>
             <td>${escHtml(e.detail)}</td>
         </tr>`;
     }).join('');

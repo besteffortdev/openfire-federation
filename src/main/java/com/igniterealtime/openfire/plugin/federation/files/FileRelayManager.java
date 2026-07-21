@@ -125,12 +125,28 @@ public class FileRelayManager {
 
     private static final int SCAN_LOG_MAX = 200;
 
+    /**
+     * One rejected file for the admin UI's "Rejected files" table — newest first, in-memory only
+     * (reset on plugin reload/restart, same as {@link #scanLog}). Covers every way a file can be
+     * blocked: the extension allowlist (checked at both egress and ingress), the ingress content-
+     * sniff check, a SHA-256 mismatch, or a positive/failed AV scan. {@code stage} is
+     * {@code "egress"} (blocked here before ever being offered to a peer) or {@code "ingress"}
+     * (blocked on receipt from a peer); {@code reason} is a short machine code
+     * ({@code EXTENSION_NOT_ALLOWED}, {@code CONTENT_MISMATCH}, {@code HASH_MISMATCH},
+     * {@code AV_INFECTED}, {@code AV_ERROR}).
+     */
+    public record RejectionEntry(long when, String fileName, long sizeBytes, String origin,
+                                  String stage, String reason, String detail) { }
+
+    private static final int REJECTION_LOG_MAX = 200;
+
     private final FederationManager manager;
     private final FileRelayStore store = new FileRelayStore();
     private final ConcurrentHashMap<String, Transfer> transfers = new ConcurrentHashMap<>();
     /** id → requester domains waiting for our copy to complete (hub store-and-forward). */
     private final ConcurrentHashMap<String, Set<String>> parkedRequests = new ConcurrentHashMap<>();
     private final Deque<ScanLogEntry> scanLog = new ArrayDeque<>();
+    private final Deque<RejectionEntry> rejectionLog = new ArrayDeque<>();
     private ScheduledExecutorService exec;
     private ServletContextHandler servletContext;
     private volatile SSLSocketFactory trustAllFactory;
@@ -181,6 +197,18 @@ public class FileRelayManager {
     /** Most recent AV scan outcomes, newest first (admin UI). */
     public synchronized List<ScanLogEntry> recentAvScans() {
         return new ArrayList<>(scanLog);
+    }
+
+    private synchronized void recordRejection(String fileName, long sizeBytes, String origin,
+                                               String stage, String reason, String detail) {
+        rejectionLog.addFirst(new RejectionEntry(System.currentTimeMillis(), fileName, sizeBytes,
+                origin == null ? "" : origin, stage, reason, detail == null ? "" : detail));
+        if (rejectionLog.size() > REJECTION_LOG_MAX) rejectionLog.removeLast();
+    }
+
+    /** Most recently rejected files, newest first (admin UI). */
+    public synchronized List<RejectionEntry> recentRejections() {
+        return new ArrayList<>(rejectionLog);
     }
 
     public void stop() {
@@ -344,6 +372,8 @@ public class FileRelayManager {
         if (!FileTypePolicy.isExtensionAllowed(t.name)) {
             Log.warn("File relay: refusing to stage '{}' for outbound relay — extension not on "
                    + "the allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
+            recordRejection(t.name, 0, t.origin, "egress", "EXTENSION_NOT_ALLOWED",
+                    "not on allowed list: " + FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
             t.state = State.FAILED;
             t.touch();
             failParked(t.id, "policy-rejected");
@@ -676,6 +706,8 @@ public class FileRelayManager {
                 if (!t.sha256.equalsIgnoreCase(actual)) {
                     Log.warn("File relay: hash mismatch for {} — expected {}, got {}; discarding",
                              t.id, t.sha256, actual);
+                    recordRejection(t.name, t.size, t.origin, "ingress", "HASH_MISMATCH",
+                            "expected " + t.sha256 + ", got " + actual);
                     failTransfer(t);
                     return;
                 }
@@ -685,21 +717,33 @@ public class FileRelayManager {
             if (!FileTypePolicy.isExtensionAllowed(t.name)) {
                 Log.warn("File relay: rejecting received file '{}' — extension not on the "
                        + "allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
+                recordRejection(t.name, t.size, t.origin, "ingress", "EXTENSION_NOT_ALLOWED",
+                        "not on allowed list: " + FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
                 failTransfer(t);
                 return;
             }
-            if (!FileTypePolicy.matchesContent(store.partPath(t.id), t.name)) {
-                failTransfer(t);   // matchesContent already logged the specific mismatch
+            FileTypePolicy.ContentCheck contentCheck = FileTypePolicy.checkContent(store.partPath(t.id), t.name);
+            if (!contentCheck.ok()) {
+                recordRejection(t.name, t.size, t.origin, "ingress", "CONTENT_MISMATCH",
+                        contentCheck.detectedMime() == null ? "unreadable"
+                                : "sniffs as '" + contentCheck.detectedMime() + "'");
+                failTransfer(t);   // checkContent already logged the specific mismatch
                 return;
             }
             if (FederationProperties.FILES_AV_ENABLED.getValue()) {
                 ClamAvClient.ScanResult scan = ClamAvClient.scan(store.partPath(t.id));
                 recordScan(t.name, t.size, t.origin, scan.verdict().name(), scan.detail());
                 switch (scan.verdict()) {
-                    case INFECTED -> Log.warn("File relay: AV detected '{}' in received file {} — discarding",
-                                               scan.detail(), t.name);
-                    case ERROR    -> Log.warn("File relay: AV scan unavailable for {} ({}) — "
-                                             + "discarding (fails closed)", t.name, scan.detail());
+                    case INFECTED -> {
+                        Log.warn("File relay: AV detected '{}' in received file {} — discarding",
+                                 scan.detail(), t.name);
+                        recordRejection(t.name, t.size, t.origin, "ingress", "AV_INFECTED", scan.detail());
+                    }
+                    case ERROR    -> {
+                        Log.warn("File relay: AV scan unavailable for {} ({}) — "
+                               + "discarding (fails closed)", t.name, scan.detail());
+                        recordRejection(t.name, t.size, t.origin, "ingress", "AV_ERROR", scan.detail());
+                    }
                     case CLEAN    -> { }
                 }
                 if (scan.verdict() != ClamAvClient.Verdict.CLEAN) {

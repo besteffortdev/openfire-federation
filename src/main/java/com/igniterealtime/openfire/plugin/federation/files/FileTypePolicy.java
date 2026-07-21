@@ -25,7 +25,7 @@ import java.util.stream.Collectors;
  *       (egress: a file whose extension isn't on the list is never staged, so it never leaves
  *       this server) and again at the destination (ingress: defense in depth against a peer whose
  *       own egress filter is absent, bypassed, or an older plugin version).</li>
- *   <li><b>Content verification</b> ({@link #matchesContent}) — ingress only. Sniffs the received
+ *   <li><b>Content verification</b> ({@link #checkContent}) — ingress only. Sniffs the received
  *       bytes by magic number (Apache Tika, no filename hint) and rejects a confident, specific
  *       mismatch against the claimed extension (e.g. a Windows executable renamed to {@code .jpg}).
  *       Tika's generic fallback answers ({@code application/octet-stream}, {@code text/plain} —
@@ -104,43 +104,50 @@ final class FileTypePolicy {
     }
 
     /**
-     * Sniffs {@code file}'s actual bytes (magic number only — no filename hint) and checks the
-     * result is consistent with {@code claimedFileName}'s extension. Returns false only on a
-     * confident, specific mismatch or an unreadable file; an inconclusive (generic-fallback)
-     * detection returns true.
+     * Result of a content-vs-extension check. {@code detectedMime} is Tika's best guess — null when
+     * the file couldn't be read/sniffed, otherwise populated even when {@code ok} is true (generic
+     * fallback / inconclusive detections), so a caller can log it either way.
      */
-    static boolean matchesContent(Path file, String claimedFileName) {
+    record ContentCheck(boolean ok, String detectedMime) { }
+
+    /**
+     * Sniffs {@code file}'s actual bytes (magic number only — no filename hint) and checks the
+     * result is consistent with {@code claimedFileName}'s extension. {@code ok} is false only on a
+     * confident, specific mismatch or an unreadable file; an inconclusive (generic-fallback)
+     * detection is {@code ok}.
+     */
+    static ContentCheck checkContent(Path file, String claimedFileName) {
         String ext = extensionOf(claimedFileName);
         if (ext.isEmpty()) {
             Log.warn("File relay: '{}' has no extension to verify content against", claimedFileName);
-            return false;
+            return new ContentCheck(false, null);
         }
         String detected;
         try (InputStream in = Files.newInputStream(file)) {
             detected = TIKA.detect(in);
         } catch (IOException e) {
             Log.warn("File relay: content sniff failed for {}: {}", file, e.getMessage());
-            return false;
+            return new ContentCheck(false, null);
         }
         if (detected == null || GENERIC_FALLBACK_MIMES.contains(detected)) {
-            return true;
+            return new ContentCheck(true, detected);
         }
         if (ISO_BMFF_MIMES.contains(detected) && ISO_BMFF_EXTENSIONS.contains(ext)) {
-            return true;
+            return new ContentCheck(true, detected);
         }
         try {
             MimeType mt = MIME_TYPES.forName(detected);
             for (String candidateExt : mt.getExtensions()) {
                 String stripped = candidateExt.startsWith(".") ? candidateExt.substring(1) : candidateExt;
-                if (stripped.equalsIgnoreCase(ext)) return true;
+                if (stripped.equalsIgnoreCase(ext)) return new ContentCheck(true, detected);
             }
         } catch (MimeTypeException e) {
             // Detected type isn't itself in Tika's registry (rare) — no extension list to compare
             // against, so there's nothing to contradict the claim with.
-            return true;
+            return new ContentCheck(true, detected);
         }
         Log.warn("File relay: content mismatch for '{}' — claims .{} but sniffs as '{}'",
                  claimedFileName, ext, detected);
-        return false;
+        return new ContentCheck(false, detected);
     }
 }

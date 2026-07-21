@@ -407,6 +407,26 @@ public class FederationApiServlet extends HttpServlet {
         }
         sb.append("],");
 
+        // ── Rejected files (extension/content/hash/AV — egress + ingress, newest first) ──
+        sb.append("\"rejectedFiles\":[");
+        if (mgr.getFileRelay() != null) {
+            boolean frej = true;
+            for (var e : mgr.getFileRelay().recentRejections()) {
+                if (!frej) sb.append(",");
+                frej = false;
+                sb.append("{")
+                  .append("\"when\":").append(e.when()).append(",")
+                  .append("\"name\":\"").append(esc(e.fileName())).append("\",")
+                  .append("\"size\":").append(e.sizeBytes()).append(",")
+                  .append("\"origin\":\"").append(esc(e.origin())).append("\",")
+                  .append("\"stage\":\"").append(esc(e.stage())).append("\",")
+                  .append("\"reason\":\"").append(esc(e.reason())).append("\",")
+                  .append("\"detail\":\"").append(esc(e.detail())).append("\"")
+                  .append("}");
+            }
+        }
+        sb.append("],");
+
         // ── file-based config (openfire.xml <federation> block) ─────────────────
         FederationFileConfig.IngestResult fcResult = mgr.getFileConfig().lastResult();
         Long fcLoadedAt = mgr.getFileConfig().lastLoadedAtMillis();
