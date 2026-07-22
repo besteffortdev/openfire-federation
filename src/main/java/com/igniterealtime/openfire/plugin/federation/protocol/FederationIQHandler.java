@@ -1390,8 +1390,17 @@ public class FederationIQHandler extends IQHandler {
         // away instead of waiting for someone to reconnect.
         Element deliverEl = msgEl;
         if (manager.getFileRelay() != null) {
-            Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, targetRoom, src, fromDomain);
-            if (rewritten != null) deliverEl = rewritten;
+            if (!manager.getRoomManager().isFilesEnabled(targetRoom)
+                    && manager.getFileRelay().annotationOf(msgEl) != null) {
+                // This room has file federation off: don't pull the file — deliver a "sharing disabled"
+                // notice in its place, matching the egress counterpart in FederationPacketInterceptor.
+                Element noticeEl = msgEl.createCopy();
+                manager.getFileRelay().replaceWithDisabledNotice(noticeEl);
+                deliverEl = noticeEl;
+            } else {
+                Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, targetRoom, src, fromDomain);
+                if (rewritten != null) deliverEl = rewritten;
+            }
         }
 
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;

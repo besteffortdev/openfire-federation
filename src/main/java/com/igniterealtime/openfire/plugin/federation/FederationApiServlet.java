@@ -235,6 +235,7 @@ public class FederationApiServlet extends HttpServlet {
               .append("\"description\":\"").append(esc(str(room.get("description")))).append("\",")
               .append("\"federated\":").append(room.get("federated")).append(",")
               .append("\"autoAccept\":").append(room.get("autoAccept")).append(",")
+              .append("\"filesEnabled\":").append(room.get("filesEnabled")).append(",")
               .append("\"occupants\":").append(room.get("occupants")).append(",")
               .append("\"visibleTo\":[");
             @SuppressWarnings("unchecked")
@@ -657,6 +658,17 @@ public class FederationApiServlet extends HttpServlet {
                     return;
                 }
                 mgr.getRoomManager().setAutoAccept(jid.strip(), Boolean.parseBoolean(enable.strip()));
+                out.print("{\"ok\":true}");
+                return;
+            }
+            case "set-room-files": {
+                String jid    = req.getParameter("jid");
+                String enable = req.getParameter("filesEnabled");
+                if (jid == null || jid.isBlank() || enable == null) {
+                    out.print("{\"error\":\"jid and filesEnabled required\"}");
+                    return;
+                }
+                mgr.getRoomManager().setFilesEnabled(jid.strip(), Boolean.parseBoolean(enable.strip()));
                 out.print("{\"ok\":true}");
                 return;
             }

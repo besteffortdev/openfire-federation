@@ -1458,6 +1458,11 @@ function setRoomAutoAccept(jid, autoAccept) {
         .then(() => { flashSaved('Saved ✓'); refresh(); });
 }
 
+function setRoomFiles(jid, enabled) {
+    post({ action: 'set-room-files', jid, filesEnabled: enabled.toString() })
+        .then(() => { flashSaved('Saved ✓'); refresh(); });
+}
+
 // ── Mapping consent: inline rows + pending-requests panel ───────────────────────
 
 /** "12 ms · 3s ago" chip for the end-to-end mapping probe; explains itself when no pong yet. */
@@ -1579,6 +1584,11 @@ function renderRoomDetailRow(r) {
                         <input type="checkbox" ${r.autoAccept ? 'checked' : ''}
                                onchange="setRoomAutoAccept('${jid}', this.checked)">
                         <span>Auto-accept mapping requests</span>
+                    </label>
+                    <label class="exposed-room">
+                        <input type="checkbox" ${r.filesEnabled ? 'checked' : ''}
+                               onchange="setRoomFiles('${jid}', this.checked)">
+                        <span>Federate file sharing</span>
                     </label>
                 </div>
                 <div class="exposed-col">

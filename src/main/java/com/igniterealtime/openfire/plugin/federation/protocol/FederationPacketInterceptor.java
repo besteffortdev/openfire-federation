@@ -229,11 +229,25 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
         if (mappings.isEmpty()) return;
 
+        var relay = manager.getFileRelay();
+        boolean filesOn = manager.getRoomManager().isFilesEnabled(roomJid);
+
+        // Per-room file federation OFF and this is a file share: forward a "sharing disabled" notice to
+        // peers instead of the file. The local room keeps the real share untouched; only the copies that
+        // cross federation are replaced (see FileRelayManager.replaceWithDisabledNotice).
+        if (!filesOn && relay != null && relay.isLocalUploadShare(msg)) {
+            Message notice = new Message(msg.getElement().createCopy());
+            relay.replaceWithDisabledNotice(notice.getElement());
+            for (RoomMapping mapping : mappings) forwardToMapped(notice, mapping, null);
+            return;
+        }
+
         // A message carrying a URL on OUR upload service gets a fed-file annotation on the
         // forwarded copies (never the local original), and its content is staged for peers to
-        // pull — the transparent-file-share half of the mapping forwarders.
-        org.dom4j.Element fileAnn = manager.getFileRelay() != null
-                ? manager.getFileRelay().annotationForOutbound(msg) : null;
+        // pull — the transparent-file-share half of the mapping forwarders. Skipped when this room
+        // has file federation off (annotationForOutbound not called, so nothing is staged/relayed).
+        org.dom4j.Element fileAnn = (filesOn && relay != null)
+                ? relay.annotationForOutbound(msg) : null;
         for (RoomMapping mapping : mappings) {
             forwardToMapped(msg, mapping, fileAnn);
         }
