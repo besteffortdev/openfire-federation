@@ -384,6 +384,10 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (manager.forwardDirectPresence(pres)) {
             Log.info("Relayed 1:1 presence {} {} -> {} over overlay (multi-hop)",
                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), to);
+            // Openfire's own roster + PEP-auto-subscribe side effects never run for this packet since
+            // we reject it below before native processing reaches it — replicate them for the LOCAL
+            // sender ourselves (see syncLocalRosterOnSubscriptionRelay for why this is needed).
+            manager.syncLocalRosterOnSubscriptionRelay(pres);
             // We just approved a remote contact — record them as a subscriber (so later status
             // changes get forwarded) and push our user's current presence now, since Openfire's own
             // push to a new remote subscriber is routed past this interceptor.

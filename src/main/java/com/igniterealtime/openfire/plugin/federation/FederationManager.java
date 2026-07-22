@@ -10,6 +10,7 @@ import com.igniterealtime.openfire.plugin.federation.protocol.FederationPacketIn
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
 import org.jivesoftware.openfire.SessionManager;
 import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.handler.PresenceSubscribeHandler;
 import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCOccupant;
@@ -226,6 +227,79 @@ public class FederationManager {
 
     /** Answer a relayed presence probe for a local user by sending that user's presence to the prober. */
     public void answerPresenceProbe(JID prober, JID localUser) { pushUserPresenceTo(prober, localUser); }
+
+    /**
+     * Replicates, for the LOCAL sender only, the roster + listener side effects Openfire's own
+     * {@code PresenceSubscribeHandler} would apply when a subscribe/subscribed/unsubscribe/unsubscribed
+     * presence is sent — side effects that never happen natively here because
+     * {@link FederationPacketInterceptor} intercepts and rejects the packet (to suppress a native S2S
+     * attempt toward an overlay-only multi-hop domain) before Openfire's router ever processes it.
+     *
+     * Without this, the local user's own roster row for the remote contact never updates (stuck at
+     * sub=none / recv=pending even after approving a request), and every {@link PresenceEventListener}
+     * Openfire fires as a side effect of a native approval — including {@code IQPEPHandler}'s XEP-0163
+     * PEP auto-subscribe — never fires. That's why a federated contact's avatar-over-PEP push never
+     * reached anyone: nobody was ever actually registered as a subscriber to anyone's PEP nodes.
+     *
+     * Reuses Openfire's own state table ({@link PresenceSubscribeHandler#getStateChange}) rather than a
+     * hand-rolled one, so the transition rules stay bound to whatever Openfire itself does — but applies
+     * the result via the public Roster/RosterItem API directly instead of calling
+     * {@code PresenceSubscribeHandler.process()}/{@code manageSub()}, which would ALSO attempt (and fail)
+     * an actual delivery to the unreachable multi-hop domain. Mirrors {@code manageSub}'s own no-op
+     * cases: only {@code subscribe} auto-creates a missing roster item; approving/canceling/revoking a
+     * subscription for a contact that isn't on the roster at all is a no-op, same as native Openfire.
+     */
+    public void syncLocalRosterOnSubscriptionRelay(Presence pres) {
+        Presence.Type type = pres.getType();
+        if (type != Presence.Type.subscribe && type != Presence.Type.subscribed
+                && type != Presence.Type.unsubscribe && type != Presence.Type.unsubscribed) {
+            return;
+        }
+        JID sender = pres.getFrom();
+        JID target = pres.getTo();
+        if (sender == null || sender.getNode() == null || target == null) return;
+        if (!XMPPServer.getInstance().isLocal(sender)) return;
+
+        try {
+            Roster roster = XMPPServer.getInstance().getRosterManager().getRoster(sender.getNode());
+            if (roster == null) return;
+
+            RosterItem item;
+            if (roster.isRosterItem(target)) {
+                item = roster.getRosterItem(target);
+            } else if (type == Presence.Type.subscribe) {
+                item = roster.createRosterItem(target, false, true);
+            } else {
+                return;   // nothing to approve/cancel/revoke for a contact not on the roster
+            }
+
+            RosterItem.SubType prevSub = item.getSubStatus();
+            PresenceSubscribeHandler.Change change =
+                    PresenceSubscribeHandler.getStateChange(prevSub, type, true);
+            if (change == null) return;
+            if (change.getNewAsk() != null && change.getNewAsk() != item.getAskStatus()) {
+                item.setAskStatus(change.getNewAsk());
+            }
+            if (change.getNewSub() != null && change.getNewSub() != item.getSubStatus()) {
+                item.setSubStatus(change.getNewSub());
+            }
+            if (change.getNewRecv() != null && change.getNewRecv() != item.getRecvStatus()) {
+                item.setRecvStatus(change.getNewRecv());
+            }
+            roster.updateRosterItem(item);
+
+            if (type == Presence.Type.subscribed) {
+                PresenceEventDispatcher.subscribedToPresence(target, sender);
+            } else if (type == Presence.Type.unsubscribed) {
+                PresenceEventDispatcher.unsubscribedToPresence(sender, target);
+            }
+            Log.debug("Synced local roster for {} -> {} on relayed {} (sub now {})",
+                      sender, target, type, item.getSubStatus());
+        } catch (Exception e) {
+            Log.warn("Failed to sync local roster for {} -> {} on relayed {}: {}",
+                      sender, target, type, e.getMessage());
+        }
+    }
 
     /**
      * On a local user's login, probe their multi-hop roster contacts so we pull each contact's current
