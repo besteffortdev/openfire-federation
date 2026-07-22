@@ -287,6 +287,14 @@ public class FederationManager {
                 if (item == null) continue;
 
                 Message event = new Message();
+                // Headline, NOT a plain (no-type) message: a no-type message addressed to the
+                // subscriber's BARE JID is delivered by the destination server to only ONE resource
+                // (the highest-priority available session). When the contact has more than one client
+                // online (e.g. Conversations AND Spark on the same account), the event can land on a
+                // client that ignores PEP avatars, so the intended client never learns of it. Headline
+                // is fanned out to ALL available resources (and never stored offline), matching how a
+                // pubsub#event notification is meant to reach every interested resource.
+                event.setType(Message.Type.headline);
                 event.setFrom(localUser.asBareJID());
                 event.setTo(subscriber);
                 Element items = event.getElement()
