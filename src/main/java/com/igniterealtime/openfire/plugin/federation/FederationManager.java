@@ -16,6 +16,10 @@ import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.pep.PEPService;
+import org.jivesoftware.openfire.pep.PEPServiceManager;
+import org.jivesoftware.openfire.pubsub.Node;
+import org.jivesoftware.openfire.pubsub.PublishedItem;
 import org.jivesoftware.openfire.session.ClientSession;
 import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.openfire.session.IncomingServerSession;
@@ -227,6 +231,83 @@ public class FederationManager {
 
     /** Answer a relayed presence probe for a local user by sending that user's presence to the prober. */
     public void answerPresenceProbe(JID prober, JID localUser) { pushUserPresenceTo(prober, localUser); }
+
+    /**
+     * PEP nodes whose last-published item we proactively push to a newly-approved remote subscriber.
+     * These are the personal-eventing nodes a contact's client needs to render/interoperate:
+     * XEP-0084 avatar metadata (drives the avatar image fetch) and the OMEMO device list (XEP-0384,
+     * lets the contact start an encrypted session). Both are +notify PEP nodes a same-server client
+     * would receive automatically on subscription; over federation the push is unreliable (see
+     * {@link #pushLocalPepItemsTo}), so we send them ourselves.
+     */
+    private static final String[] PUSH_PEP_NODES = {
+        "urn:xmpp:avatar:metadata",
+        "eu.siacs.conversations.axolotl.devicelist"
+    };
+
+    /**
+     * Proactively pushes a local user's current PEP items (see {@link #PUSH_PEP_NODES}) to a remote
+     * subscriber that was just approved, as {@code <message><event xmlns='…#event'>} notifications
+     * relayed over the overlay — exactly the pubsub-event a same-server subscriber would receive.
+     *
+     * WHY this is needed even though 1.9.15 makes Openfire's own PEP auto-subscribe fire: on a relayed
+     * subscription approval, {@code IQPEPHandler.subscribedToPresence} creates the subscription and then
+     * calls {@code PEPService.sendLastPublishedItems(subscriber)} — but that push checks for the
+     * subscription synchronously while the subscription itself is created on an async executor, so it
+     * routinely finds none yet and returns without sending anything. Confirmed live: after a federated
+     * add, the subscription row appears in the DB but no avatar {@code pubsub#event} is ever routed to
+     * the remote contact, so the contact's client (which relies purely on the push — modern Conversations
+     * never actively fetches a contact's avatar) never learns the avatar exists. We therefore push the
+     * current items ourselves, deterministically. The remote client then fetches the avatar DATA node,
+     * which the origin answers via {@code answerPepItemsLocally} (1.9.14).
+     */
+    public void pushLocalPepItemsTo(JID subscriber, JID localUser) {
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
+        if (subscriber == null || subscriber.getNode() == null) return;
+        if (!isMultiHopPeer(subscriber.getDomain())) return;
+
+        PEPService pep;
+        try {
+            PEPServiceManager mgr = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();
+            pep = mgr.getPEPService(localUser.asBareJID(), false);
+        } catch (Exception e) {
+            Log.warn("pushLocalPepItemsTo: cannot resolve PEP service for {}: {}", localUser, e.getMessage());
+            return;
+        }
+        if (pep == null) return;   // user never published any PEP items — nothing to push
+
+        for (String nodeId : PUSH_PEP_NODES) {
+            try {
+                Node node = pep.getNodes().stream()
+                        .filter(n -> nodeId.equals(n.getUniqueIdentifier().getNodeId()))
+                        .findFirst().orElse(null);
+                if (node == null) continue;
+                PublishedItem item = node.getLastPublishedItem();
+                if (item == null) continue;
+
+                Message event = new Message();
+                event.setFrom(localUser.asBareJID());
+                event.setTo(subscriber);
+                Element items = event.getElement()
+                        .addElement("event", "http://jabber.org/protocol/pubsub#event")
+                        .addElement("items");
+                items.addAttribute("node", nodeId);
+                Element itemEl = items.addElement("item");
+                if (item.getID() != null) itemEl.addAttribute("id", item.getID());
+                Element payload = item.getPayload();
+                if (payload != null) itemEl.add(payload.createCopy());
+
+                if (forwardDirectMessage(event)) {
+                    Log.info("pushed PEP node '{}' (item {}) of {} to new remote subscriber {}",
+                             nodeId, item.getID(), localUser, subscriber);
+                }
+            } catch (Exception e) {
+                Log.warn("pushLocalPepItemsTo: failed to push node '{}' of {} to {}: {}",
+                         nodeId, localUser, subscriber, e.getMessage());
+            }
+        }
+    }
 
     /**
      * Replicates, for the LOCAL sender only, the roster + listener side effects Openfire's own

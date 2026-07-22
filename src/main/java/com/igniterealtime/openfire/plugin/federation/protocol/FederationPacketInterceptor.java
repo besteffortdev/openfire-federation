@@ -394,6 +394,10 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             if (pres.getType() == Presence.Type.subscribed) {
                 manager.addRemoteSubscriber(pres.getFrom(), to);
                 manager.pushUserPresenceTo(to, pres.getFrom());
+                // Also push our user's PEP items (avatar metadata, OMEMO device list) to the new remote
+                // subscriber — Openfire's own on-subscribe push is unreliable over federation (async
+                // subscription race), and modern clients rely purely on that push. See pushLocalPepItemsTo.
+                manager.pushLocalPepItemsTo(to, pres.getFrom());
             } else if (pres.getType() == Presence.Type.unsubscribed) {
                 manager.removeRemoteSubscriber(pres.getFrom(), to);
             }
