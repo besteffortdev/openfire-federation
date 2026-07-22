@@ -100,8 +100,19 @@ public class FederationPacketInterceptor implements PacketInterceptor {
                                 boolean incoming, boolean processed)
             throws PacketRejectedException {
 
-        if (packet.getTo() == null) return;
         if (FederationStanzaFactory.isMarkedAsForwarded(packet)) return;
+
+        // A local user just published a PEP item (avatar metadata, nickname, OMEMO device list): re-push
+        // it to their federated subscribers so a CHANGE reaches an already-added remote contact — every
+        // resource of a multi-client account. Handled here, ahead of the null-`to` guard below: a PEP
+        // publish IQ is addressed to the user's own (implicit) PEP service, so it carries no `to`. The
+        // post-processing pass runs after the server accepted the publish (IQRouter fires interceptors
+        // twice: pre with processed=false, then post with processed=true).
+        if (processed && incoming && packet instanceof IQ pepIq) {
+            relayLocalPepPublish(pepIq);
+        }
+
+        if (packet.getTo() == null) return;
 
         if (processed) {
             // Post-processing only feeds the mapped-room forwarders. The relay/policy checks
@@ -172,6 +183,36 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // native S2S cannot work — reject it (and error-bounce a local message sender) rather
         // than let Openfire lose it silently.
         overlayLeakGuard(packet);
+    }
+
+    /**
+     * Detects a local user's PEP publish (XEP-0163) to one of the federated push nodes and hands it to
+     * {@link FederationManager#relayLocalPepPublish} to mirror over the overlay. Matches the client's
+     * {@code <iq type='set'><pubsub xmlns='…/pubsub'><publish node='…'><item>…}. A PEP publish is
+     * self-addressed (no {@code to}, or the user's own bare JID); the item element is read straight off
+     * the IQ, so there is no dependence on PEP-storage write timing.
+     */
+    private void relayLocalPepPublish(IQ iq) {
+        if (iq.getType() != IQ.Type.set) return;
+        JID from = iq.getFrom();
+        if (from == null || from.getNode() == null) return;
+        if (!XMPPServer.getInstance().isLocal(from)) return;
+        JID to = iq.getTo();
+        if (to != null && !to.asBareJID().equals(from.asBareJID())) return;   // self-addressed only
+
+        org.dom4j.Element pubsub = iq.getChildElement();
+        if (pubsub == null || !"http://jabber.org/protocol/pubsub".equals(pubsub.getNamespaceURI())) return;
+        org.dom4j.Element publish = pubsub.element("publish");
+        if (publish == null) return;
+        String node = publish.attributeValue("node");
+        if (node == null) return;
+        org.dom4j.Element item = publish.element("item");
+        if (item == null) return;
+        String itemId = item.attributeValue("id");
+        List<org.dom4j.Element> kids = item.elements();
+        org.dom4j.Element payload = kids.isEmpty() ? null : kids.get(0);
+
+        manager.relayLocalPepPublish(from.asBareJID(), node, itemId, payload);
     }
 
     // ── Message forwarding ────────────────────────────────────────────────────

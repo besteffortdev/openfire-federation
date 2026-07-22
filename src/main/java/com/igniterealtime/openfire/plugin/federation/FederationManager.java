@@ -168,10 +168,21 @@ public class FederationManager {
         if (user == null || user.getNode() == null) return;
         if (!XMPPServer.getInstance().isLocal(user)) return;
 
-        // Targets = anyone subscribed to this user's presence. We union two sources:
-        //  (1) subscribers we tracked from the `subscribed` stanzas we relayed — authoritative and
-        //      robust even when Openfire's cross-server roster state lands incomplete; and
-        //  (2) roster items marked FROM/BOTH (covers restart, where the tracked map is empty).
+        for (String bare : remoteSubscriberTargets(user)) {
+            JID contact = new JID(bare);
+            if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
+            forwardDirectPresence(directedPresence(user, contact, presence));
+        }
+    }
+
+    /**
+     * The federated presence subscribers of a local user, as bare JIDs. We union two sources:
+     *  (1) subscribers we tracked from the {@code subscribed} stanzas we relayed — authoritative and
+     *      robust even when Openfire's cross-server roster state lands incomplete; and
+     *  (2) roster items marked FROM/BOTH (covers a restart, where the tracked map is empty).
+     * Callers filter to multi-hop peers (direct peers use native S2S).
+     */
+    private Set<String> remoteSubscriberTargets(JID user) {
         Set<String> targets = new LinkedHashSet<>(
                 remoteSubscribers.getOrDefault(user.toBareJID(), Collections.emptySet()));
         try {
@@ -185,12 +196,7 @@ public class FederationManager {
                 }
             }
         } catch (Exception ignored) { }
-
-        for (String bare : targets) {
-            JID contact = new JID(bare);
-            if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
-            forwardDirectPresence(directedPresence(user, contact, presence));
-        }
+        return targets;
     }
 
     /** Subscribers (remote bare JIDs) of each local user's presence, tracked from relayed `subscribed`. */
@@ -233,17 +239,26 @@ public class FederationManager {
     public void answerPresenceProbe(JID prober, JID localUser) { pushUserPresenceTo(prober, localUser); }
 
     /**
-     * PEP nodes whose last-published item we proactively push to a newly-approved remote subscriber.
-     * These are the personal-eventing nodes a contact's client needs to render/interoperate:
-     * XEP-0084 avatar metadata (drives the avatar image fetch) and the OMEMO device list (XEP-0384,
-     * lets the contact start an encrypted session). Both are +notify PEP nodes a same-server client
-     * would receive automatically on subscription; over federation the push is unreliable (see
-     * {@link #pushLocalPepItemsTo}), so we send them ourselves.
+     * PEP nodes whose last-published item we proactively push to a newly-approved remote subscriber
+     * (see {@link #pushLocalPepItemsTo}) and re-push on every subsequent change (see
+     * {@link #relayLocalPepPublish}). These are the personal-eventing nodes a contact's client needs
+     * to render/interoperate: XEP-0084 avatar metadata (drives the avatar image fetch), XEP-0172 user
+     * nickname (the published display name), and the OMEMO device list (XEP-0384, lets the contact
+     * start an encrypted session). All are +notify PEP nodes a same-server client would receive
+     * automatically; over federation the native push/notify is unreliable, so we send them ourselves.
      */
     private static final String[] PUSH_PEP_NODES = {
         "urn:xmpp:avatar:metadata",
+        "http://jabber.org/protocol/nick",
         "eu.siacs.conversations.axolotl.devicelist"
     };
+
+    /** True if {@code nodeId} is one of the federated push nodes we mirror over the overlay. */
+    private static boolean isPushPepNode(String nodeId) {
+        if (nodeId == null) return false;
+        for (String n : PUSH_PEP_NODES) if (n.equals(nodeId)) return true;
+        return false;
+    }
 
     /**
      * Proactively pushes a local user's current PEP items (see {@link #PUSH_PEP_NODES}) to a remote
@@ -286,26 +301,8 @@ public class FederationManager {
                 PublishedItem item = node.getLastPublishedItem();
                 if (item == null) continue;
 
-                Message event = new Message();
-                // Headline, NOT a plain (no-type) message: a no-type message addressed to the
-                // subscriber's BARE JID is delivered by the destination server to only ONE resource
-                // (the highest-priority available session). When the contact has more than one client
-                // online (e.g. Conversations AND Spark on the same account), the event can land on a
-                // client that ignores PEP avatars, so the intended client never learns of it. Headline
-                // is fanned out to ALL available resources (and never stored offline), matching how a
-                // pubsub#event notification is meant to reach every interested resource.
-                event.setType(Message.Type.headline);
-                event.setFrom(localUser.asBareJID());
-                event.setTo(subscriber);
-                Element items = event.getElement()
-                        .addElement("event", "http://jabber.org/protocol/pubsub#event")
-                        .addElement("items");
-                items.addAttribute("node", nodeId);
-                Element itemEl = items.addElement("item");
-                if (item.getID() != null) itemEl.addAttribute("id", item.getID());
-                Element payload = item.getPayload();
-                if (payload != null) itemEl.add(payload.createCopy());
-
+                Message event = buildPepEventMessage(localUser.asBareJID(), subscriber,
+                                                     nodeId, item.getID(), item.getPayload());
                 if (forwardDirectMessage(event)) {
                     Log.info("pushed PEP node '{}' (item {}) of {} to new remote subscriber {}",
                              nodeId, item.getID(), localUser, subscriber);
@@ -313,6 +310,67 @@ public class FederationManager {
             } catch (Exception e) {
                 Log.warn("pushLocalPepItemsTo: failed to push node '{}' of {} to {}: {}",
                          nodeId, localUser, subscriber, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Builds a headline {@code pubsub#event} notification carrying one PEP item, addressed for overlay
+     * relay to {@code to}. Shared by the initial-subscription push ({@link #pushLocalPepItemsTo}) and
+     * the on-change re-push ({@link #relayLocalPepPublish}) so both emit an identical event.
+     *
+     * Headline, NOT a plain (no-type) message: a no-type message addressed to the subscriber's BARE JID
+     * is delivered by the destination server to only ONE resource (the highest-priority available
+     * session). When the contact has more than one client online (e.g. Conversations AND Spark on the
+     * same account), the event can land on a client that ignores it, so the intended client never learns
+     * of the change. Headline is fanned out to ALL available resources (and never stored offline),
+     * matching how a pubsub#event notification is meant to reach every interested resource.
+     */
+    private Message buildPepEventMessage(JID from, JID to, String nodeId, String itemId, Element payload) {
+        Message event = new Message();
+        event.setType(Message.Type.headline);
+        event.setFrom(from);
+        event.setTo(to);
+        Element items = event.getElement()
+                .addElement("event", "http://jabber.org/protocol/pubsub#event")
+                .addElement("items");
+        items.addAttribute("node", nodeId);
+        Element itemEl = items.addElement("item");
+        if (itemId != null) itemEl.addAttribute("id", itemId);
+        if (payload != null) itemEl.add(payload.createCopy());
+        return event;
+    }
+
+    /**
+     * A local user just published a PEP item (avatar metadata, nickname, OMEMO device list — see
+     * {@link #PUSH_PEP_NODES}). Re-push it to every federated subscriber as a headline
+     * {@code pubsub#event}, so a CHANGE propagates to an already-added remote contact — including every
+     * resource of a multi-client account. Called from {@link FederationPacketInterceptor} on the
+     * post-processing pass of the client's {@code <iq type='set'><pubsub><publish>} (i.e. after the
+     * server accepted the publish); {@code payload} is the published item's child element, taken
+     * straight off the IQ so there is no read-after-write race against PEP storage.
+     *
+     * WHY this is needed even though the contact is already subscribed: Openfire's native publish→notify
+     * ({@code PEPService.sendNotification}) is, for a remote subscriber, both (a) gated by the recipient's
+     * cached entity-caps {@code +notify} filter and a presence-probe check — neither reliable for a
+     * federated bare JID — and (b) delivered, when it does fire, as a no-type message to the subscriber's
+     * BARE JID, which the destination hands to only ONE resource. So a two-client contact routinely never
+     * sees an avatar/nickname change on the right client. We push it ourselves, deterministically and as
+     * a headline, exactly as {@link #pushLocalPepItemsTo} does for the initial subscription.
+     */
+    public void relayLocalPepPublish(JID publisher, String nodeId, String itemId, Element payload) {
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+        if (publisher == null || publisher.getNode() == null) return;
+        if (!XMPPServer.getInstance().isLocal(publisher)) return;
+        if (!isPushPepNode(nodeId)) return;
+
+        for (String bare : remoteSubscriberTargets(publisher)) {
+            JID subscriber = new JID(bare);
+            if (!isMultiHopPeer(subscriber.getDomain())) continue;      // direct peers: native S2S
+            Message event = buildPepEventMessage(publisher.asBareJID(), subscriber, nodeId, itemId, payload);
+            if (forwardDirectMessage(event)) {
+                Log.info("re-pushed PEP node '{}' (item {}) of {} to subscriber {} on publish",
+                         nodeId, itemId, publisher, subscriber);
             }
         }
     }
