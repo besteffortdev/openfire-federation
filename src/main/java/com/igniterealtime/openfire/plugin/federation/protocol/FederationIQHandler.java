@@ -870,6 +870,7 @@ public class FederationIQHandler extends IQHandler {
                 manager.getFileRelay().rewriteInPlace(msg, fromDomain);
             }
             FederationStanzaFactory.markAsForwarded(msg);
+            logRecipientCarbonState(msg.getTo());   // DEBUG diagnostic (multi-client carbon investigation)
             FederationStanzaFactory.directDeliver(msg);
             Log.info("direct-forward: delivered 1:1 {} -> {} (from {})", msg.getFrom(), msg.getTo(), fromDomain);
         } else {
@@ -887,6 +888,29 @@ public class FederationIQHandler extends IQHandler {
                 },
                 () -> Log.warn("direct-forward: no route to {}, dropping", finalDest)
             );
+        }
+    }
+
+    /**
+     * DEBUG diagnostic (multi-client message-carbons investigation): logs each online resource of a
+     * local recipient and whether it has XEP-0280 message carbons enabled, so we can see why a
+     * federated 1:1 message did or didn't fan out to every client. No-op unless federation DEBUG
+     * logging is on; purely observational.
+     */
+    private void logRecipientCarbonState(JID to) {
+        if (to == null || !Log.isDebugEnabled()) return;
+        if (to.getNode() == null || !XMPPServer.getInstance().isLocal(to)) return;
+        try {
+            java.util.Collection<org.jivesoftware.openfire.session.ClientSession> sessions =
+                    org.jivesoftware.openfire.SessionManager.getInstance().getSessions(to.getNode());
+            StringBuilder sb = new StringBuilder();
+            for (org.jivesoftware.openfire.session.ClientSession s : sessions) {
+                sb.append("\n    ").append(s.getAddress())
+                  .append("  carbons=").append(s.isMessageCarbonsEnabled());
+            }
+            Log.debug("direct-forward recipient {} has {} session(s):{}", to.toBareJID(), sessions.size(), sb);
+        } catch (Exception e) {
+            Log.debug("logRecipientCarbonState failed for {}: {}", to, e.getMessage());
         }
     }
 
