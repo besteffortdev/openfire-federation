@@ -100,8 +100,19 @@ public class FederationPacketInterceptor implements PacketInterceptor {
                                 boolean incoming, boolean processed)
             throws PacketRejectedException {
 
-        if (packet.getTo() == null) return;
         if (FederationStanzaFactory.isMarkedAsForwarded(packet)) return;
+
+        // A local user just published a PEP item (avatar metadata, nickname, OMEMO device list): re-push
+        // it to their federated subscribers so a CHANGE reaches an already-added remote contact — every
+        // resource of a multi-client account. Handled here, ahead of the null-`to` guard below: a PEP
+        // publish IQ is addressed to the user's own (implicit) PEP service, so it carries no `to`. The
+        // post-processing pass runs after the server accepted the publish (IQRouter fires interceptors
+        // twice: pre with processed=false, then post with processed=true).
+        if (processed && incoming && packet instanceof IQ pepIq) {
+            relayLocalPepPublish(pepIq);
+        }
+
+        if (packet.getTo() == null) return;
 
         if (processed) {
             // Post-processing only feeds the mapped-room forwarders. The relay/policy checks
@@ -174,6 +185,36 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         overlayLeakGuard(packet);
     }
 
+    /**
+     * Detects a local user's PEP publish (XEP-0163) to one of the federated push nodes and hands it to
+     * {@link FederationManager#relayLocalPepPublish} to mirror over the overlay. Matches the client's
+     * {@code <iq type='set'><pubsub xmlns='…/pubsub'><publish node='…'><item>…}. A PEP publish is
+     * self-addressed (no {@code to}, or the user's own bare JID); the item element is read straight off
+     * the IQ, so there is no dependence on PEP-storage write timing.
+     */
+    private void relayLocalPepPublish(IQ iq) {
+        if (iq.getType() != IQ.Type.set) return;
+        JID from = iq.getFrom();
+        if (from == null || from.getNode() == null) return;
+        if (!XMPPServer.getInstance().isLocal(from)) return;
+        JID to = iq.getTo();
+        if (to != null && !to.asBareJID().equals(from.asBareJID())) return;   // self-addressed only
+
+        org.dom4j.Element pubsub = iq.getChildElement();
+        if (pubsub == null || !"http://jabber.org/protocol/pubsub".equals(pubsub.getNamespaceURI())) return;
+        org.dom4j.Element publish = pubsub.element("publish");
+        if (publish == null) return;
+        String node = publish.attributeValue("node");
+        if (node == null) return;
+        org.dom4j.Element item = publish.element("item");
+        if (item == null) return;
+        String itemId = item.attributeValue("id");
+        List<org.dom4j.Element> kids = item.elements();
+        org.dom4j.Element payload = kids.isEmpty() ? null : kids.get(0);
+
+        manager.relayLocalPepPublish(from.asBareJID(), node, itemId, payload);
+    }
+
     // ── Message forwarding ────────────────────────────────────────────────────
 
     private void handleMessage(Message msg) {
@@ -188,11 +229,25 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
         if (mappings.isEmpty()) return;
 
+        var relay = manager.getFileRelay();
+        boolean filesOn = manager.getRoomManager().isFilesEnabled(roomJid);
+
+        // Per-room file federation OFF and this is a file share: forward a "sender's room can't share"
+        // notice to peers instead of the file. The local room keeps the real share untouched; only the
+        // copies that cross federation are replaced (see FileRelayManager.replaceWithSenderBlockedNotice).
+        if (!filesOn && relay != null && relay.isLocalUploadShare(msg)) {
+            Message notice = new Message(msg.getElement().createCopy());
+            relay.replaceWithSenderBlockedNotice(notice.getElement());
+            for (RoomMapping mapping : mappings) forwardToMapped(notice, mapping, null);
+            return;
+        }
+
         // A message carrying a URL on OUR upload service gets a fed-file annotation on the
         // forwarded copies (never the local original), and its content is staged for peers to
-        // pull — the transparent-file-share half of the mapping forwarders.
-        org.dom4j.Element fileAnn = manager.getFileRelay() != null
-                ? manager.getFileRelay().annotationForOutbound(msg) : null;
+        // pull — the transparent-file-share half of the mapping forwarders. Skipped when this room
+        // has file federation off (annotationForOutbound not called, so nothing is staged/relayed).
+        org.dom4j.Element fileAnn = (filesOn && relay != null)
+                ? relay.annotationForOutbound(msg) : null;
         for (RoomMapping mapping : mappings) {
             forwardToMapped(msg, mapping, fileAnn);
         }
@@ -384,12 +439,20 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (manager.forwardDirectPresence(pres)) {
             Log.info("Relayed 1:1 presence {} {} -> {} over overlay (multi-hop)",
                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), to);
+            // Openfire's own roster + PEP-auto-subscribe side effects never run for this packet since
+            // we reject it below before native processing reaches it — replicate them for the LOCAL
+            // sender ourselves (see syncLocalRosterOnSubscriptionRelay for why this is needed).
+            manager.syncLocalRosterOnSubscriptionRelay(pres);
             // We just approved a remote contact — record them as a subscriber (so later status
             // changes get forwarded) and push our user's current presence now, since Openfire's own
             // push to a new remote subscriber is routed past this interceptor.
             if (pres.getType() == Presence.Type.subscribed) {
                 manager.addRemoteSubscriber(pres.getFrom(), to);
                 manager.pushUserPresenceTo(to, pres.getFrom());
+                // Also push our user's PEP items (avatar metadata, OMEMO device list) to the new remote
+                // subscriber — Openfire's own on-subscribe push is unreliable over federation (async
+                // subscription race), and modern clients rely purely on that push. See pushLocalPepItemsTo.
+                manager.pushLocalPepItemsTo(to, pres.getFrom());
             } else if (pres.getType() == Presence.Type.unsubscribed) {
                 manager.removeRemoteSubscriber(pres.getFrom(), to);
             }

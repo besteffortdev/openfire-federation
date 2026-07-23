@@ -10,11 +10,16 @@ import com.igniterealtime.openfire.plugin.federation.protocol.FederationPacketIn
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
 import org.jivesoftware.openfire.SessionManager;
 import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.handler.PresenceSubscribeHandler;
 import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.pep.PEPService;
+import org.jivesoftware.openfire.pep.PEPServiceManager;
+import org.jivesoftware.openfire.pubsub.Node;
+import org.jivesoftware.openfire.pubsub.PublishedItem;
 import org.jivesoftware.openfire.session.ClientSession;
 import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.openfire.session.IncomingServerSession;
@@ -163,10 +168,21 @@ public class FederationManager {
         if (user == null || user.getNode() == null) return;
         if (!XMPPServer.getInstance().isLocal(user)) return;
 
-        // Targets = anyone subscribed to this user's presence. We union two sources:
-        //  (1) subscribers we tracked from the `subscribed` stanzas we relayed — authoritative and
-        //      robust even when Openfire's cross-server roster state lands incomplete; and
-        //  (2) roster items marked FROM/BOTH (covers restart, where the tracked map is empty).
+        for (String bare : remoteSubscriberTargets(user)) {
+            JID contact = new JID(bare);
+            if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
+            forwardDirectPresence(directedPresence(user, contact, presence));
+        }
+    }
+
+    /**
+     * The federated presence subscribers of a local user, as bare JIDs. We union two sources:
+     *  (1) subscribers we tracked from the {@code subscribed} stanzas we relayed — authoritative and
+     *      robust even when Openfire's cross-server roster state lands incomplete; and
+     *  (2) roster items marked FROM/BOTH (covers a restart, where the tracked map is empty).
+     * Callers filter to multi-hop peers (direct peers use native S2S).
+     */
+    private Set<String> remoteSubscriberTargets(JID user) {
         Set<String> targets = new LinkedHashSet<>(
                 remoteSubscribers.getOrDefault(user.toBareJID(), Collections.emptySet()));
         try {
@@ -180,12 +196,7 @@ public class FederationManager {
                 }
             }
         } catch (Exception ignored) { }
-
-        for (String bare : targets) {
-            JID contact = new JID(bare);
-            if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
-            forwardDirectPresence(directedPresence(user, contact, presence));
-        }
+        return targets;
     }
 
     /** Subscribers (remote bare JIDs) of each local user's presence, tracked from relayed `subscribed`. */
@@ -226,6 +237,216 @@ public class FederationManager {
 
     /** Answer a relayed presence probe for a local user by sending that user's presence to the prober. */
     public void answerPresenceProbe(JID prober, JID localUser) { pushUserPresenceTo(prober, localUser); }
+
+    /**
+     * PEP nodes whose last-published item we proactively push to a newly-approved remote subscriber
+     * (see {@link #pushLocalPepItemsTo}) and re-push on every subsequent change (see
+     * {@link #relayLocalPepPublish}). These are the personal-eventing nodes a contact's client needs
+     * to render/interoperate: XEP-0084 avatar metadata (drives the avatar image fetch), XEP-0172 user
+     * nickname (the published display name), and the OMEMO device list (XEP-0384, lets the contact
+     * start an encrypted session). All are +notify PEP nodes a same-server client would receive
+     * automatically; over federation the native push/notify is unreliable, so we send them ourselves.
+     */
+    private static final String[] PUSH_PEP_NODES = {
+        "urn:xmpp:avatar:metadata",
+        "http://jabber.org/protocol/nick",
+        "eu.siacs.conversations.axolotl.devicelist"
+    };
+
+    /** True if {@code nodeId} is one of the federated push nodes we mirror over the overlay. */
+    private static boolean isPushPepNode(String nodeId) {
+        if (nodeId == null) return false;
+        for (String n : PUSH_PEP_NODES) if (n.equals(nodeId)) return true;
+        return false;
+    }
+
+    /**
+     * Proactively pushes a local user's current PEP items (see {@link #PUSH_PEP_NODES}) to a remote
+     * subscriber that was just approved, as {@code <message><event xmlns='…#event'>} notifications
+     * relayed over the overlay — exactly the pubsub-event a same-server subscriber would receive.
+     *
+     * WHY this is needed even though 1.9.15 makes Openfire's own PEP auto-subscribe fire: on a relayed
+     * subscription approval, {@code IQPEPHandler.subscribedToPresence} creates the subscription and then
+     * calls {@code PEPService.sendLastPublishedItems(subscriber)} — but that push checks for the
+     * subscription synchronously while the subscription itself is created on an async executor, so it
+     * routinely finds none yet and returns without sending anything. Confirmed live: after a federated
+     * add, the subscription row appears in the DB but no avatar {@code pubsub#event} is ever routed to
+     * the remote contact, so the contact's client (which relies purely on the push — modern Conversations
+     * never actively fetches a contact's avatar) never learns the avatar exists. We therefore push the
+     * current items ourselves, deterministically. The remote client then fetches the avatar DATA node,
+     * which the origin answers via {@code answerPepItemsLocally} (1.9.14).
+     */
+    public void pushLocalPepItemsTo(JID subscriber, JID localUser) {
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
+        if (subscriber == null || subscriber.getNode() == null) return;
+        if (!isMultiHopPeer(subscriber.getDomain())) return;
+
+        PEPService pep;
+        try {
+            PEPServiceManager mgr = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();
+            pep = mgr.getPEPService(localUser.asBareJID(), false);
+        } catch (Exception e) {
+            Log.warn("pushLocalPepItemsTo: cannot resolve PEP service for {}: {}", localUser, e.getMessage());
+            return;
+        }
+        if (pep == null) return;   // user never published any PEP items — nothing to push
+
+        for (String nodeId : PUSH_PEP_NODES) {
+            try {
+                Node node = pep.getNodes().stream()
+                        .filter(n -> nodeId.equals(n.getUniqueIdentifier().getNodeId()))
+                        .findFirst().orElse(null);
+                if (node == null) continue;
+                PublishedItem item = node.getLastPublishedItem();
+                if (item == null) continue;
+
+                Message event = buildPepEventMessage(localUser.asBareJID(), subscriber,
+                                                     nodeId, item.getID(), item.getPayload());
+                if (forwardDirectMessage(event)) {
+                    Log.info("pushed PEP node '{}' (item {}) of {} to new remote subscriber {}",
+                             nodeId, item.getID(), localUser, subscriber);
+                }
+            } catch (Exception e) {
+                Log.warn("pushLocalPepItemsTo: failed to push node '{}' of {} to {}: {}",
+                         nodeId, localUser, subscriber, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Builds a headline {@code pubsub#event} notification carrying one PEP item, addressed for overlay
+     * relay to {@code to}. Shared by the initial-subscription push ({@link #pushLocalPepItemsTo}) and
+     * the on-change re-push ({@link #relayLocalPepPublish}) so both emit an identical event.
+     *
+     * Headline, NOT a plain (no-type) message: a no-type message addressed to the subscriber's BARE JID
+     * is delivered by the destination server to only ONE resource (the highest-priority available
+     * session). When the contact has more than one client online (e.g. Conversations AND Spark on the
+     * same account), the event can land on a client that ignores it, so the intended client never learns
+     * of the change. Headline is fanned out to ALL available resources (and never stored offline),
+     * matching how a pubsub#event notification is meant to reach every interested resource.
+     */
+    private Message buildPepEventMessage(JID from, JID to, String nodeId, String itemId, Element payload) {
+        Message event = new Message();
+        event.setType(Message.Type.headline);
+        event.setFrom(from);
+        event.setTo(to);
+        Element items = event.getElement()
+                .addElement("event", "http://jabber.org/protocol/pubsub#event")
+                .addElement("items");
+        items.addAttribute("node", nodeId);
+        Element itemEl = items.addElement("item");
+        if (itemId != null) itemEl.addAttribute("id", itemId);
+        if (payload != null) itemEl.add(payload.createCopy());
+        return event;
+    }
+
+    /**
+     * A local user just published a PEP item (avatar metadata, nickname, OMEMO device list — see
+     * {@link #PUSH_PEP_NODES}). Re-push it to every federated subscriber as a headline
+     * {@code pubsub#event}, so a CHANGE propagates to an already-added remote contact — including every
+     * resource of a multi-client account. Called from {@link FederationPacketInterceptor} on the
+     * post-processing pass of the client's {@code <iq type='set'><pubsub><publish>} (i.e. after the
+     * server accepted the publish); {@code payload} is the published item's child element, taken
+     * straight off the IQ so there is no read-after-write race against PEP storage.
+     *
+     * WHY this is needed even though the contact is already subscribed: Openfire's native publish→notify
+     * ({@code PEPService.sendNotification}) is, for a remote subscriber, both (a) gated by the recipient's
+     * cached entity-caps {@code +notify} filter and a presence-probe check — neither reliable for a
+     * federated bare JID — and (b) delivered, when it does fire, as a no-type message to the subscriber's
+     * BARE JID, which the destination hands to only ONE resource. So a two-client contact routinely never
+     * sees an avatar/nickname change on the right client. We push it ourselves, deterministically and as
+     * a headline, exactly as {@link #pushLocalPepItemsTo} does for the initial subscription.
+     */
+    public void relayLocalPepPublish(JID publisher, String nodeId, String itemId, Element payload) {
+        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
+        if (publisher == null || publisher.getNode() == null) return;
+        if (!XMPPServer.getInstance().isLocal(publisher)) return;
+        if (!isPushPepNode(nodeId)) return;
+
+        for (String bare : remoteSubscriberTargets(publisher)) {
+            JID subscriber = new JID(bare);
+            if (!isMultiHopPeer(subscriber.getDomain())) continue;      // direct peers: native S2S
+            Message event = buildPepEventMessage(publisher.asBareJID(), subscriber, nodeId, itemId, payload);
+            if (forwardDirectMessage(event)) {
+                Log.info("re-pushed PEP node '{}' (item {}) of {} to subscriber {} on publish",
+                         nodeId, itemId, publisher, subscriber);
+            }
+        }
+    }
+
+    /**
+     * Replicates, for the LOCAL sender only, the roster + listener side effects Openfire's own
+     * {@code PresenceSubscribeHandler} would apply when a subscribe/subscribed/unsubscribe/unsubscribed
+     * presence is sent — side effects that never happen natively here because
+     * {@link FederationPacketInterceptor} intercepts and rejects the packet (to suppress a native S2S
+     * attempt toward an overlay-only multi-hop domain) before Openfire's router ever processes it.
+     *
+     * Without this, the local user's own roster row for the remote contact never updates (stuck at
+     * sub=none / recv=pending even after approving a request), and every {@link PresenceEventListener}
+     * Openfire fires as a side effect of a native approval — including {@code IQPEPHandler}'s XEP-0163
+     * PEP auto-subscribe — never fires. That's why a federated contact's avatar-over-PEP push never
+     * reached anyone: nobody was ever actually registered as a subscriber to anyone's PEP nodes.
+     *
+     * Reuses Openfire's own state table ({@link PresenceSubscribeHandler#getStateChange}) rather than a
+     * hand-rolled one, so the transition rules stay bound to whatever Openfire itself does — but applies
+     * the result via the public Roster/RosterItem API directly instead of calling
+     * {@code PresenceSubscribeHandler.process()}/{@code manageSub()}, which would ALSO attempt (and fail)
+     * an actual delivery to the unreachable multi-hop domain. Mirrors {@code manageSub}'s own no-op
+     * cases: only {@code subscribe} auto-creates a missing roster item; approving/canceling/revoking a
+     * subscription for a contact that isn't on the roster at all is a no-op, same as native Openfire.
+     */
+    public void syncLocalRosterOnSubscriptionRelay(Presence pres) {
+        Presence.Type type = pres.getType();
+        if (type != Presence.Type.subscribe && type != Presence.Type.subscribed
+                && type != Presence.Type.unsubscribe && type != Presence.Type.unsubscribed) {
+            return;
+        }
+        JID sender = pres.getFrom();
+        JID target = pres.getTo();
+        if (sender == null || sender.getNode() == null || target == null) return;
+        if (!XMPPServer.getInstance().isLocal(sender)) return;
+
+        try {
+            Roster roster = XMPPServer.getInstance().getRosterManager().getRoster(sender.getNode());
+            if (roster == null) return;
+
+            RosterItem item;
+            if (roster.isRosterItem(target)) {
+                item = roster.getRosterItem(target);
+            } else if (type == Presence.Type.subscribe) {
+                item = roster.createRosterItem(target, false, true);
+            } else {
+                return;   // nothing to approve/cancel/revoke for a contact not on the roster
+            }
+
+            RosterItem.SubType prevSub = item.getSubStatus();
+            PresenceSubscribeHandler.Change change =
+                    PresenceSubscribeHandler.getStateChange(prevSub, type, true);
+            if (change == null) return;
+            if (change.getNewAsk() != null && change.getNewAsk() != item.getAskStatus()) {
+                item.setAskStatus(change.getNewAsk());
+            }
+            if (change.getNewSub() != null && change.getNewSub() != item.getSubStatus()) {
+                item.setSubStatus(change.getNewSub());
+            }
+            if (change.getNewRecv() != null && change.getNewRecv() != item.getRecvStatus()) {
+                item.setRecvStatus(change.getNewRecv());
+            }
+            roster.updateRosterItem(item);
+
+            if (type == Presence.Type.subscribed) {
+                PresenceEventDispatcher.subscribedToPresence(target, sender);
+            } else if (type == Presence.Type.unsubscribed) {
+                PresenceEventDispatcher.unsubscribedToPresence(sender, target);
+            }
+            Log.debug("Synced local roster for {} -> {} on relayed {} (sub now {})",
+                      sender, target, type, item.getSubStatus());
+        } catch (Exception e) {
+            Log.warn("Failed to sync local roster for {} -> {} on relayed {}: {}",
+                      sender, target, type, e.getMessage());
+        }
+    }
 
     /**
      * On a local user's login, probe their multi-hop roster contacts so we pull each contact's current
@@ -1608,13 +1829,32 @@ public class FederationManager {
             Presence copy = new Presence(pres.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.presenceForward(nextHop, destDomain, localDomain, copy));
-            Log.debug("presence-forward: {} {} -> {} via {} (dest {})",
-                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), nextHop, destDomain);
+            Log.debug("presence-forward: {} {} -> {} via {} (dest {}) avatarHash={}",
+                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), nextHop, destDomain,
+                      avatarHashOf(pres));
             return true;
         } catch (Exception e) {
             Log.warn("Failed to forward presence to {}: {}", destDomain, e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Diagnostic only (see [[architecture-protocol]] avatar-hash investigation): reports whether a
+     * presence being relayed actually carries XEP-0153's {@code vcard-temp:x:update} photo hash, and
+     * what it is. Distinguishes "no x:update element at all" (client didn't advertise one — e.g. a
+     * bare subscribe/subscribed presence, or one from a client that has nothing to advertise) from
+     * "x:update present but empty" (client is signaling no avatar) from an actual hash.
+     */
+    private String avatarHashOf(Presence pres) {
+        for (Element xEl : pres.getElement().elements("x")) {
+            if (!"vcard-temp:x:update".equals(xEl.getNamespaceURI())) continue;
+            Element photo = xEl.element("photo");
+            if (photo == null) return "x-present,no-photo-el";
+            String hash = photo.getTextTrim();
+            return hash.isEmpty() ? "x-present,empty-photo" : hash;
+        }
+        return "no-x-update-element";
     }
 
     /**
@@ -1833,11 +2073,12 @@ public class FederationManager {
         }
 
         roomManager.setAutoAccept(roomJid, rule.autoAccept());
+        roomManager.setFilesEnabled(roomJid, rule.filesEnabled());
 
-        Log.info("Applied room-default rule '{}' to {} (federated, visible={}, autoAccept={}, autoMap={})",
+        Log.info("Applied room-default rule '{}' to {} (federated, visible={}, autoAccept={}, autoMap={}, files={})",
                  rule.pattern(), roomJid,
                  vis.contains(RoomDefaultsManager.VISIBLE_ALL) ? "all peers" : vis,
-                 rule.autoAccept(), rule.autoMap());
+                 rule.autoAccept(), rule.autoMap(), rule.filesEnabled());
 
         if (rule.autoMap()) autoMapRoom(roomJid, node, service, vis);
     }

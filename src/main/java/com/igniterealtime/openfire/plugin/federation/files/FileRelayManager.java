@@ -325,6 +325,45 @@ public class FileRelayManager {
         return (ann != null && FederationStanzaFactory.NS.equals(ann.getNamespaceURI())) ? ann : null;
     }
 
+    /** Shown to a REMOTE peer's occupants when the SENDER's room has file federation off (egress side). */
+    public static final String NOTICE_SENDER_ROOM_BLOCKED = "🚫 This user's room can't share files.";
+    /** Shown to a room's OWN occupants when THIS room has file federation off and a peer sent a file (ingress). */
+    public static final String NOTICE_LOCAL_ROOM_BLOCKED = "🚫 File federation is disabled for this room.";
+
+    /** True when {@code msg} carries a share hosted on OUR upload service — egress-side file detection. */
+    public boolean isLocalUploadShare(Message msg) {
+        return extractLocalUploadUrl(msg) != null;
+    }
+
+    /**
+     * Egress: a local user shared a file into a room whose file federation is OFF. Rewrites the copy
+     * forwarded to peers into the {@link #NOTICE_SENDER_ROOM_BLOCKED} notice (the sender's room can't
+     * share). Operate on a COPY — never the live original the local room still shows.
+     */
+    public void replaceWithSenderBlockedNotice(Element messageEl) {
+        replaceFileWithNotice(messageEl, NOTICE_SENDER_ROOM_BLOCKED);
+    }
+
+    /**
+     * Ingress: a peer sent a file into a local room whose file federation is OFF. Rewrites the copy
+     * delivered to this room's occupants into the {@link #NOTICE_LOCAL_ROOM_BLOCKED} notice.
+     */
+    public void replaceWithLocalBlockedNotice(Element messageEl) {
+        replaceFileWithNotice(messageEl, NOTICE_LOCAL_ROOM_BLOCKED);
+    }
+
+    /** Strips the file bits (jabber:x:oob + fed-file annotation) and sets the body to {@code noticeText}. */
+    private void replaceFileWithNotice(Element messageEl, String noticeText) {
+        for (Element x : new java.util.ArrayList<>(messageEl.elements("x"))) {
+            if ("jabber:x:oob".equals(x.getNamespaceURI())) messageEl.remove(x);
+        }
+        Element ann = annotationOf(messageEl);
+        if (ann != null) messageEl.remove(ann);
+        Element body = messageEl.element("body");
+        if (body != null) body.setText(noticeText);
+        else messageEl.addElement("body").setText(noticeText);
+    }
+
     /**
      * The single upload URL a share message carries: the {@code jabber:x:oob} extension's
      * {@code <url>} when present, else a body that is exactly one http(s) URL token.  Returns it

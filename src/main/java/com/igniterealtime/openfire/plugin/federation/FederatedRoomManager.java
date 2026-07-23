@@ -43,6 +43,7 @@ public class FederatedRoomManager {
     private static final String PROP_MAP_STATE   = "federation.rooms.mapping.%s.%d.state";  // consent state
     private static final String PROP_MAP_TOKEN   = "federation.rooms.mapping.%s.%d.token";  // shared token
     private static final String PROP_ROOM_AUTOACCEPT = "federation.room.autoaccept."; // + roomJid → true
+    private static final String PROP_ROOM_FILES = "federation.room.files."; // + roomJid → "false" when file federation off (default ON)
 
     // Virtual occupant persistence — survives plugin reloads so eviction on peer-down
     // can still send leave presences even if no join events occurred after the reload.
@@ -364,6 +365,24 @@ public class FederatedRoomManager {
         Log.info("Room {} auto-accept → {}", roomJid, autoAccept);
     }
 
+    /**
+     * Per-room file-federation switch (default ON). When OFF, file shares are neither relayed out of
+     * nor pulled into this room across federation — a short in-chat notice replaces the file instead.
+     * Independent of the global {@code FILES_ENABLED} (which governs 1:1 user file transfer).
+     */
+    public boolean isFilesEnabled(String roomJid) {
+        return JiveGlobals.getBooleanProperty(PROP_ROOM_FILES + roomJid, true);
+    }
+
+    public void setFilesEnabled(String roomJid, boolean enabled) {
+        if (enabled) {
+            JiveGlobals.deleteProperty(PROP_ROOM_FILES + roomJid);   // true is the default
+        } else {
+            JiveGlobals.setProperty(PROP_ROOM_FILES + roomJid, "false");
+        }
+        Log.info("Room {} file federation → {}", roomJid, enabled);
+    }
+
     private static Set<String> parseCsvSet(String csv) {
         Set<String> out = new java.util.LinkedHashSet<>();
         if (csv != null && !csv.isBlank()) {
@@ -432,6 +451,7 @@ public class FederatedRoomManager {
                 entry.put("federated",   localFederatedRooms.contains(jid));
                 entry.put("visibleTo",   new ArrayList<>(getRoomVisibility(jid)));
                 entry.put("autoAccept",  isAutoAccept(jid));
+                entry.put("filesEnabled", isFilesEnabled(jid));
                 entry.put("occupants",   room.getOccupantsCount());
                 entry.put("mappings",    mappingsList);
                 result.add(entry);

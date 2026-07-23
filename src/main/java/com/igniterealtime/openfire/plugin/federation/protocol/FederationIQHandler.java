@@ -16,6 +16,10 @@ import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.pep.PEPService;
+import org.jivesoftware.openfire.pep.PEPServiceManager;
+import org.jivesoftware.openfire.pubsub.Node;
+import org.jivesoftware.openfire.pubsub.PublishedItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.IQ;
@@ -866,6 +870,7 @@ public class FederationIQHandler extends IQHandler {
                 manager.getFileRelay().rewriteInPlace(msg, fromDomain);
             }
             FederationStanzaFactory.markAsForwarded(msg);
+            logRecipientCarbonState(msg.getTo());   // DEBUG diagnostic (multi-client carbon investigation)
             FederationStanzaFactory.directDeliver(msg);
             Log.info("direct-forward: delivered 1:1 {} -> {} (from {})", msg.getFrom(), msg.getTo(), fromDomain);
         } else {
@@ -883,6 +888,29 @@ public class FederationIQHandler extends IQHandler {
                 },
                 () -> Log.warn("direct-forward: no route to {}, dropping", finalDest)
             );
+        }
+    }
+
+    /**
+     * DEBUG diagnostic (multi-client message-carbons investigation): logs each online resource of a
+     * local recipient and whether it has XEP-0280 message carbons enabled, so we can see why a
+     * federated 1:1 message did or didn't fan out to every client. No-op unless federation DEBUG
+     * logging is on; purely observational.
+     */
+    private void logRecipientCarbonState(JID to) {
+        if (to == null || !Log.isDebugEnabled()) return;
+        if (to.getNode() == null || !XMPPServer.getInstance().isLocal(to)) return;
+        try {
+            java.util.Collection<org.jivesoftware.openfire.session.ClientSession> sessions =
+                    org.jivesoftware.openfire.SessionManager.getInstance().getSessions(to.getNode());
+            StringBuilder sb = new StringBuilder();
+            for (org.jivesoftware.openfire.session.ClientSession s : sessions) {
+                sb.append("\n    ").append(s.getAddress())
+                  .append("  carbons=").append(s.isMessageCarbonsEnabled());
+            }
+            Log.debug("direct-forward recipient {} has {} session(s):{}", to.toBareJID(), sessions.size(), sb);
+        } catch (Exception e) {
+            Log.debug("logRecipientCarbonState failed for {}: {}", to, e.getMessage());
         }
     }
 
@@ -937,8 +965,9 @@ public class FederationIQHandler extends IQHandler {
             }
             FederationStanzaFactory.markAsForwarded(pres);
             XMPPServer.getInstance().getPacketRouter().route(pres);   // let Openfire's roster engine handle it
-            Log.info("presence-forward: delivered 1:1 {} {} -> {} (from {})",
-                     pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), fromDomain);
+            Log.info("presence-forward: delivered 1:1 {} {} -> {} (from {}) avatarHash={}",
+                     pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), fromDomain,
+                     avatarHashOf(pres));
         } else {
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
             manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
@@ -957,6 +986,14 @@ public class FederationIQHandler extends IQHandler {
     }
 
     // ── iq-forward (vCard / disco / caps / version / ping / PEP) ───────────────
+    //
+    // Both answerVCardLocally and answerPepItemsLocally exist because Openfire's own handlers for
+    // these two namespaces answer a GET by delivering the reply via the internal deliverer, which
+    // bypasses both the PacketInterceptor and any IQResultListener — so a reply to a multi-hop
+    // requester is handed to (non-existent) native S2S and silently lost. Every other IQ type
+    // (disco, caps, version, ping, Jingle signaling) either targets a specific local session directly
+    // (fresh outbound reply gets caught and relayed back symmetrically like any other stanza) or
+    // doesn't cross federation as a request/reply pair at all, so it needs no special handling here.
 
     /**
      * Relays or delivers a user-addressed IQ carried over the overlay.  Same relay shape as
@@ -995,9 +1032,10 @@ public class FederationIQHandler extends IQHandler {
                 // the internal deliverer — NOT through the PacketInterceptor — so a reply to a multi-hop
                 // requester is handed to (non-existent) native S2S and lost.  We can't rely on Openfire
                 // routing the reply back, so we build the reply ourselves and relay it over the overlay.
-                if (!answerVCardLocally(iq, fromDomain)) {
-                    // Not a vCard request: best-effort local delivery (Openfire may answer it, but its
-                    // reply does not yet relay back over multi-hop — see iq-forward reply limitation).
+                if (!answerVCardLocally(iq, fromDomain) && !answerPepItemsLocally(iq, fromDomain)) {
+                    // Not a vCard or PEP items request: best-effort local delivery (Openfire may answer
+                    // it, but its reply does not yet relay back over multi-hop — see iq-forward reply
+                    // limitation).
                     XMPPServer.getInstance().getPacketRouter().route(iq);
                     Log.info("iq-forward: delivered 1:1 {} {} -> {} (from {}) [reply relay best-effort]",
                              type, iq.getFrom(), iq.getTo(), fromDomain);
@@ -1071,6 +1109,74 @@ public class FederationIQHandler extends IQHandler {
                      contact, request.getFrom(), fromDomain);
         } else {
             Log.warn("iq-forward: built vCard for {} but no route back to {}", contact, request.getFrom());
+        }
+        return true;
+    }
+
+    /**
+     * If {@code request} is a PEP items GET (XEP-0060 pubsub {@code <items node='...'/>}, addressed to
+     * a local user's bare JID) reads the requested node straight out of that user's {@link PEPService}
+     * and relays the result back to the remote requester over the overlay — then returns true. Returns
+     * false for anything else so the caller can fall back to plain local delivery.
+     *
+     * Same rationale as {@link #answerVCardLocally}: Openfire's IQPEPHandler answers a PEP get by
+     * delivering the reply through the internal deliverer, which bypasses the interceptor, so the reply
+     * to a multi-hop requester is lost. We read the node's published item(s) directly instead.
+     *
+     * Deliberately generic across node names, not avatar-only — XEP-0084 avatar metadata/data is the
+     * motivating case (mirrors the {@code vcard-temp} avatar path above for clients that moved off
+     * presence-hash avatars onto PEP), but the same reply-loss bug applies to every PEP node a client
+     * might publish (e.g. OMEMO device-lists/bundles, XEP-0384), and PEP is a personal-*eventing*
+     * protocol — a node's contents are, by design, what its owner published for interested parties to
+     * read. No per-node access-model check is performed, same trust tier as the vCard fetch above.
+     */
+    private boolean answerPepItemsLocally(IQ request, String fromDomain) {
+        if (request.getType() != IQ.Type.get) return false;
+        Element pubsub = request.getChildElement();
+        if (pubsub == null || !"pubsub".equals(pubsub.getName())
+                || !"http://jabber.org/protocol/pubsub".equals(pubsub.getNamespaceURI())) {
+            return false;
+        }
+        Element itemsEl = pubsub.element("items");
+        String node = itemsEl == null ? null : itemsEl.attributeValue("node");
+        if (node == null) return false;
+
+        JID contact = request.getTo();
+        if (contact == null || contact.getNode() == null) return false;
+
+        IQ result = IQ.createResultIQ(request);
+        Element resultItems = result.setChildElement("pubsub", "http://jabber.org/protocol/pubsub")
+                                     .addElement("items");
+        resultItems.addAttribute("node", node);
+
+        try {
+            PEPServiceManager pepServiceManager = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();
+            PEPService pepService = pepServiceManager.getPEPService(contact.asBareJID(), false);
+            Node pepNode = pepService == null ? null : pepService.getNodes().stream()
+                    .filter(n -> node.equals(n.getUniqueIdentifier().getNodeId()))
+                    .findFirst().orElse(null);
+            if (pepNode != null) {
+                Element itemFilter = itemsEl.element("item");
+                String wantedId = itemFilter == null ? null : itemFilter.attributeValue("id");
+                PublishedItem item = wantedId != null ? pepNode.getPublishedItem(wantedId)
+                                                        : pepNode.getLastPublishedItem();
+                if (item != null) {
+                    Element itemEl = resultItems.addElement("item");
+                    itemEl.addAttribute("id", item.getID());
+                    Element payload = item.getPayload();
+                    if (payload != null) itemEl.add(payload.createCopy());
+                }
+            }
+        } catch (Exception e) {
+            Log.warn("iq-forward: failed to read PEP node '{}' for {}: {}", node, contact, e.getMessage());
+        }
+
+        if (manager.forwardDirectIq(result)) {
+            Log.info("iq-forward: answered + relayed PEP node '{}' for {} -> {} (from {})",
+                     node, contact, request.getFrom(), fromDomain);
+        } else {
+            Log.warn("iq-forward: built PEP reply for {} node '{}' but no route back to {}",
+                      contact, node, request.getFrom());
         }
         return true;
     }
@@ -1284,8 +1390,17 @@ public class FederationIQHandler extends IQHandler {
         // away instead of waiting for someone to reconnect.
         Element deliverEl = msgEl;
         if (manager.getFileRelay() != null) {
-            Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, targetRoom, src, fromDomain);
-            if (rewritten != null) deliverEl = rewritten;
+            if (!manager.getRoomManager().isFilesEnabled(targetRoom)
+                    && manager.getFileRelay().annotationOf(msgEl) != null) {
+                // This room has file federation off: don't pull the file — deliver a "disabled for this
+                // room" notice to its occupants (the local-room counterpart of the egress notice).
+                Element noticeEl = msgEl.createCopy();
+                manager.getFileRelay().replaceWithLocalBlockedNotice(noticeEl);
+                deliverEl = noticeEl;
+            } else {
+                Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, targetRoom, src, fromDomain);
+                if (rewritten != null) deliverEl = rewritten;
+            }
         }
 
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;
@@ -1458,6 +1573,14 @@ public class FederationIQHandler extends IQHandler {
                 for (Element statusEl : presEl.elements("status")) {
                     delivery.getElement().addElement("status").setText(statusEl.getText());
                 }
+                // XEP-0153 avatar hash: without this, a client has no signal that the virtual
+                // occupant even has a vCard photo worth fetching, so it never issues a vCard get
+                // in the first place — answerVCardLocally never gets a chance to relay one back.
+                for (Element xEl : presEl.elements("x")) {
+                    if ("vcard-temp:x:update".equals(xEl.getNamespaceURI())) {
+                        delivery.getElement().add(xEl.createCopy());
+                    }
+                }
             }
 
             Element x    = delivery.getElement().addElement("x", "http://jabber.org/protocol/muc#user");
@@ -1556,12 +1679,18 @@ public class FederationIQHandler extends IQHandler {
             for (MUCOccupant occupant : occupants) {
                 Presence sync = new Presence();
                 sync.setFrom(occupant.getUserAddress());
-                // Copy show/status from occupant's last known presence
+                // Copy show/status/avatar-hash from occupant's last known presence (see injectPresence's
+                // vcard-temp:x:update copy for why the avatar hash matters).
                 Element curEl = occupant.getPresence().getElement();
                 Element showEl = curEl.element("show");
                 if (showEl != null) sync.getElement().addElement("show").setText(showEl.getText());
                 for (Element statusEl : curEl.elements("status")) {
                     sync.getElement().addElement("status").setText(statusEl.getText());
+                }
+                for (Element xEl : curEl.elements("x")) {
+                    if ("vcard-temp:x:update".equals(xEl.getNamespaceURI())) {
+                        sync.getElement().add(xEl.createCopy());
+                    }
                 }
                 FederationStanzaFactory.markAsForwarded(sync);
                 try {
@@ -1580,6 +1709,22 @@ public class FederationIQHandler extends IQHandler {
             Log.debug("syncLocalOccupantsToRemote: pushed {} occupant(s) + virtuals from {} to {}",
                       occupants.size(), localRoom, remoteRoomJid);
         }
+    }
+
+    /**
+     * Diagnostic only (see [[architecture-protocol]] avatar-hash investigation): mirrors
+     * {@link FederationManager#avatarHashOf} on the receiving end of presence-forward, so a hash
+     * present at the origin can be confirmed to have survived the hop-to-hop relay unmodified.
+     */
+    private String avatarHashOf(Presence pres) {
+        for (Element xEl : pres.getElement().elements("x")) {
+            if (!"vcard-temp:x:update".equals(xEl.getNamespaceURI())) continue;
+            Element photo = xEl.element("photo");
+            if (photo == null) return "x-present,no-photo-el";
+            String hash = photo.getTextTrim();
+            return hash.isEmpty() ? "x-present,empty-photo" : hash;
+        }
+        return "no-x-update-element";
     }
 
     /** Derives a stable MUC nick from a full JID: "user@domain" (no resource). */
