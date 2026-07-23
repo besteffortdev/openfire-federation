@@ -39,6 +39,7 @@ public class RoomDefaultsManager {
     private static final String PROP_AUTOACCEPT = "federation.roomdefaults.%d.autoaccept";
     private static final String PROP_VISIBLE    = "federation.roomdefaults.%d.visible";   // csv of domains, or "*"
     private static final String PROP_AUTOMAP    = "federation.roomdefaults.%d.automap";
+    private static final String PROP_FILES      = "federation.roomdefaults.%d.files";     // per-rule file federation (default true)
 
     /** The wildcard token that means "visible to every peer" (mirrors {@link FederatedRoomManager#VISIBLE_ALL}). */
     public static final String VISIBLE_ALL = FederatedRoomManager.VISIBLE_ALL;
@@ -49,7 +50,7 @@ public class RoomDefaultsManager {
      * element {@code "*"} meaning all peers; it is only meaningful when federated.
      */
     public record Rule(String pattern, boolean federated, boolean autoAccept,
-                       List<String> visible, boolean autoMap) {
+                       List<String> visible, boolean autoMap, boolean filesEnabled) {
         public Rule {
             visible = (visible == null) ? List.of() : List.copyOf(visible);
         }
@@ -77,8 +78,9 @@ public class RoomDefaultsManager {
             boolean federated  = JiveGlobals.getBooleanProperty(String.format(PROP_FEDERATED, i), false);
             boolean autoAccept = JiveGlobals.getBooleanProperty(String.format(PROP_AUTOACCEPT, i), false);
             boolean autoMap    = JiveGlobals.getBooleanProperty(String.format(PROP_AUTOMAP, i), false);
+            boolean files      = JiveGlobals.getBooleanProperty(String.format(PROP_FILES, i), true);   // default on
             List<String> visible = parseCsv(JiveGlobals.getProperty(String.format(PROP_VISIBLE, i)));
-            rules.add(new Rule(pattern.strip(), federated, autoAccept, visible, autoMap));
+            rules.add(new Rule(pattern.strip(), federated, autoAccept, visible, autoMap, files));
         }
         Log.info("Loaded {} room-default rule(s)", rules.size());
     }
@@ -98,17 +100,17 @@ public class RoomDefaultsManager {
 
     /** Adds or replaces (by pattern) a rule, then persists. */
     public void save(String pattern, boolean federated, boolean autoAccept,
-                     List<String> visible, boolean autoMap) {
+                     List<String> visible, boolean autoMap, boolean filesEnabled) {
         if (pattern == null || pattern.isBlank()) return;
         String p = pattern.strip();
-        Rule rule = new Rule(p, federated, autoAccept, normalizeVisible(visible), autoMap);
+        Rule rule = new Rule(p, federated, autoAccept, normalizeVisible(visible), autoMap, filesEnabled);
         synchronized (rules) {
             rules.removeIf(r -> r.pattern().equalsIgnoreCase(p));
             rules.add(rule);
             persist();
         }
-        Log.info("Room-default rule saved: {} → federated={} autoAccept={} visible={} autoMap={}",
-                 p, federated, autoAccept, rule.visible(), autoMap);
+        Log.info("Room-default rule saved: {} → federated={} autoAccept={} visible={} autoMap={} files={}",
+                 p, federated, autoAccept, rule.visible(), autoMap, filesEnabled);
     }
 
     /** Removes the rule with this exact pattern (case-insensitive), then persists. */
@@ -155,6 +157,7 @@ public class RoomDefaultsManager {
             JiveGlobals.deleteProperty(String.format(PROP_AUTOACCEPT, i));
             JiveGlobals.deleteProperty(String.format(PROP_VISIBLE, i));
             JiveGlobals.deleteProperty(String.format(PROP_AUTOMAP, i));
+            JiveGlobals.deleteProperty(String.format(PROP_FILES, i));
         }
         int i = 0;
         for (Rule r : rules) {
@@ -162,6 +165,7 @@ public class RoomDefaultsManager {
             JiveGlobals.setProperty(String.format(PROP_FEDERATED, i), String.valueOf(r.federated()));
             JiveGlobals.setProperty(String.format(PROP_AUTOACCEPT, i), String.valueOf(r.autoAccept()));
             JiveGlobals.setProperty(String.format(PROP_AUTOMAP, i), String.valueOf(r.autoMap()));
+            JiveGlobals.setProperty(String.format(PROP_FILES, i), String.valueOf(r.filesEnabled()));
             JiveGlobals.setProperty(String.format(PROP_VISIBLE, i), String.join(",", r.visible()));
             i++;
         }

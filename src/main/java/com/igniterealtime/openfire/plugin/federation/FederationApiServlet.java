@@ -509,6 +509,7 @@ public class FederationApiServlet extends HttpServlet {
               .append("\",\"federated\":").append(r.federated())
               .append(",\"autoAccept\":").append(r.autoAccept())
               .append(",\"autoMap\":").append(r.autoMap())
+              .append(",\"filesEnabled\":").append(r.filesEnabled())
               .append(",\"visible\":[");
             boolean fv = true;
             for (String d : r.visible()) {
@@ -681,6 +682,8 @@ public class FederationApiServlet extends HttpServlet {
                 boolean federated  = Boolean.parseBoolean(req.getParameter("federated"));
                 boolean autoAccept = Boolean.parseBoolean(req.getParameter("autoAccept"));
                 boolean autoMap    = Boolean.parseBoolean(req.getParameter("autoMap"));
+                String filesParam  = req.getParameter("filesEnabled");
+                boolean filesEnabled = filesParam == null || Boolean.parseBoolean(filesParam.strip()); // default on
                 java.util.List<String> visible = new java.util.ArrayList<>();
                 String vis = req.getParameter("visible");          // csv of domains, or "*" = all
                 if (vis != null) {
@@ -688,7 +691,7 @@ public class FederationApiServlet extends HttpServlet {
                         if (!s.isBlank()) visible.add(s.strip().toLowerCase());
                     }
                 }
-                mgr.getRoomDefaults().save(pattern.strip(), federated, autoAccept, visible, autoMap);
+                mgr.getRoomDefaults().save(pattern.strip(), federated, autoAccept, visible, autoMap, filesEnabled);
                 out.print("{\"ok\":true}");
                 return;
             }

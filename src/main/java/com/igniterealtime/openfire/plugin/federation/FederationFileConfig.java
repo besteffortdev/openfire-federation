@@ -36,7 +36,7 @@ import java.util.Set;
  *       </peer>
  *     </peers>
  *     <rooms>
- *       <room jid="team@conference.2501-xmpp.example.net" federated="true" autoAccept="true">
+ *       <room jid="team@conference.2501-xmpp.example.net" federated="true" autoAccept="true" files="false">
  *         <visibleTo><server>2502-xmpp.example.net</server></visibleTo>  <!-- or <server>*</server> for all -->
  *         <mappings>
  *           <mapping remoteJid="team@conference.2502-xmpp.example.net" remoteDomain="2502-xmpp.example.net"/>
@@ -285,6 +285,17 @@ public class FederationFileConfig {
             boolean declared = Boolean.parseBoolean(autoAcceptAttr.strip());
             if (roomManager.isAutoAccept(jid) != declared) {
                 roomManager.setAutoAccept(jid, declared);
+                updated = true;
+            }
+        }
+
+        // File federation for this room (default on). Same switch as the admin console's
+        // "Federate file sharing" checkbox; independent of the global 1:1 file setting.
+        String filesAttr = roomEl.attributeValue("files");
+        if (filesAttr != null) {
+            boolean declared = Boolean.parseBoolean(filesAttr.strip());
+            if (roomManager.isFilesEnabled(jid) != declared) {
+                roomManager.setFilesEnabled(jid, declared);
                 updated = true;
             }
         }

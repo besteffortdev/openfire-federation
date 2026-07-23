@@ -2073,11 +2073,12 @@ public class FederationManager {
         }
 
         roomManager.setAutoAccept(roomJid, rule.autoAccept());
+        roomManager.setFilesEnabled(roomJid, rule.filesEnabled());
 
-        Log.info("Applied room-default rule '{}' to {} (federated, visible={}, autoAccept={}, autoMap={})",
+        Log.info("Applied room-default rule '{}' to {} (federated, visible={}, autoAccept={}, autoMap={}, files={})",
                  rule.pattern(), roomJid,
                  vis.contains(RoomDefaultsManager.VISIBLE_ALL) ? "all peers" : vis,
-                 rule.autoAccept(), rule.autoMap());
+                 rule.autoAccept(), rule.autoMap(), rule.filesEnabled());
 
         if (rule.autoMap()) autoMapRoom(roomJid, node, service, vis);
     }

@@ -1164,7 +1164,7 @@ function renderRoomDefaults(rules) {
     const tbody = document.getElementById('room-defaults-tbody');
     if (!tbody) return;
     if (!rules.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">No rules — new rooms get no automatic federation settings.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No rules — new rooms get no automatic federation settings.</td></tr>';
         return;
     }
     // Server provides rules most-specific first (evaluation order); keep that order.
@@ -1181,6 +1181,7 @@ function renderRoomDefaults(rules) {
             <td>${yn(r.autoAccept)}</td>
             <td>${escHtml(vis)}</td>
             <td>${yn(r.autoMap)}</td>
+            <td>${yn(r.filesEnabled)}</td>
             <td style="text-align:right">
                 <button class="btn btn-small" onclick="editRoomDefault('${pj}')">Edit</button>
                 <button class="btn btn-small btn-danger" onclick="deleteRoomDefault('${pj}')">Delete</button>
@@ -1199,10 +1200,11 @@ function bindRoomDefaultForm() {
         post({
             action:     'save-room-default',
             pattern,
-            federated:  document.getElementById('rd-federated').checked,
-            autoAccept: document.getElementById('rd-autoaccept').checked,
-            autoMap:    document.getElementById('rd-automap').checked,
-            visible:    document.getElementById('rd-visible').value.trim()
+            federated:   document.getElementById('rd-federated').checked,
+            autoAccept:  document.getElementById('rd-autoaccept').checked,
+            autoMap:     document.getElementById('rd-automap').checked,
+            filesEnabled: document.getElementById('rd-files').checked,
+            visible:     document.getElementById('rd-visible').value.trim()
         }).then(result => {
             if (result && result.ok) {
                 document.getElementById('rd-pattern').value = '';
@@ -1210,6 +1212,7 @@ function bindRoomDefaultForm() {
                 document.getElementById('rd-federated').checked = true;
                 document.getElementById('rd-autoaccept').checked = false;
                 document.getElementById('rd-automap').checked = false;
+                document.getElementById('rd-files').checked = true;
                 flashSaved('Rule saved ✓');
                 refresh();
             } else if (result && result.error) {
@@ -1227,6 +1230,7 @@ function editRoomDefault(pattern) {
     document.getElementById('rd-federated').checked = !!r.federated;
     document.getElementById('rd-autoaccept').checked = !!r.autoAccept;
     document.getElementById('rd-automap').checked = !!r.autoMap;
+    document.getElementById('rd-files').checked = r.filesEnabled !== false;   // default on
     document.getElementById('rd-visible').value =
         (r.visible && r.visible.length) ? r.visible.join(', ') : '';
     document.getElementById('rd-pattern').focus();
