@@ -1392,10 +1392,10 @@ public class FederationIQHandler extends IQHandler {
         if (manager.getFileRelay() != null) {
             if (!manager.getRoomManager().isFilesEnabled(targetRoom)
                     && manager.getFileRelay().annotationOf(msgEl) != null) {
-                // This room has file federation off: don't pull the file — deliver a "sharing disabled"
-                // notice in its place, matching the egress counterpart in FederationPacketInterceptor.
+                // This room has file federation off: don't pull the file — deliver a "disabled for this
+                // room" notice to its occupants (the local-room counterpart of the egress notice).
                 Element noticeEl = msgEl.createCopy();
-                manager.getFileRelay().replaceWithDisabledNotice(noticeEl);
+                manager.getFileRelay().replaceWithLocalBlockedNotice(noticeEl);
                 deliverEl = noticeEl;
             } else {
                 Element rewritten = manager.getFileRelay().rewriteForDelivery(msgEl, targetRoom, src, fromDomain);

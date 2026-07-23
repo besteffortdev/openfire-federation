@@ -325,8 +325,10 @@ public class FileRelayManager {
         return (ann != null && FederationStanzaFactory.NS.equals(ann.getNamespaceURI())) ? ann : null;
     }
 
-    /** Body shown to a federated peer (in place of a file) when a room has file federation off. */
-    public static final String FILES_DISABLED_NOTICE = "🚫 File sharing is disabled for this federated room.";
+    /** Shown to a REMOTE peer's occupants when the SENDER's room has file federation off (egress side). */
+    public static final String NOTICE_SENDER_ROOM_BLOCKED = "🚫 This user's room can't share files.";
+    /** Shown to a room's OWN occupants when THIS room has file federation off and a peer sent a file (ingress). */
+    public static final String NOTICE_LOCAL_ROOM_BLOCKED = "🚫 File federation is disabled for this room.";
 
     /** True when {@code msg} carries a share hosted on OUR upload service — egress-side file detection. */
     public boolean isLocalUploadShare(Message msg) {
@@ -334,21 +336,32 @@ public class FileRelayManager {
     }
 
     /**
-     * Rewrites a file-share message element in place into the "file sharing disabled" notice: drops the
-     * OOB URL ({@code jabber:x:oob}) and any fed-file annotation, and replaces the body with
-     * {@link #FILES_DISABLED_NOTICE}. Used by the per-room file-federation gate — both the egress copy
-     * forwarded to peers and the ingress copy delivered into a local room. Operate on a COPY; never the
-     * live original a local room still shows.
+     * Egress: a local user shared a file into a room whose file federation is OFF. Rewrites the copy
+     * forwarded to peers into the {@link #NOTICE_SENDER_ROOM_BLOCKED} notice (the sender's room can't
+     * share). Operate on a COPY — never the live original the local room still shows.
      */
-    public void replaceWithDisabledNotice(Element messageEl) {
+    public void replaceWithSenderBlockedNotice(Element messageEl) {
+        replaceFileWithNotice(messageEl, NOTICE_SENDER_ROOM_BLOCKED);
+    }
+
+    /**
+     * Ingress: a peer sent a file into a local room whose file federation is OFF. Rewrites the copy
+     * delivered to this room's occupants into the {@link #NOTICE_LOCAL_ROOM_BLOCKED} notice.
+     */
+    public void replaceWithLocalBlockedNotice(Element messageEl) {
+        replaceFileWithNotice(messageEl, NOTICE_LOCAL_ROOM_BLOCKED);
+    }
+
+    /** Strips the file bits (jabber:x:oob + fed-file annotation) and sets the body to {@code noticeText}. */
+    private void replaceFileWithNotice(Element messageEl, String noticeText) {
         for (Element x : new java.util.ArrayList<>(messageEl.elements("x"))) {
             if ("jabber:x:oob".equals(x.getNamespaceURI())) messageEl.remove(x);
         }
         Element ann = annotationOf(messageEl);
         if (ann != null) messageEl.remove(ann);
         Element body = messageEl.element("body");
-        if (body != null) body.setText(FILES_DISABLED_NOTICE);
-        else messageEl.addElement("body").setText(FILES_DISABLED_NOTICE);
+        if (body != null) body.setText(noticeText);
+        else messageEl.addElement("body").setText(noticeText);
     }
 
     /**

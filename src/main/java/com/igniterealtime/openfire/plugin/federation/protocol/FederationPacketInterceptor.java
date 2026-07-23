@@ -232,12 +232,12 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         var relay = manager.getFileRelay();
         boolean filesOn = manager.getRoomManager().isFilesEnabled(roomJid);
 
-        // Per-room file federation OFF and this is a file share: forward a "sharing disabled" notice to
-        // peers instead of the file. The local room keeps the real share untouched; only the copies that
-        // cross federation are replaced (see FileRelayManager.replaceWithDisabledNotice).
+        // Per-room file federation OFF and this is a file share: forward a "sender's room can't share"
+        // notice to peers instead of the file. The local room keeps the real share untouched; only the
+        // copies that cross federation are replaced (see FileRelayManager.replaceWithSenderBlockedNotice).
         if (!filesOn && relay != null && relay.isLocalUploadShare(msg)) {
             Message notice = new Message(msg.getElement().createCopy());
-            relay.replaceWithDisabledNotice(notice.getElement());
+            relay.replaceWithSenderBlockedNotice(notice.getElement());
             for (RoomMapping mapping : mappings) forwardToMapped(notice, mapping, null);
             return;
         }
