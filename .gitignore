@@ -12,3 +12,5 @@ org/
 logs/
 downloads/
 *.txt
+*.apk
+docs/takchat-xmpp-behavior.md
