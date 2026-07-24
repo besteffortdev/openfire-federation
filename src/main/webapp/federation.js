@@ -107,8 +107,7 @@ function renderAll(data) {
     updateKeepaliveInput(data.keepaliveSeconds);
     updateReconnectInput(data.reconnectSeconds);
     updateMappingPingInput(data.mappingPingSeconds);
-    updateFilesSettings(data.filesEnabled, data.filesMaxSizeMB, data.filesRetentionDays, data.filesStorageDir,
-        data.filesAllowedExtensions, data.filesAvEnabled, data.filesAvHost, data.filesAvPort);
+    updateFilesSettings(data);
     renderAvScanLog(data.avScanLog || []);
     renderRejectedFiles(data.rejectedFiles || []);
     updateAllowlistToggle(data.peerAllowlist);
@@ -614,41 +613,58 @@ function saveMappingPing() {
 
 // ── File sharing settings ─────────────────────────────────────────────────────
 
-function updateFilesSettings(enabled, maxSizeMB, retentionDays, storageDir,
-                              allowedExtensions, avEnabled, avHost, avPort) {
+function updateFilesSettings(data) {
     const cb  = document.getElementById('files-toggle');
     const lbl = document.getElementById('files-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Federated' : 'Off';
+    if (cb && document.activeElement !== cb) cb.checked = !!data.filesEnabled;
+    if (lbl) lbl.textContent = data.filesEnabled ? 'Federated' : 'Off';
 
     const sizeInp = document.getElementById('files-maxsize-input');
     if (sizeInp && document.activeElement !== sizeInp) {
-        sizeInp.value = maxSizeMB != null ? maxSizeMB : 25;
+        sizeInp.value = data.filesMaxSizeMB != null ? data.filesMaxSizeMB : 25;
     }
     const retInp = document.getElementById('files-retention-input');
     if (retInp && document.activeElement !== retInp) {
-        retInp.value = retentionDays != null ? retentionDays : 90;
+        retInp.value = data.filesRetentionDays != null ? data.filesRetentionDays : 90;
+    }
+    const logRetInp = document.getElementById('files-log-retention-input');
+    if (logRetInp && document.activeElement !== logRetInp) {
+        logRetInp.value = data.filesLogRetentionDays != null ? data.filesLogRetentionDays : 180;
     }
     const dirInp = document.getElementById('files-storagedir-input');
     if (dirInp && document.activeElement !== dirInp) {
-        dirInp.value = storageDir != null ? storageDir : '/var/lib/openfire/federation-files';
+        dirInp.value = data.filesStorageDir != null ? data.filesStorageDir : '/var/lib/openfire/federation-files';
     }
     const extInp = document.getElementById('files-extensions-input');
     if (extInp && document.activeElement !== extInp) {
-        extInp.value = allowedExtensions != null ? allowedExtensions : '';
+        extInp.value = data.filesAllowedExtensions != null ? data.filesAllowedExtensions : '';
     }
     const avCb  = document.getElementById('files-av-toggle');
     const avLbl = document.getElementById('files-av-state');
-    if (avCb && document.activeElement !== avCb) avCb.checked = !!avEnabled;
-    if (avLbl) avLbl.textContent = avEnabled ? 'Scanning' : 'Off';
+    if (avCb && document.activeElement !== avCb) avCb.checked = !!data.filesAvEnabled;
+    if (avLbl) avLbl.textContent = data.filesAvEnabled ? 'Scanning' : 'Off';
 
     const avHostInp = document.getElementById('files-av-host-input');
     if (avHostInp && document.activeElement !== avHostInp) {
-        avHostInp.value = avHost != null ? avHost : 'clamav';
+        avHostInp.value = data.filesAvHost != null ? data.filesAvHost : 'clamav';
     }
     const avPortInp = document.getElementById('files-av-port-input');
     if (avPortInp && document.activeElement !== avPortInp) {
-        avPortInp.value = avPort != null ? avPort : 3310;
+        avPortInp.value = data.filesAvPort != null ? data.filesAvPort : 3310;
+    }
+    updateFilesLogPaths(data.filesScanLogPath, data.filesRejectionLogPath);
+}
+
+// Where the activity logs actually live on disk, so an operator can find, tail or archive them
+// without going through this console.
+function updateFilesLogPaths(scanPath, rejectionPath) {
+    const scanEl = document.getElementById('scan-log-path');
+    if (scanEl && scanPath) scanEl.textContent = scanPath;
+    const rejEl = document.getElementById('rejection-log-path');
+    if (rejEl && rejectionPath) rejEl.textContent = rejectionPath;
+    const summary = document.getElementById('files-log-paths');
+    if (summary && scanPath && rejectionPath) {
+        summary.textContent = ' Written to ' + scanPath + ' and ' + rejectionPath + '.';
     }
 }
 
@@ -746,6 +762,22 @@ function saveFilesRetention() {
         return;
     }
     post({ action: 'set-files-retention', days })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
+function saveFilesLogRetention() {
+    const inp = document.getElementById('files-log-retention-input');
+    const days = parseInt(inp ? inp.value : '', 10);
+    if (isNaN(days) || days < 1) {
+        alert('Activity log retention must be at least 1 day.');
+        return;
+    }
+    post({ action: 'set-files-log-retention', days })
         .then(result => {
             if (result && result.ok) {
                 flashSaved('Saved ✓');

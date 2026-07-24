@@ -248,6 +248,14 @@ public final class FederationProperties {
     public static final SystemProperty<Integer> FILES_AV_TIMEOUT_MS =
         intProp("plugin.federation.files.avTimeoutMs", 30_000, 1_000);
 
+    /**
+     * Days the on-disk activity logs (AV scans, rejected files — written next to {@code openfire.log}
+     * in Openfire's log directory, and reloaded into the admin UI after a restart) keep an entry
+     * before it is pruned. Pruning runs at plugin start and every six hours thereafter.
+     */
+    public static final SystemProperty<Integer> FILES_LOG_RETENTION_DAYS =
+        intProp("plugin.federation.files.logRetentionDays", 180, 1);
+
     /** Touching this class triggers the static field initialisers above, registering every property. */
     public static void register() { /* no-op; class load does the work */ }
 

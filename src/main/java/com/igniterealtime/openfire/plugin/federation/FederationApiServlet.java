@@ -388,6 +388,11 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"filesAvHost\":\"").append(esc(FederationProperties.FILES_AV_HOST.getValue())).append("\",");
         sb.append("\"filesAvPort\":").append(FederationProperties.FILES_AV_PORT.getValue()).append(",");
         sb.append("\"filesAvTimeoutMs\":").append(FederationProperties.FILES_AV_TIMEOUT_MS.getValue()).append(",");
+        sb.append("\"filesLogRetentionDays\":").append(FederationProperties.FILES_LOG_RETENTION_DAYS.getValue()).append(",");
+        sb.append("\"filesScanLogPath\":\"")
+          .append(mgr.getFileRelay() == null ? "" : esc(mgr.getFileRelay().scanLogPath())).append("\",");
+        sb.append("\"filesRejectionLogPath\":\"")
+          .append(mgr.getFileRelay() == null ? "" : esc(mgr.getFileRelay().rejectionLogPath())).append("\",");
 
         // ── AV scan log (files recently examined by ClamAV, newest first) ───────
         sb.append("\"avScanLog\":[");
@@ -945,6 +950,29 @@ public class FederationApiServlet extends HttpServlet {
                     }
                     FederationProperties.FILES_RETENTION_DAYS.setValue(days);
                     out.print("{\"ok\":true,\"filesRetentionDays\":" + FederationProperties.FILES_RETENTION_DAYS.getValue() + "}");
+                } catch (NumberFormatException e) {
+                    out.print("{\"error\":\"days must be an integer\"}");
+                }
+                return;
+            }
+            case "set-files-log-retention": {
+                String daysParam = req.getParameter("days");
+                if (daysParam == null || daysParam.isBlank()) {
+                    out.print("{\"error\":\"days required\"}");
+                    return;
+                }
+                try {
+                    int days = Integer.parseInt(daysParam.strip());
+                    if (days < 1) {
+                        out.print("{\"error\":\"days must be at least 1\"}");
+                        return;
+                    }
+                    FederationProperties.FILES_LOG_RETENTION_DAYS.setValue(days);
+                    // Apply the new window now, so a shortened retention takes visible effect
+                    // instead of waiting for the next six-hourly prune.
+                    if (mgr.getFileRelay() != null) mgr.getFileRelay().logRetentionChanged();
+                    out.print("{\"ok\":true,\"filesLogRetentionDays\":"
+                            + FederationProperties.FILES_LOG_RETENTION_DAYS.getValue() + "}");
                 } catch (NumberFormatException e) {
                     out.print("{\"error\":\"days must be an integer\"}");
                 }

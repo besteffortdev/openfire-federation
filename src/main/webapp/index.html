@@ -928,6 +928,23 @@
                 </div>
                 <div class="setting">
                     <div class="setting-main">
+                        <div class="setting-title">Activity log retention</div>
+                        <div class="setting-desc">
+                            How long an entry stays in the on-disk activity logs (the ClamAV scan
+                            and rejected-file tables under <em>Activity Log</em>). Older entries are
+                            pruned at startup and every six hours. Minimum: 1 day. Default: 180 days.
+                            <span id="files-log-paths" class="setting-desc"></span>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="files-log-retention-input" class="num-input"
+                               min="1" max="3650" step="1">
+                        <span class="setting-state">days</span>
+                        <button class="btn btn-primary btn-small" onclick="saveFilesLogRetention()">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
                         <div class="setting-title">Storage directory</div>
                         <div class="setting-desc">
                             Full path of the folder where relayed file content is kept on disk.
@@ -1031,9 +1048,11 @@
             </div>
         </div>
         <p class="panel-foot">
-            Only received files (ingress) are scanned — a transit hop never decodes content, and
-            this list is kept in memory only (the last 200 entries; cleared on plugin reload or
-            restart). Populates once virus scanning is turned on above.
+            Only received files (ingress) are scanned — a transit hop never decodes content.
+            Populates once virus scanning is turned on above. The 200 most recent entries are shown
+            here; the full history is written to
+            <code id="scan-log-path">the server's log directory</code> and survives a plugin reload
+            or server restart, kept for as long as <em>Activity log retention</em> allows.
         </p>
 
         <div class="section-box">
@@ -1066,8 +1085,10 @@
             before it's ever offered to a peer, or ingress as defense in depth), the content-vs-
             extension sniff check, a SHA-256 mismatch, or the virus scanner. A file rejected here
             never reaches the AV scan above (extension/content checks run first), so this is the
-            place to look when a peer reports a download that never arrives. In memory only (last
-            200 entries; cleared on plugin reload or restart).
+            place to look when a peer reports a download that never arrives. The 200 most recent
+            entries are shown here; the full history is written to
+            <code id="rejection-log-path">the server's log directory</code> and survives a plugin
+            reload or server restart, kept for as long as <em>Activity log retention</em> allows.
         </p>
 
         </div><!-- /subpanel-files-activity -->
