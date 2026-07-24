@@ -135,9 +135,18 @@ Before received content becomes servable to a local recipient, the destination a
 - **SHA-256** check against the offer.
 - **Optional ClamAV** (`avEnabled`, off by default) — a scan that can't complete **fails closed**.
 
-Every block is recorded in the in-memory `RejectionEntry` log (and AV outcomes in `ScanLogEntry`) surfaced by
-the *Files* tab. A definitive rejection also notifies the waiting local room/user in-chat via the
+Every block is recorded as a `RejectionEntry` (and AV outcomes as a `ScanLogEntry`) surfaced by the *Files*
+tab → *Activity Log*. A definitive rejection also notifies the waiting local room/user in-chat via the
 `localDestinations` map.
+
+Both logs are disk-backed by
+[`FileActivityLog`](../src/main/java/com/igniterealtime/openfire/plugin/federation/files/FileActivityLog.java):
+one escaped, tab-separated record per line in `<openfireHome>/logs/federation-file-scans.log` and
+`federation-file-rejections.log`, appended as each entry is recorded and read back into the (200-entry)
+in-memory views at `FileRelayManager.start()`, so the tables survive a reload or restart and can equally be
+read straight off the file system. `prune()` drops entries older than `files.logRetentionDays` (default 180)
+at startup, every six hours, and immediately when the setting is saved — rewriting through a sibling temp
+file and an atomic move, so a failed prune leaves the log exactly as it was.
 
 ## Serving downloads
 

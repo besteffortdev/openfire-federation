@@ -146,3 +146,9 @@ signature-based scan of received content before it becomes servable; a scan that
 unreachable) fails closed rather than serving unscanned content. None of this touches a transit hop —
 `relayToward` forwards `file-*` elements without ever decoding their content, so a purely-relaying server is
 unaffected regardless of configuration.
+
+Every scan and every rejection is appended to a tab-separated log in Openfire's log directory
+(`logs/federation-file-scans.log`, `logs/federation-file-rejections.log`), so the audit trail outlives a
+plugin reload or a server restart and can be collected by whatever ships the rest of the server's logs.
+Entries are pruned after `plugin.federation.files.logRetentionDays` (default 180). Note the rejection log
+records the file name, size, peer, stage and reason — not the content, which is deleted on rejection.

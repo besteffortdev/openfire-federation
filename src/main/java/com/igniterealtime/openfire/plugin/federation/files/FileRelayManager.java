@@ -104,6 +104,9 @@ public class FileRelayManager {
         volatile String name = "file";
         volatile String mime = "application/octet-stream";
         volatile String origin = "";      // domain expected to hold the content
+        /** Neighbour we routed the file-request through — the only direction a legitimate
+         *  file-offer/chunk/error may arrive from (see {@link #isFromExpectedDirection}). */
+        volatile String expectedFrom = "";
         volatile List<String> hints = List.of();
         volatile long size = -1;
         volatile String sha256 = "";
@@ -123,24 +126,24 @@ public class FileRelayManager {
     }
 
     /**
-     * One AV scan outcome for the admin UI's "recently scanned files" table — newest first,
-     * in-memory only (reset on plugin reload/restart, same as the rest of this class's state).
-     * {@code verdict} is {@link ClamAvClient.Verdict#name()}.
+     * One AV scan outcome for the admin UI's "recently scanned files" table — newest first.
+     * {@code verdict} is {@link ClamAvClient.Verdict#name()}. Persisted to
+     * {@link #scanFileLog} and reloaded at start, so the table survives a reload/restart.
      */
     public record ScanLogEntry(long when, String fileName, long sizeBytes, String origin,
                                 String verdict, String detail) { }
 
+    /** Entries kept in memory (and so shown in the admin UI); the on-disk log keeps the full history. */
     private static final int SCAN_LOG_MAX = 200;
 
     /**
-     * One rejected file for the admin UI's "Rejected files" table — newest first, in-memory only
-     * (reset on plugin reload/restart, same as {@link #scanLog}). Covers every way a file can be
-     * blocked: the extension allowlist (checked at both egress and ingress), the ingress content-
-     * sniff check, a SHA-256 mismatch, or a positive/failed AV scan. {@code stage} is
-     * {@code "egress"} (blocked here before ever being offered to a peer) or {@code "ingress"}
-     * (blocked on receipt from a peer); {@code reason} is a short machine code
-     * ({@code EXTENSION_NOT_ALLOWED}, {@code CONTENT_MISMATCH}, {@code HASH_MISMATCH},
-     * {@code AV_INFECTED}, {@code AV_ERROR}).
+     * One rejected file for the admin UI's "Rejected files" table — newest first, persisted the
+     * same way as {@link ScanLogEntry}. Covers every way a file can be blocked: the extension
+     * allowlist (checked at both egress and ingress), the ingress content-sniff check, a SHA-256
+     * mismatch, or a positive/failed AV scan. {@code stage} is {@code "egress"} (blocked here
+     * before ever being offered to a peer) or {@code "ingress"} (blocked on receipt from a peer);
+     * {@code reason} is a short machine code ({@code EXTENSION_NOT_ALLOWED},
+     * {@code CONTENT_MISMATCH}, {@code HASH_MISMATCH}, {@code AV_INFECTED}, {@code AV_ERROR}).
      */
     public record RejectionEntry(long when, String fileName, long sizeBytes, String origin,
                                   String stage, String reason, String detail) { }
@@ -169,6 +172,11 @@ public class FileRelayManager {
      */
     private record LocalDest(String jid, boolean room) { }
 
+    /** How long a definitive-rejection tombstone is retained so a clicked link keeps 403-ing. */
+    private static final long REJECTION_TOMBSTONE_TTL_MS = 24 * 3600_000L;
+    /** Hard cap on tombstone entries, so a flood of distinct rejected ids can't grow the heap. */
+    private static final int REJECTION_TOMBSTONE_MAX = 10_000;
+
     private final FederationManager manager;
     private final FileRelayStore store = new FileRelayStore();
     private final ConcurrentHashMap<String, Transfer> transfers = new ConcurrentHashMap<>();
@@ -176,8 +184,26 @@ public class FileRelayManager {
     private final ConcurrentHashMap<String, Set<String>> parkedRequests = new ConcurrentHashMap<>();
     /** id → local rooms/users waiting on it, so a definitive rejection can notify them in-chat. */
     private final ConcurrentHashMap<String, Set<LocalDest>> localDestinations = new ConcurrentHashMap<>();
+    /**
+     * id → epoch-millis of a definitive policy/security rejection, retained past the failed
+     * {@link Transfer}'s short TTL so {@link #lookup} keeps reporting {@link ServeState#REJECTED}
+     * (a clear 403) rather than reverting to {@link ServeState#NOT_FOUND} (a misleading 404) once
+     * the transfer is swept. Bounded by {@link #REJECTION_TOMBSTONE_TTL_MS} and
+     * {@link #REJECTION_TOMBSTONE_MAX}.
+     */
+    private final ConcurrentHashMap<String, Long> rejectionTombstones = new ConcurrentHashMap<>();
     private final Deque<ScanLogEntry> scanLog = new ArrayDeque<>();
     private final Deque<RejectionEntry> rejectionLog = new ArrayDeque<>();
+    /**
+     * Disk backing for the two tables above: written as each entry is recorded, read back at
+     * {@link #start()} so a restart doesn't wipe the history, and pruned to
+     * {@link FederationProperties#FILES_LOG_RETENTION_DAYS}. Column order here is the single source
+     * of truth — {@link #loadPersistedLogs()} decodes positionally.
+     */
+    private final FileActivityLog scanFileLog = new FileActivityLog("federation-file-scans.log",
+            "#time\tfile\tsizeBytes\tpeer\tverdict\tdetail");
+    private final FileActivityLog rejectionFileLog = new FileActivityLog("federation-file-rejections.log",
+            "#time\tfile\tsizeBytes\tpeer\tstage\treason\tdetail");
     private ScheduledExecutorService exec;
     private ServletContextHandler servletContext;
     private volatile SSLSocketFactory trustAllFactory;
@@ -198,6 +224,7 @@ public class FileRelayManager {
             t.setDaemon(true);
             return t;
         };
+        loadPersistedLogs();
         exec = Executors.newScheduledThreadPool(2, tf);
         exec.scheduleWithFixedDelay(this::sweep, 30, 30, TimeUnit.SECONDS);
         exec.scheduleWithFixedDelay(this::purge, 1, 6 * 60, TimeUnit.MINUTES);
@@ -213,15 +240,32 @@ public class FileRelayManager {
         return store.reopenIfMoved();
     }
 
+    /**
+     * Applies a changed {@code files.logRetentionDays}: prunes both on-disk activity logs to the
+     * new window straight away (rather than at the next six-hourly purge) and refreshes the
+     * in-memory views the admin UI reads, so the tables reflect the change immediately.
+     */
+    public void logRetentionChanged() {
+        loadPersistedLogs();
+    }
+
     /** Pings the configured clamd endpoint (admin UI "Test connection" action). */
     public boolean testAvConnection() {
         return ClamAvClient.ping();
     }
 
-    private synchronized void recordScan(String fileName, long sizeBytes, String origin,
-                                          String verdict, String detail) {
-        scanLog.addFirst(new ScanLogEntry(System.currentTimeMillis(), fileName, sizeBytes,
-                origin == null ? "" : origin, verdict, detail == null ? "" : detail));
+    private void recordScan(String fileName, long sizeBytes, String origin,
+                             String verdict, String detail) {
+        ScanLogEntry e = new ScanLogEntry(System.currentTimeMillis(), fileName, sizeBytes,
+                origin == null ? "" : origin, verdict, detail == null ? "" : detail);
+        remember(e);
+        // Outside the lock: an append is a small open/write/close, but it is still disk I/O, and
+        // the admin UI reads these lists under the same monitor.
+        scanFileLog.append(e.fileName(), Long.toString(e.sizeBytes()), e.origin(), e.verdict(), e.detail());
+    }
+
+    private synchronized void remember(ScanLogEntry e) {
+        scanLog.addFirst(e);
         if (scanLog.size() > SCAN_LOG_MAX) scanLog.removeLast();
     }
 
@@ -230,16 +274,76 @@ public class FileRelayManager {
         return new ArrayList<>(scanLog);
     }
 
-    private synchronized void recordRejection(String fileName, long sizeBytes, String origin,
-                                               String stage, String reason, String detail) {
-        rejectionLog.addFirst(new RejectionEntry(System.currentTimeMillis(), fileName, sizeBytes,
-                origin == null ? "" : origin, stage, reason, detail == null ? "" : detail));
+    private void recordRejection(String fileName, long sizeBytes, String origin,
+                                  String stage, String reason, String detail) {
+        RejectionEntry e = new RejectionEntry(System.currentTimeMillis(), fileName, sizeBytes,
+                origin == null ? "" : origin, stage, reason, detail == null ? "" : detail);
+        remember(e);
+        rejectionFileLog.append(e.fileName(), Long.toString(e.sizeBytes()), e.origin(),
+                e.stage(), e.reason(), e.detail());
+    }
+
+    private synchronized void remember(RejectionEntry e) {
+        rejectionLog.addFirst(e);
         if (rejectionLog.size() > REJECTION_LOG_MAX) rejectionLog.removeLast();
     }
 
     /** Most recently rejected files, newest first (admin UI). */
     public synchronized List<RejectionEntry> recentRejections() {
         return new ArrayList<>(rejectionLog);
+    }
+
+    /** Absolute path of the on-disk AV scan log (admin UI tells the operator where to find it). */
+    public String scanLogPath() { return scanFileLog.path().toString(); }
+
+    /** Absolute path of the on-disk rejected-file log. */
+    public String rejectionLogPath() { return rejectionFileLog.path().toString(); }
+
+    /**
+     * Prunes both on-disk logs to the configured retention and refills the in-memory views from
+     * what remains, so the admin UI comes back with its history after a reload or a server restart.
+     * Called once at {@link #start()}; the periodic prune afterwards happens in {@link #purge()}.
+     */
+    private void loadPersistedLogs() {
+        scanFileLog.ensureExists();
+        rejectionFileLog.ensureExists();
+        pruneActivityLogs();
+        List<FileActivityLog.Row> scans = scanFileLog.readRecent(SCAN_LOG_MAX);
+        List<FileActivityLog.Row> rejections = rejectionFileLog.readRecent(REJECTION_LOG_MAX);
+        synchronized (this) {
+            scanLog.clear();
+            for (FileActivityLog.Row r : scans) {          // newest first, matching the deque
+                List<String> f = r.fields();
+                if (f.size() < 5) continue;
+                scanLog.addLast(new ScanLogEntry(r.when(), f.get(0), parseSize(f.get(1)),
+                        f.get(2), f.get(3), f.get(4)));
+            }
+            rejectionLog.clear();
+            for (FileActivityLog.Row r : rejections) {
+                List<String> f = r.fields();
+                if (f.size() < 6) continue;
+                rejectionLog.addLast(new RejectionEntry(r.when(), f.get(0), parseSize(f.get(1)),
+                        f.get(2), f.get(3), f.get(4), f.get(5)));
+            }
+            Log.info("File relay activity logs restored — {} scan entrie(s), {} rejection entrie(s) "
+                   + "from {} and {}", scanLog.size(), rejectionLog.size(),
+                     scanFileLog.path(), rejectionFileLog.path());
+        }
+    }
+
+    /** Drops on-disk activity-log entries older than {@code files.logRetentionDays}. */
+    private void pruneActivityLogs() {
+        int days = FederationProperties.FILES_LOG_RETENTION_DAYS.getValue();
+        scanFileLog.prune(days);
+        rejectionFileLog.prune(days);
+    }
+
+    private static long parseSize(String s) {
+        try {
+            return Long.parseLong(s.strip());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     public void stop() {
@@ -250,6 +354,8 @@ public class FileRelayManager {
         }
         transfers.clear();
         parkedRequests.clear();
+        localDestinations.clear();
+        rejectionTombstones.clear();
     }
 
     private void registerServlet() {
@@ -442,10 +548,13 @@ public class FileRelayManager {
         if (!FileTypePolicy.isExtensionAllowed(t.name)) {
             Log.warn("File relay: refusing to stage '{}' for outbound relay — extension not on "
                    + "the allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
+            // Detail stays short on purpose: the configured allowlist is a setting one screen away,
+            // and repeating all ~35 extensions on every row made the table unreadable.
             recordRejection(t.name, 0, t.origin, "egress", "EXTENSION_NOT_ALLOWED",
-                    "not on allowed list: " + FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
+                    "not on allowed list");
             t.state = State.FAILED;
             t.rejected = true;
+            tombstoneRejection(t.id);
             t.touch();
             failParked(t.id, "policy-rejected");
             return;
@@ -561,10 +670,12 @@ public class FileRelayManager {
 
     /** Records that {@code id} should exist here and starts (or retries) the overlay pull. */
     private void registerExpected(String id, String name, String origin, LocalDest dest, String... hints) {
+        // Already have the content: it will be served straight from the store and can never be
+        // rejected, so there is nothing to notify — registering a dest here would only leak.
+        if (store.has(id)) return;
         if (dest != null) {
             localDestinations.computeIfAbsent(id, k -> ConcurrentHashMap.newKeySet()).add(dest);
         }
-        if (store.has(id)) return;
         List<String> hintList = new ArrayList<>();
         for (String h : hints) {
             if (h != null && !h.isBlank() && !h.equals(localDomain())) hintList.add(h);
@@ -596,6 +707,7 @@ public class FileRelayManager {
             try {
                 XMPPServer.getInstance().getPacketRouter().route(
                         FederationStanzaFactory.fileRequest(nextHop.get(), target, localDomain(), t.id, ""));
+                t.expectedFrom = nextHop.get();   // legitimate offer/chunk/error must come back this way
                 t.lastRequestAt = System.currentTimeMillis();
                 t.requestAttempts.incrementAndGet();
                 t.touch();
@@ -611,6 +723,26 @@ public class FileRelayManager {
                  t.id, t.origin, t.hints);
         t.state = State.FAILED;
         t.touch();
+    }
+
+    /**
+     * True when a file-offer/chunk/error for {@code t} may legitimately be accepted from
+     * {@code fromDomain}. A genuine response arrives from the same neighbour we routed the request
+     * through — recomputed live against the current next hop toward the origin/hints (so a routing
+     * change between request and response can't false-reject), with the neighbour recorded at
+     * request time as a fallback. This stops an approved-but-off-path peer that merely observed the
+     * annotation's id from racing the real holder with substitute bytes or injecting a bogus error.
+     */
+    private boolean isFromExpectedDirection(Transfer t, String fromDomain) {
+        if (fromDomain == null || fromDomain.isBlank()) return false;
+        LinkedHashSet<String> candidates = new LinkedHashSet<>();
+        if (t.origin != null && !t.origin.isBlank()) candidates.add(t.origin);
+        candidates.addAll(t.hints);
+        for (String c : candidates) {
+            var hop = manager.getRoutingTable().findNextHop(c);
+            if (hop.isPresent() && hop.get().equalsIgnoreCase(fromDomain)) return true;
+        }
+        return t.expectedFrom != null && t.expectedFrom.equalsIgnoreCase(fromDomain);
     }
 
     // ── Overlay protocol: request / offer / chunk / error ──────────────────────
@@ -682,6 +814,11 @@ public class FileRelayManager {
             Log.debug("File relay: unsolicited file-offer for {} from {} — ignoring", id, fromDomain);
             return;
         }
+        if (!isFromExpectedDirection(t, fromDomain)) {
+            Log.warn("SECURITY: ignoring file-offer for {} from unexpected peer {} (expected via {})",
+                     id, fromDomain, t.expectedFrom);
+            return;
+        }
         long size;
         int chunkSize, totalChunks;
         try {
@@ -731,6 +868,11 @@ public class FileRelayManager {
         if (id == null) return;
         Transfer t = transfers.get(id);
         if (t == null || t.state != State.RECEIVING) return;
+        if (!isFromExpectedDirection(t, fromDomain)) {
+            Log.warn("SECURITY: ignoring file-chunk for {} from unexpected peer {} (expected via {})",
+                     id, fromDomain, t.expectedFrom);
+            return;
+        }
         int seq;
         try {
             seq = Integer.parseInt(el.attributeValue("seq", "-1"));
@@ -781,10 +923,21 @@ public class FileRelayManager {
         if (id == null) return;
         String reason = el.attributeValue("reason", "unspecified");
         Transfer t = transfers.get(id);
+        if (t != null && !isFromExpectedDirection(t, fromDomain)) {
+            // An off-path peer that observed the id must not be able to poison our pull with a
+            // forged rejection. When we have no active transfer there is nothing to poison, so an
+            // id we no longer track is left to the (harmless) parked/relay cascade below.
+            Log.warn("SECURITY: ignoring file-error for {} from unexpected peer {} (expected via {})",
+                     id, fromDomain, t.expectedFrom);
+            return;
+        }
         if (t != null && t.state == State.REQUESTED) {
             Log.info("File relay: holder refused {} ({})", id, reason);
             t.state = State.FAILED;
-            if (PERMANENT_REJECT_REASONS.contains(reason)) t.rejected = true;
+            if (PERMANENT_REJECT_REASONS.contains(reason)) {
+                t.rejected = true;
+                tombstoneRejection(id);
+            }
             t.touch();
         }
         if (PERMANENT_REJECT_REASONS.contains(reason)) {
@@ -816,7 +969,7 @@ public class FileRelayManager {
                 Log.warn("File relay: rejecting received file '{}' — extension not on the "
                        + "allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
                 recordRejection(t.name, t.size, t.origin, "ingress", "EXTENSION_NOT_ALLOWED",
-                        "not on allowed list: " + FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
+                        "not on allowed list");
                 failTransfer(t, true);
                 failParked(t.id, "extension-not-allowed");
                 notifyLocalDestinationsOfRejection(t.id, t.name);
@@ -860,6 +1013,7 @@ public class FileRelayManager {
             }
             store.finalizePart(t.id, t.name, t.mime, t.size, t.sha256);
             transfers.remove(t.id, t);
+            localDestinations.remove(t.id);   // delivered cleanly — no rejection can follow
             Log.info("File relay: received {} ({} bytes) as {}", t.name, t.size, t.id);
         } catch (Exception e) {
             Log.warn("File relay: could not finalize {}: {}", t.id, e.getMessage());
@@ -882,7 +1036,10 @@ public class FileRelayManager {
         closeQuietly(t);
         store.deletePart(t.id);
         t.state = State.FAILED;
-        if (rejected) t.rejected = true;
+        if (rejected) {
+            t.rejected = true;
+            tombstoneRejection(t.id);
+        }
         t.touch();
     }
 
@@ -1045,7 +1202,14 @@ public class FileRelayManager {
         FileRelayStore.StoredFile sf = store.get(id);
         if (sf != null) return new ServeInfo(ServeState.OK, sf, store.contentPath(id));
         Transfer t = transfers.get(id);
-        if (t == null) return new ServeInfo(ServeState.NOT_FOUND, null, null);
+        if (t == null) {
+            // No live transfer: a retained rejection tombstone still means "blocked by policy"
+            // (a clear 403), which must outlive the short failed-transfer TTL — otherwise a user
+            // reopening a rejected link later gets a misleading 404.
+            return rejectionTombstones.containsKey(id)
+                    ? new ServeInfo(ServeState.REJECTED, null, null)
+                    : new ServeInfo(ServeState.NOT_FOUND, null, null);
+        }
         if (t.state == State.FAILED && t.rejected) return new ServeInfo(ServeState.REJECTED, null, null);
         if (t.state == State.FAILED
                 && System.currentTimeMillis() - t.lastRequestAt > REQUEST_RETRY_MS) {
@@ -1102,6 +1266,11 @@ public class FileRelayManager {
             }
         }
         parkedRequests.keySet().removeIf(id -> !store.has(id) && !transfers.containsKey(id));
+        // localDestinations exists only to notify a local recipient if a pull is rejected. Once the
+        // file is stored (delivered) or no transfer references it any more (terminal, swept above),
+        // it can never fire again — drop it so it can't accumulate for the plugin's lifetime.
+        localDestinations.keySet().removeIf(id -> store.has(id) || !transfers.containsKey(id));
+        purgeRejectionTombstones();
     }
 
     private void purge() {
@@ -1111,6 +1280,11 @@ public class FileRelayManager {
             if (removed > 0) Log.info("File relay: purged {} expired file(s)", removed);
         } catch (Exception e) {
             Log.warn("File relay purge failed: {}", e.getMessage());
+        }
+        try {
+            pruneActivityLogs();
+        } catch (Exception e) {
+            Log.warn("File relay activity-log prune failed: {}", e.getMessage());
         }
     }
 
@@ -1155,6 +1329,27 @@ public class FileRelayManager {
             if ((c < '0' || c > '9') && (c < 'a' || c > 'f')) return false;
         }
         return true;
+    }
+
+    /** Records a definitive-rejection tombstone for {@code id}, keeping the map bounded. */
+    private void tombstoneRejection(String id) {
+        if (id == null) return;
+        rejectionTombstones.put(id, System.currentTimeMillis());
+        if (rejectionTombstones.size() > REJECTION_TOMBSTONE_MAX) {
+            purgeRejectionTombstones();
+            // Still over cap (a flood of fresh rejections): evict arbitrary entries to stay bounded.
+            var it = rejectionTombstones.keySet().iterator();
+            while (rejectionTombstones.size() > REJECTION_TOMBSTONE_MAX && it.hasNext()) {
+                it.next();
+                it.remove();
+            }
+        }
+    }
+
+    /** Drops rejection tombstones older than {@link #REJECTION_TOMBSTONE_TTL_MS} (called from the sweep). */
+    private void purgeRejectionTombstones() {
+        long cutoff = System.currentTimeMillis() - REJECTION_TOMBSTONE_TTL_MS;
+        rejectionTombstones.values().removeIf(ts -> ts < cutoff);
     }
 
     private static String sha256Hex(byte[] data) {

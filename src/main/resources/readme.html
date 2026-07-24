@@ -283,6 +283,11 @@
         connection</em> button) scans received content before it becomes servable; a scan that can't complete fails
         closed rather than serving unscanned content. A transit hop never decodes file content at all, so none of
         this affects traffic just passing through.</li>
+    <li><strong>File activity logs.</strong> The <em>Files</em> tab's <em>Activity Log</em> sub‑tab lists scanned
+        and rejected files. Both are written to plain tab‑separated files in Openfire's log directory
+        (<code>logs/federation-file-scans.log</code>, <code>logs/federation-file-rejections.log</code>), so they can
+        be read or collected straight from the file system and survive a plugin reload or a server restart. Entries
+        older than <em>Activity log retention</em> (default 180 days) are pruned at startup and every six hours.</li>
 </ul>
 
 <h2>Managing peers</h2>

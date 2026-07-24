@@ -201,6 +201,7 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.files.avHost` | `clamav` | Hostname of the clamd INSTREAM endpoint. Default matches the sidecar service name in the [docker-compose example](#optional-clamav-sidecar-docker-compose) below. |
 | `plugin.federation.files.avPort` | `3310` | Port of the clamd INSTREAM endpoint. |
 | `plugin.federation.files.avTimeoutMs` | `30000` | Socket connect/read timeout (ms) for a single clamd scan. |
+| `plugin.federation.files.logRetentionDays` | `180` | Days an entry is kept in the on‑disk activity logs (`logs/federation-file-scans.log`, `logs/federation-file-rejections.log`). Pruned at startup and every six hours. Also in the *Files* tab. |
 
 ### Optional: ClamAV sidecar (docker-compose)
 
@@ -228,10 +229,23 @@ those definitions — bring the container up once while online to seed the initi
 of signatures), after that it keeps working with no network access at all. Use the *Files* tab →
 *Test connection* to confirm the plugin can reach it before turning `avEnabled` on.
 
-the *Files* tab also lists *Recently scanned files (ClamAV)* — the last 200 received files this
-server has scanned (time, name, size, sending peer, verdict, and AV detail), newest first. It's in-memory
-only (transit hops are never scanned or listed, and the list resets on plugin reload/restart) — a quick way
-to confirm scanning is actually happening and see what, if anything, has been caught.
+the *Files* tab → *Activity Log* also lists *Recently scanned files (ClamAV)* — the last 200 received files
+this server has scanned (time, name, size, sending peer, verdict, and AV detail), newest first — plus
+*Rejected files*, every file blocked by any gate (extension allowlist, content sniff, SHA‑256 mismatch, AV).
+Transit hops are never scanned or listed. A quick way to confirm scanning is actually happening and see
+what, if anything, has been caught.
+
+Both tables are backed by plain tab‑separated files in Openfire's log directory, next to `openfire.log`:
+
+```
+<openfireHome>/logs/federation-file-scans.log        # time  file  sizeBytes  peer  verdict  detail
+<openfireHome>/logs/federation-file-rejections.log   # time  file  sizeBytes  peer  stage  reason  detail
+```
+
+They are readable and greppable straight from the file system (backslash, tab and newline inside a field are
+escaped `\\`, `\t`, `\n`, so a record is always exactly one line), survive a plugin reload or server restart —
+the newest entries are read back into the console at startup — and are pruned to
+`plugin.federation.files.logRetentionDays` (default 180) at startup and every six hours.
 
 ### Note on `disableS2SIdle`
 

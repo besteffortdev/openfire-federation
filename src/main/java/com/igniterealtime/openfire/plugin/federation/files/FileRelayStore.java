@@ -11,6 +11,8 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,39 +58,79 @@ final class FileRelayStore {
     }
 
     /**
-     * Re-resolves the configured directory and, when it changed, moves every complete entry
+     * Re-resolves the configured directory and, when it changed, migrates every complete entry
      * there and re-indexes. In-flight {@code .part} files stay behind (those transfers fail and
-     * re-request into the new location). Returns null on success, else an error message —
-     * on failure the store keeps serving from the old directory.
+     * re-request into the new location). Returns null on success, else an error message.
+     *
+     * <p>The migration is transactional from a reader's point of view: entries are <em>copied</em>
+     * to the new directory first, and {@code baseDir} only switches once every copy has succeeded.
+     * If any copy fails part-way (disk full, cross-filesystem error, permissions), the partial
+     * copies in the new directory are rolled back and the store keeps serving from the old
+     * directory with all entries intact — a failed migration can never strand or lose a file. Once
+     * the switch is committed, the old originals are deleted best-effort (leftover old files are
+     * harmless; the new directory is already authoritative).
      */
     synchronized String reopenIfMoved() {
         Path newDir = resolveConfiguredDir();
         Path oldDir = baseDir;
         if (oldDir == null || newDir.equals(oldDir)) return null;
+        List<Path> copied = new ArrayList<>();   // new-dir paths written, for rollback on failure
         try {
             Files.createDirectories(newDir);
-            int moved = 0;
+            int migrated = 0;
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(oldDir, "*.meta")) {
                 for (Path meta : ds) {
-                    String fileName = meta.getFileName().toString();
-                    String id = fileName.substring(0, fileName.length() - ".meta".length());
+                    String metaName = meta.getFileName().toString();
+                    String id = metaName.substring(0, metaName.length() - ".meta".length());
                     Path content = oldDir.resolve(id);
                     if (Files.isRegularFile(content)) {
-                        Files.move(content, newDir.resolve(id), StandardCopyOption.REPLACE_EXISTING);
-                        Files.move(meta, newDir.resolve(fileName), StandardCopyOption.REPLACE_EXISTING);
-                        moved++;
+                        Path newContent = newDir.resolve(id);
+                        Path newMeta = newDir.resolve(metaName);
+                        Files.copy(content, newContent, StandardCopyOption.REPLACE_EXISTING);
+                        copied.add(newContent);
+                        Files.copy(meta, newMeta, StandardCopyOption.REPLACE_EXISTING);
+                        copied.add(newMeta);
+                        migrated++;
                     }
                 }
             }
+            // Every entry is now safely in newDir — commit the switch, then reclaim the old copies.
             baseDir = newDir;
             int loaded = reindex();
-            Log.info("File relay store moved from {} to {} — {} entrie(s) migrated, {} indexed",
-                    oldDir, newDir, moved, loaded);
+            int reclaimed = deleteMigratedOriginals(oldDir);
+            Log.info("File relay store moved from {} to {} — {} entrie(s) migrated, {} indexed, "
+                    + "{} old file(s) reclaimed", oldDir, newDir, migrated, loaded, reclaimed);
             return null;
         } catch (Exception e) {
-            Log.error("Could not move file relay store from {} to {}: {}", oldDir, newDir, e.getMessage(), e);
+            // baseDir untouched — roll back the partial copies so newDir isn't left half-populated.
+            for (Path p : copied) {
+                try { Files.deleteIfExists(p); } catch (IOException ignored) { }
+            }
+            Log.error("Could not move file relay store from {} to {} (rolled back, still serving {}): {}",
+                    oldDir, newDir, oldDir, e.getMessage(), e);
             return "Could not use directory '" + newDir + "': " + e.getMessage();
         }
+    }
+
+    /** Best-effort deletion of the migrated content/meta pairs from the old directory. */
+    private int deleteMigratedOriginals(Path oldDir) {
+        int reclaimed = 0;
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(oldDir, "*.meta")) {
+            for (Path meta : ds) {
+                String metaName = meta.getFileName().toString();
+                String id = metaName.substring(0, metaName.length() - ".meta".length());
+                try {
+                    boolean removed = Files.deleteIfExists(oldDir.resolve(id));
+                    Files.deleteIfExists(meta);
+                    if (removed) reclaimed++;
+                } catch (IOException e) {
+                    Log.debug("Could not reclaim old relay file {}: {}", id, e.getMessage());
+                }
+            }
+        } catch (IOException e) {
+            Log.debug("Could not enumerate old relay dir {} for reclaim: {}", oldDir, e.getMessage());
+        }
+        return reclaimed;
     }
 
     private int reindex() throws IOException {
