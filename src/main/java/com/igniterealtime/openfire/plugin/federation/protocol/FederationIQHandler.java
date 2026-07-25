@@ -26,6 +26,7 @@ import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Message;
 import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
 import org.xmpp.packet.Presence;
 
 import java.util.ArrayList;
@@ -1901,7 +1902,11 @@ public class FederationIQHandler extends IQHandler {
     private IQ error(IQ packet, String reason) {
         Log.warn("Federation IQ error — {}", reason);
         IQ err = IQ.createResultIQ(packet);
-        err.setType(IQ.Type.error);
+        // RFC 6120 §8.3: an error stanza MUST carry a defined condition. A missing or empty
+        // federation child is a malformed request, so bad-request (type modify) with the reason
+        // as descriptive <text/>. setError() also flips the stanza's type attribute to "error".
+        err.setError(new PacketError(PacketError.Condition.bad_request,
+                PacketError.Type.modify, reason));
         return err;
     }
 }
