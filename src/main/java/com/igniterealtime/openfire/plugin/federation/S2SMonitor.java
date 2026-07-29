@@ -345,10 +345,20 @@ public class S2SMonitor {
         for (PeerServer peer : peerRegistry.getPeers()) {
             // WITHDRAWN peers intentionally disconnected — skip until admin reconnects.
             // DISABLED / REMOTE_DISABLED are administrative blocks — never auto-poll them.
+            // TRUST_MISMATCH is a negotiated block and must be skipped for the same reason, plus a
+            // sharper one: PeerRegistry.updateStatus refuses to overwrite it, so the status stays
+            // TRUST_MISMATCH and the prev→next comparison below reads as a fresh link-up on EVERY
+            // tick. That re-ran onPeerUp (addDirectPeer + full gossip + room resync + directory and
+            // bookmark push) every 10 s against a peer blockForTrustMismatch had just torn down —
+            // re-installing the very route the block removed. Recovery does not depend on this loop:
+            // it is announce-driven (handlePeerAnnounce clears the block the moment both ends agree)
+            // and admin-driven (applyLocalTrustChange), which is also why sendKeepalives already
+            // skips this status.
             PeerServer.Status st = peer.getStatus();
             if (st == PeerServer.Status.WITHDRAWN
                     || st == PeerServer.Status.DISABLED
-                    || st == PeerServer.Status.REMOTE_DISABLED) continue;
+                    || st == PeerServer.Status.REMOTE_DISABLED
+                    || st == PeerServer.Status.TRUST_MISMATCH) continue;
 
             String domain = peer.getDomain();
             boolean s2sUp;

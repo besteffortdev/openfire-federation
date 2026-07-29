@@ -980,9 +980,15 @@ public class FileRelayManager {
             }
             FileTypePolicy.ContentCheck contentCheck = FileTypePolicy.checkContent(store.partPath(t.id), t.name);
             if (!contentCheck.ok()) {
-                recordRejection(t.name, t.size, t.origin, "ingress", "CONTENT_MISMATCH",
-                        contentCheck.detectedMime() == null ? "unreadable"
-                                : "sniffs as '" + contentCheck.detectedMime() + "'");
+                // A null detectedMime covers two very different causes, and telling an operator a
+                // perfectly readable file was "unreadable" sends them looking in the wrong place.
+                // (Reachable only when the allowlist is "*", which lets an extension-less file through.)
+                String detail = contentCheck.detectedMime() != null
+                        ? "sniffs as '" + contentCheck.detectedMime() + "'"
+                        : FileTypePolicy.extensionOf(t.name).isEmpty()
+                                ? "no file extension to verify content against"
+                                : "unreadable";
+                recordRejection(t.name, t.size, t.origin, "ingress", "CONTENT_MISMATCH", detail);
                 failTransfer(t, true);   // checkContent already logged the specific mismatch
                 failParked(t.id, "content-mismatch");
                 notifyLocalDestinationsOfRejection(t.id, t.name);
