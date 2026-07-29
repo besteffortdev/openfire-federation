@@ -64,10 +64,9 @@ final class ClamAvClient {
         Socket socket = new Socket();
         Thread watchdog = new Thread(() -> {
             try {
-                long remaining;
-                while ((remaining = deadline - System.currentTimeMillis()) > 0 && !socket.isClosed()) {
-                    Thread.sleep(Math.min(remaining, 250L));
-                }
+                // One sleep to the deadline, not a poll: the scan's own `finally` interrupts this
+                // thread the moment the exchange ends, so there is nothing for a wake-up to check.
+                Thread.sleep(Math.max(1L, deadline - System.currentTimeMillis()));
                 if (!socket.isClosed()) {
                     Log.warn("File relay: AV scan of {} exceeded {} ms — closing clamd socket", file, overallMs);
                     try { socket.close(); } catch (IOException ignored) { }

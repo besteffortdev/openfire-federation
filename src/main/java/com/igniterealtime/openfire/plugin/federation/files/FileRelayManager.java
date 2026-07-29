@@ -673,9 +673,6 @@ public class FileRelayManager {
         // Already have the content: it will be served straight from the store and can never be
         // rejected, so there is nothing to notify — registering a dest here would only leak.
         if (store.has(id)) return;
-        if (dest != null) {
-            localDestinations.computeIfAbsent(id, k -> ConcurrentHashMap.newKeySet()).add(dest);
-        }
         List<String> hintList = new ArrayList<>();
         for (String h : hints) {
             if (h != null && !h.isBlank() && !h.equals(localDomain())) hintList.add(h);
@@ -688,6 +685,12 @@ public class FileRelayManager {
             nt.hints = List.copyOf(hintList);
             return nt;
         });
+        // Registered only once the transfer exists, and before the request goes out: sweep() drops any
+        // localDestinations entry with no transfer behind it, so registering first would let a sweep
+        // landing in between silently discard the dest — and with it the in-chat rejection notice.
+        if (dest != null) {
+            localDestinations.computeIfAbsent(id, k -> ConcurrentHashMap.newKeySet()).add(dest);
+        }
         synchronized (t) {
             if (t.state == State.REQUESTED && t.lastRequestAt == 0) {
                 sendRequest(t);
