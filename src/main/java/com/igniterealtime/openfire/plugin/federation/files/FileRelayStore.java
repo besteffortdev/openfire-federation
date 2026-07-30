@@ -74,7 +74,8 @@ final class FileRelayStore {
         Path newDir = resolveConfiguredDir();
         Path oldDir = baseDir;
         if (oldDir == null || newDir.equals(oldDir)) return null;
-        List<Path> copied = new ArrayList<>();   // new-dir paths written, for rollback on failure
+        List<Path> copied = new ArrayList<>();    // new-dir paths written, for rollback on failure
+        List<Path> originals = new ArrayList<>(); // old-dir paths actually copied, for reclaim on success
         try {
             Files.createDirectories(newDir);
             int migrated = 0;
@@ -90,6 +91,8 @@ final class FileRelayStore {
                         copied.add(newContent);
                         Files.copy(meta, newMeta, StandardCopyOption.REPLACE_EXISTING);
                         copied.add(newMeta);
+                        originals.add(content);
+                        originals.add(meta);
                         migrated++;
                     }
                 }
@@ -97,7 +100,7 @@ final class FileRelayStore {
             // Every entry is now safely in newDir — commit the switch, then reclaim the old copies.
             baseDir = newDir;
             int loaded = reindex();
-            int reclaimed = deleteMigratedOriginals(oldDir);
+            int reclaimed = deleteMigratedOriginals(originals);
             Log.info("File relay store moved from {} to {} — {} entrie(s) migrated, {} indexed, "
                     + "{} old file(s) reclaimed", oldDir, newDir, migrated, loaded, reclaimed);
             return null;
@@ -112,23 +115,21 @@ final class FileRelayStore {
         }
     }
 
-    /** Best-effort deletion of the migrated content/meta pairs from the old directory. */
-    private int deleteMigratedOriginals(Path oldDir) {
+    /**
+     * Best-effort deletion of exactly the old-directory files that were copied above — never a fresh
+     * re-scan of the old directory. Anything that appeared there after the copy loop (a transfer that
+     * won the race to {@link #finalizePart} while {@code baseDir} still pointed at the old directory)
+     * was never copied, so deleting it would destroy the only copy; leaving it behind merely orphans a
+     * file the sender can re-request. Returns how many content files were actually removed.
+     */
+    private int deleteMigratedOriginals(List<Path> originals) {
         int reclaimed = 0;
-        try (DirectoryStream<Path> ds = Files.newDirectoryStream(oldDir, "*.meta")) {
-            for (Path meta : ds) {
-                String metaName = meta.getFileName().toString();
-                String id = metaName.substring(0, metaName.length() - ".meta".length());
-                try {
-                    boolean removed = Files.deleteIfExists(oldDir.resolve(id));
-                    Files.deleteIfExists(meta);
-                    if (removed) reclaimed++;
-                } catch (IOException e) {
-                    Log.debug("Could not reclaim old relay file {}: {}", id, e.getMessage());
-                }
+        for (Path p : originals) {
+            try {
+                if (Files.deleteIfExists(p) && !p.getFileName().toString().endsWith(".meta")) reclaimed++;
+            } catch (IOException e) {
+                Log.debug("Could not reclaim old relay file {}: {}", p, e.getMessage());
             }
-        } catch (IOException e) {
-            Log.debug("Could not enumerate old relay dir {} for reclaim: {}", oldDir, e.getMessage());
         }
         return reclaimed;
     }

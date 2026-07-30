@@ -26,6 +26,7 @@ import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Message;
 import org.xmpp.packet.Packet;
+import org.xmpp.packet.PacketError;
 import org.xmpp.packet.Presence;
 
 import java.util.ArrayList;
@@ -1129,6 +1130,10 @@ public class FederationIQHandler extends IQHandler {
      * might publish (e.g. OMEMO device-lists/bundles, XEP-0384), and PEP is a personal-*eventing*
      * protocol — a node's contents are, by design, what its owner published for interested parties to
      * read. No per-node access-model check is performed, same trust tier as the vCard fetch above.
+     *
+     * The three XEP-0060 outcomes are kept distinct, because a client reads them differently:
+     * {@code item-not-found} for a node the contact never created, an empty {@code <items/>} for a
+     * node that exists but holds nothing, and the item itself otherwise.
      */
     private boolean answerPepItemsLocally(IQ request, String fromDomain) {
         if (request.getType() != IQ.Type.get) return false;
@@ -1144,39 +1149,76 @@ public class FederationIQHandler extends IQHandler {
         JID contact = request.getTo();
         if (contact == null || contact.getNode() == null) return false;
 
+        Node pepNode;
+        try {
+            PEPServiceManager pepServiceManager = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();
+            PEPService pepService = pepServiceManager.getPEPService(contact.asBareJID(), false);
+            pepNode = pepService == null ? null : pepService.getNodes().stream()
+                    .filter(n -> node.equals(n.getUniqueIdentifier().getNodeId()))
+                    .findFirst().orElse(null);
+        } catch (Exception e) {
+            // We learned nothing about the node, so "ask again later" — not "it isn't there".
+            Log.warn("iq-forward: failed to resolve PEP node '{}' for {}: {}", node, contact, e.getMessage());
+            return relayPepReply(pepError(request, PacketError.Condition.internal_server_error,
+                    PacketError.Type.wait), contact, node, fromDomain);
+        }
+        if (pepNode == null) {
+            // XEP-0060 §6.5.9.5: a fetch against a node that does not exist is item-not-found, not an
+            // empty result. The distinction is load-bearing for the avatar path this exists to serve:
+            // an empty <items/> asserts "this contact HAS an avatar node and it is empty", which tells
+            // a client to render no avatar, where item-not-found leaves it free to fall back to the
+            // vcard-temp photo that answerVCardLocally above still serves for older clients.
+            Log.debug("iq-forward: PEP node '{}' does not exist for {} — replying item-not-found", node, contact);
+            return relayPepReply(pepError(request, PacketError.Condition.item_not_found,
+                    PacketError.Type.cancel), contact, node, fromDomain);
+        }
+
         IQ result = IQ.createResultIQ(request);
         Element resultItems = result.setChildElement("pubsub", "http://jabber.org/protocol/pubsub")
                                      .addElement("items");
         resultItems.addAttribute("node", node);
-
         try {
-            PEPServiceManager pepServiceManager = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();
-            PEPService pepService = pepServiceManager.getPEPService(contact.asBareJID(), false);
-            Node pepNode = pepService == null ? null : pepService.getNodes().stream()
-                    .filter(n -> node.equals(n.getUniqueIdentifier().getNodeId()))
-                    .findFirst().orElse(null);
-            if (pepNode != null) {
-                Element itemFilter = itemsEl.element("item");
-                String wantedId = itemFilter == null ? null : itemFilter.attributeValue("id");
-                PublishedItem item = wantedId != null ? pepNode.getPublishedItem(wantedId)
-                                                        : pepNode.getLastPublishedItem();
-                if (item != null) {
-                    Element itemEl = resultItems.addElement("item");
-                    itemEl.addAttribute("id", item.getID());
-                    Element payload = item.getPayload();
-                    if (payload != null) itemEl.add(payload.createCopy());
-                }
+            Element itemFilter = itemsEl.element("item");
+            String wantedId = itemFilter == null ? null : itemFilter.attributeValue("id");
+            PublishedItem item = wantedId != null ? pepNode.getPublishedItem(wantedId)
+                                                    : pepNode.getLastPublishedItem();
+            // The node exists but holds nothing (or not the requested id): an empty <items/> is the
+            // correct answer, per XEP-0060 §6.5.4 — leave resultItems childless.
+            if (item != null) {
+                Element itemEl = resultItems.addElement("item");
+                itemEl.addAttribute("id", item.getID());
+                Element payload = item.getPayload();
+                if (payload != null) itemEl.add(payload.createCopy());
             }
         } catch (Exception e) {
-            Log.warn("iq-forward: failed to read PEP node '{}' for {}: {}", node, contact, e.getMessage());
+            Log.warn("iq-forward: failed to read items of PEP node '{}' for {}: {}", node, contact, e.getMessage());
+            return relayPepReply(pepError(request, PacketError.Condition.internal_server_error,
+                    PacketError.Type.wait), contact, node, fromDomain);
         }
+        return relayPepReply(result, contact, node, fromDomain);
+    }
 
-        if (manager.forwardDirectIq(result)) {
-            Log.info("iq-forward: answered + relayed PEP node '{}' for {} -> {} (from {})",
-                     node, contact, request.getFrom(), fromDomain);
+    /**
+     * Builds an error reply to a PEP items GET, echoing the request's own child element as RFC 6120
+     * §8.3.1 asks of an error stanza — a pubsub client matches the reply against what it sent.
+     */
+    private IQ pepError(IQ request, PacketError.Condition condition, PacketError.Type type) {
+        IQ err = IQ.createResultIQ(request);
+        Element child = request.getChildElement();
+        if (child != null) err.setChildElement(child.createCopy());
+        err.setError(new PacketError(condition, type));   // also flips the stanza type to "error"
+        return err;
+    }
+
+    /** Relays a built PEP reply (result or error) back to the remote requester. Always returns true. */
+    private boolean relayPepReply(IQ reply, JID contact, String node, String fromDomain) {
+        String kind = reply.getType() == IQ.Type.error ? "error" : "result";
+        if (manager.forwardDirectIq(reply)) {
+            Log.info("iq-forward: answered + relayed PEP node '{}' for {} -> {} as {} (from {})",
+                     node, contact, reply.getTo(), kind, fromDomain);
         } else {
-            Log.warn("iq-forward: built PEP reply for {} node '{}' but no route back to {}",
-                      contact, node, request.getFrom());
+            Log.warn("iq-forward: built PEP {} for {} node '{}' but no route back to {}",
+                     kind, contact, node, reply.getTo());
         }
         return true;
     }
@@ -1496,16 +1538,28 @@ public class FederationIQHandler extends IQHandler {
      * any local MUC room — retries any deliveries that were buffered while {@code roomJid} was
      * empty. A no-op for the overwhelmingly common case (no backlog for this room). Delivery only
      * (no re-archiving — {@link #archiveToRoomHistory} already ran when each entry was queued).
+     *
+     * <p>The queue is claimed out of the map only once we know we can actually deliver it: taking it
+     * first and then bailing on one of the guards below would discard the very backlog this exists to
+     * protect. Whichever of two concurrent joins wins the {@code remove} does the delivery; the other
+     * sees null and does nothing, so a buffered message is never delivered twice.
      */
     public void flushPendingDeliveries(String roomJid) {
-        Deque<PendingDelivery> q = pendingRoomDeliveries.remove(roomJid);
-        if (q == null || q.isEmpty()) return;
-        pruneStale(q);
-        if (q.isEmpty()) return;
+        Deque<PendingDelivery> pending = pendingRoomDeliveries.get(roomJid);
+        if (pending == null) return;
+        pruneStale(pending);
         MUCRoom room = findLocalRoom(roomJid);
-        if (room == null) return;
+        if (room == null) {
+            // Room is gone — nothing can ever be delivered into it, so drop the backlog rather than
+            // leaving it to age out (this is the one guard where re-queueing would be pointless).
+            pendingRoomDeliveries.remove(roomJid);
+            return;
+        }
+        if (pending.isEmpty()) return;
         Collection<MUCOccupant> occupants = room.getOccupants();
         if (occupants.isEmpty()) return;   // still empty — leave queued for the next join or TTL
+        Deque<PendingDelivery> q = pendingRoomDeliveries.remove(roomJid);
+        if (q == null) return;             // a concurrent join drained it first
         Log.info("injectMessage: {} gained an occupant — delivering {} buffered message(s)", roomJid, q.size());
         for (PendingDelivery pd : q) {
             deliverToOccupants(pd.deliverEl(), pd.virtualFrom(), occupants);
@@ -1901,7 +1955,11 @@ public class FederationIQHandler extends IQHandler {
     private IQ error(IQ packet, String reason) {
         Log.warn("Federation IQ error — {}", reason);
         IQ err = IQ.createResultIQ(packet);
-        err.setType(IQ.Type.error);
+        // RFC 6120 §8.3: an error stanza MUST carry a defined condition. A missing or empty
+        // federation child is a malformed request, so bad-request (type modify) with the reason
+        // as descriptive <text/>. setError() also flips the stanza's type attribute to "error".
+        err.setError(new PacketError(PacketError.Condition.bad_request,
+                PacketError.Type.modify, reason));
         return err;
     }
 }

@@ -1829,9 +1829,14 @@ public class FederationManager {
             Presence copy = new Presence(pres.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()
                       .route(FederationStanzaFactory.presenceForward(nextHop, destDomain, localDomain, copy));
-            Log.debug("presence-forward: {} {} -> {} via {} (dest {}) avatarHash={}",
-                      pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(), nextHop, destDomain,
-                      avatarHashOf(pres));
+            // Guarded: avatarHashOf is a diagnostic that scans the stanza's child elements, and a log
+            // argument is evaluated whether or not the level is enabled. Presence relay is the hottest
+            // path here (every status change × every subscriber), so it must cost nothing at INFO.
+            if (Log.isDebugEnabled()) {
+                Log.debug("presence-forward: {} {} -> {} via {} (dest {}) avatarHash={}",
+                          pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(),
+                          nextHop, destDomain, avatarHashOf(pres));
+            }
             return true;
         } catch (Exception e) {
             Log.warn("Failed to forward presence to {}: {}", destDomain, e.getMessage());

@@ -15,8 +15,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * Updates arrive as gossip from peers.  When a peer goes down, all routes
  * learned through it are purged, and the change can be gossiped outward.
  *
- * This is deliberately simple (Bellman-Ford, no triggered updates yet).
- * Convergence happens on the next polling cycle.
+ * Deliberately simple Bellman-Ford. Convergence is driven by triggered updates — a peer-up,
+ * peer-down, or any change {@link #updateFromPeer} reports back is gossiped onward immediately
+ * (see {@code FederationManager.propagateTopologyChange}) rather than waiting for a polling cycle;
+ * the S2S poll only re-solicits, so a triggered update lost to a flap still converges.
  */
 public class FederationRoutingTable {
 
