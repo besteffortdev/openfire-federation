@@ -5,6 +5,7 @@ import com.igniterealtime.openfire.plugin.federation.FederationProperties;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import org.jivesoftware.openfire.XMPPServer;
 import org.xmpp.packet.JID;
+import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.interceptor.PacketInterceptor;
 import org.jivesoftware.openfire.interceptor.PacketRejectedException;
 import org.jivesoftware.openfire.session.Session;
@@ -95,10 +96,72 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         return (id == null ? "-" : id) + '|' + from + '|' + to;
     }
 
+    /**
+     * Set for the duration of {@link #runArchiveCapturePass}, so this interceptor sits out its own
+     * synthetic pass. Without it the pass would re-enter every check below on a stanza we have
+     * already relayed. Nothing there would actually loop today (the forwarders all early-return for
+     * a user-addressed chat message), but that is an accident of the current conditions rather than
+     * a guarantee, and a re-entrancy bug here would be a stanza storm across the overlay.
+     */
+    private static final ThreadLocal<Boolean> IN_CAPTURE_PASS = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    /**
+     * Re-runs Openfire's post-processing interceptor chain over a 1:1 message that federation
+     * delivered or relayed off the normal routing path, so the server-side capture hooks that live
+     * in that chain — a message archiver, and through it XEP-0313 MAM — actually see it.
+     *
+     * <p>Two paths need this, for the same underlying reason and neither covered by the 1.9.11 MUC
+     * fix (which drives {@code MUCEventDispatcher} instead, the hook MUC archiving listens on):
+     * <ul>
+     *   <li><b>Sending server.</b> {@code relayDirectMessage} rejects the stanza pre-processing to
+     *       suppress native S2S, which aborts routing before the {@code processed=true} pass ever
+     *       runs.</li>
+     *   <li><b>Receiving server.</b> {@link FederationStanzaFactory#directDeliver} hands a full-JID
+     *       target straight to its session, bypassing the router. (A bare JID falls back to the
+     *       router, which runs the chain itself — so only the bypass case is driven here.)</li>
+     * </ul>
+     * Measured on a live deployment before this existed: not one server had archived a single
+     * message its own user sent to a federated contact, and on 2501 all 32 full-JID inbound
+     * deliveries were missing while all the bare-JID ones were captured.
+     *
+     * <p>Scoped to {@code chat}/{@code normal} messages carrying a body — exactly what an archiver
+     * records as a conversation. That deliberately excludes the groupchat leg {@code
+     * relayDirectMessage} also handles (a local room broadcasting to a remote occupant, already
+     * logged by the room itself, and not a 1:1 conversation) and keeps the pass off the hot path
+     * for bodyless chat-state and receipt traffic.
+     *
+     * @param session the sending session, or null when the sender is remote — matches what
+     *                {@code MessageRouter} itself passes for a message it did not receive from a
+     *                local client
+     */
+    public static void runArchiveCapturePass(Packet packet, Session session) {
+        if (!(packet instanceof Message msg)) return;
+        Message.Type type = msg.getType();
+        if (type != Message.Type.chat && type != Message.Type.normal) return;
+        if (msg.getBody() == null || msg.getBody().isEmpty()) return;
+        IN_CAPTURE_PASS.set(Boolean.TRUE);
+        try {
+            InterceptorManager.getInstance().invokeInterceptors(packet, session, true, true);
+        } catch (PacketRejectedException e) {
+            // Not reachable in practice: InterceptorManager downgrades a rejection thrown from a
+            // post-processing pass to a logged error rather than rethrowing. Caught anyway because
+            // the stanza is already delivered or relayed by now — there is nothing left to prevent,
+            // and letting this escape would turn a bookkeeping step into a delivery failure.
+            Log.debug("Archive capture pass rejected for {} (ignored — already delivered): {}",
+                      packet.getTo(), e.getMessage());
+        } catch (Exception e) {
+            Log.warn("Archive capture pass failed for {}: {}", packet.getTo(), e.getMessage());
+        } finally {
+            IN_CAPTURE_PASS.remove();
+        }
+    }
+
     @Override
     public void interceptPacket(Packet packet, Session session,
                                 boolean incoming, boolean processed)
             throws PacketRejectedException {
+
+        if (IN_CAPTURE_PASS.get()) return;   // our own synthetic pass — see runArchiveCapturePass
 
         if (FederationStanzaFactory.isMarkedAsForwarded(packet)) return;
 
@@ -362,6 +425,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         }
         if (manager.forwardDirectMessage(msg)) {
             Log.info("Relayed message {} -> {} over overlay (multi-hop)", msg.getFrom(), to);
+            // The rejection below aborts routing, so Openfire never reaches the post-processing
+            // interceptor pass — which is the only place a message archiver captures a 1:1. Drive
+            // that pass ourselves, and only now that the relay has actually succeeded, so we never
+            // archive a message that did not go out. See runArchiveCapturePass.
+            runArchiveCapturePass(msg, session);
             throw new PacketRejectedException("Relayed over federation overlay to " + toDomain);
         }
     }
