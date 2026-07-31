@@ -519,8 +519,15 @@ public final class FederationStanzaFactory {
      * packet router and all PacketInterceptors (including MUC's non-occupant check).
      * Falls back to the packet router if the session is not found locally (e.g. the
      * user just disconnected between the occupant-list snapshot and delivery).
+     *
+     * @return true when the packet went straight to a session and therefore skipped the
+     *         PacketInterceptor chain that Openfire's own routers invoke. That chain is where
+     *         server-side capture hooks live — a message archiver among them — so a caller that
+     *         needs one to see this stanza has to drive it itself in that case (see
+     *         {@link FederationPacketInterceptor#runArchiveCapturePass}). False means the router
+     *         handled delivery and already ran the chain, so driving it again would double up.
      */
-    public static void directDeliver(Packet packet) {
+    public static boolean directDeliver(Packet packet) {
         JID to = packet.getTo();
         if (to != null && to.getResource() != null) {
             RoutingTable rt = XMPPServer.getInstance().getRoutingTable();
@@ -528,7 +535,7 @@ public final class FederationStanzaFactory {
             if (session != null) {
                 try {
                     session.process(packet);
-                    return;
+                    return true;
                 } catch (Exception e) {
                     Log.warn("directDeliver: session.process failed for {}: {}", to, e.getMessage());
                 }
@@ -536,6 +543,7 @@ public final class FederationStanzaFactory {
         }
         // Fallback: user just disconnected or bare JID — route normally.
         XMPPServer.getInstance().getPacketRouter().route(packet);
+        return false;
     }
 
     /**

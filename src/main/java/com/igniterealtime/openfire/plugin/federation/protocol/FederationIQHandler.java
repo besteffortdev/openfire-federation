@@ -872,7 +872,12 @@ public class FederationIQHandler extends IQHandler {
             }
             FederationStanzaFactory.markAsForwarded(msg);
             logRecipientCarbonState(msg.getTo());   // DEBUG diagnostic (multi-client carbon investigation)
-            FederationStanzaFactory.directDeliver(msg);
+            if (FederationStanzaFactory.directDeliver(msg)) {
+                // Went straight to a session, so the router's interceptor chain — and the message
+                // archiver in it — never saw this. A bare-JID target routes normally and is already
+                // captured, hence only the bypass case. Sender is remote, so no session to pass.
+                FederationPacketInterceptor.runArchiveCapturePass(msg, null);
+            }
             Log.info("direct-forward: delivered 1:1 {} -> {} (from {})", msg.getFrom(), msg.getTo(), fromDomain);
         } else {
             // Intermediate hop — forward toward the destination, appending ourselves to the trail.
