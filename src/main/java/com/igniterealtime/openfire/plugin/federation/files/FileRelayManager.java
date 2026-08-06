@@ -29,12 +29,17 @@ import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.io.IOException;
+import java.security.KeyManagementException;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -134,6 +139,9 @@ public class FileRelayManager {
                                 String verdict, String detail) { }
 
     /** Entries kept in memory (and so shown in the admin UI); the on-disk log keeps the full history. */
+    /** Copy-loop buffer for staging and hashing relayed files. */
+    private static final int IO_BUFFER_BYTES = 64 * 1024;
+
     private static final int SCAN_LOG_MAX = 200;
 
     /**
@@ -501,7 +509,8 @@ public class FileRelayManager {
         URI uri;
         try {
             uri = new URI(url);
-        } catch (Exception e) {
+        } catch (URISyntaxException e) {
+            Log.debug("File relay: '{}' is not a parseable URL, treating as non-local", url);
             return false;
         }
         String scheme = uri.getScheme();
@@ -572,7 +581,7 @@ public class FileRelayManager {
             conn.setReadTimeout(30_000);
             conn.setRequestProperty("User-Agent", "openfire-federation-file-relay");
             int status = conn.getResponseCode();
-            if (status != 200) throw new java.io.IOException("HTTP " + status);
+            if (status != 200) throw new IOException("HTTP " + status);
             String ct = conn.getContentType();
             if (ct != null && !ct.isBlank()) {
                 int semi = ct.indexOf(';');
@@ -582,11 +591,11 @@ public class FileRelayManager {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             try (InputStream in = conn.getInputStream();
                  OutputStream out = Files.newOutputStream(store.partPath(t.id))) {
-                byte[] buf = new byte[65536];
+                byte[] buf = new byte[IO_BUFFER_BYTES];
                 int n;
                 while ((n = in.read(buf)) > 0) {
                     total += n;
-                    if (total > cap) throw new java.io.IOException("exceeds size cap (" + cap + " bytes)");
+                    if (total > cap) throw new IOException("exceeds size cap (" + cap + " bytes)");
                     digest.update(buf, 0, n);
                     out.write(buf, 0, n);
                     t.touch();
@@ -1364,15 +1373,15 @@ public class FileRelayManager {
     private static String sha256Hex(byte[] data) {
         try {
             return toHex(MessageDigest.getInstance("SHA-256").digest(data));
-        } catch (Exception e) {
+        } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
 
-    private static String sha256OfFile(Path path) throws Exception {
+    private static String sha256OfFile(Path path) throws IOException, NoSuchAlgorithmException {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         try (InputStream in = Files.newInputStream(path)) {
-            byte[] buf = new byte[65536];
+            byte[] buf = new byte[IO_BUFFER_BYTES];
             int n;
             while ((n = in.read(buf)) > 0) digest.update(buf, 0, n);
         }
@@ -1390,7 +1399,7 @@ public class FileRelayManager {
      * cert — a permissive trust manager is acceptable because the URL was already validated as
      * pointing at this server, and content integrity is re-hashed for the relay anyway.
      */
-    private SSLSocketFactory trustAllFactory() throws Exception {
+    private SSLSocketFactory trustAllFactory() throws NoSuchAlgorithmException, KeyManagementException {
         SSLSocketFactory f = trustAllFactory;
         if (f == null) {
             SSLContext ctx = SSLContext.getInstance("TLS");
@@ -1398,7 +1407,7 @@ public class FileRelayManager {
                 public void checkClientTrusted(X509Certificate[] chain, String authType) { }
                 public void checkServerTrusted(X509Certificate[] chain, String authType) { }
                 public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-            } }, new java.security.SecureRandom());
+            } }, new SecureRandom());
             trustAllFactory = f = ctx.getSocketFactory();
         }
         return f;
