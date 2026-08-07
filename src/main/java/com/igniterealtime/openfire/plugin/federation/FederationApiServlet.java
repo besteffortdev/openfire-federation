@@ -338,6 +338,7 @@ public class FederationApiServlet extends HttpServlet {
              .append("\"name\":\"").append(esc(e.fileName())).append("\",")
              .append("\"size\":").append(e.sizeBytes()).append(",")
              .append("\"origin\":\"").append(esc(e.origin())).append("\",")
+             .append("\"stage\":\"").append(esc(e.stage())).append("\",")
              .append("\"verdict\":\"").append(esc(e.verdict())).append("\",")
              .append("\"detail\":\"").append(esc(e.detail())).append("\"")
              .append("}"));

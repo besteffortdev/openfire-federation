@@ -979,13 +979,15 @@
                 </div>
                 <div class="setting">
                     <div class="setting-main">
-                        <div class="setting-title">Virus scan received files (ClamAV)</div>
+                        <div class="setting-title">Virus scan federated files (ClamAV)</div>
                         <div class="setting-desc">
                             When enabled, a file's content is scanned by a <code>clamd</code>
-                            daemon before it becomes servable to a local recipient (destination
-                            only — never a transit hop). A scan that cannot complete (clamd
-                            unreachable) is treated as a failure: the relay fails closed rather
-                            than serving unscanned content while this is on.
+                            daemon at both ends of a relay: here on upload, before the file is
+                            offered to any peer, and again on the receiving server before it
+                            becomes servable to a local recipient. A pure transit hop never
+                            scans, because it never decodes content. A scan that cannot complete
+                            (clamd unreachable) is treated as a failure at either end: the relay
+                            fails closed rather than moving unscanned content while this is on.
                         </div>
                     </div>
                     <div class="setting-ctl">
@@ -1037,19 +1039,22 @@
                             <th>File</th>
                             <th>Size</th>
                             <th>From</th>
+                            <th>Stage</th>
                             <th>Result</th>
                             <th>Detail</th>
                         </tr>
                     </thead>
                     <tbody id="av-scan-tbody">
-                        <tr><td colspan="6" class="empty">Loading…</td></tr>
+                        <tr><td colspan="7" class="empty">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>
         </div>
         <p class="panel-foot">
-            Only received files (ingress) are scanned — a transit hop never decodes content.
-            Populates once virus scanning is turned on above. The 200 most recent entries are shown
+            A file is scanned twice: once here as <em>egress</em>, before it is offered to any
+            peer, and again as <em>ingress</em> on the server that receives it. A pure transit hop
+            never scans, because it never decodes content. Populates once virus scanning is turned
+            on above. The 200 most recent entries are shown
             here; the full history is written to
             <code id="scan-log-path">the server's log directory</code> and survives a plugin reload
             or server restart, kept for as long as <em>Activity log retention</em> allows.
