@@ -780,7 +780,8 @@ public class FederatedRoomManager {
         try {
             String d = new JID(nick).getDomain();
             return (d == null || d.isEmpty()) ? fallback : d;
-        } catch (Exception e) {
+        } catch (IllegalArgumentException notAJid) {
+            // A plain nick with no "@" — the common case for a local occupant, not an error.
             return fallback;
         }
     }

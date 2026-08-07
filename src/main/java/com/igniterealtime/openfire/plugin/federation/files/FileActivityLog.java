@@ -85,9 +85,60 @@ final class FileActivityLog {
                 Files.createDirectories(file.getParent());
                 Files.writeString(file, header + "\n", StandardCharsets.UTF_8,
                         StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                return;
             }
         } catch (IOException e) {
             Log.warn("Could not create file activity log {}: {}", file, e.getMessage());
+            return;
+        }
+        migrateHeader(file);
+    }
+
+    /**
+     * Rewrites a stale {@code #} header in place when a release adds a column. Without this the
+     * file would keep describing the old layout indefinitely — {@link #prune} does write the
+     * current header, but only on a run that actually drops something, so a log whose entries are
+     * all inside the retention window would never be corrected. Since the header is what tells an
+     * operator (and their {@code awk}/{@code cut}) which column is which, a wrong one is worse
+     * than none. Existing records are left exactly as written; readers decode positionally and
+     * tolerate both widths.
+     */
+    private void migrateHeader(Path file) {
+        String existing;
+        try (BufferedReader r = reader(file)) {
+            existing = r.readLine();
+        } catch (IOException e) {
+            Log.warn("Could not read header of file activity log {}: {}", file, e.getMessage());
+            return;
+        }
+        if (existing == null || !existing.startsWith("#") || existing.equals(header)) return;
+
+        Path tmp = file.resolveSibling(fileName + ".tmp");
+        try (BufferedReader r = reader(file);
+             BufferedWriter w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8,
+                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
+                     StandardOpenOption.WRITE)) {
+            w.write(header);
+            w.newLine();
+            r.readLine();                       // drop the stale header
+            String line;
+            while ((line = r.readLine()) != null) {
+                w.write(line);
+                w.newLine();
+            }
+        } catch (IOException e) {
+            Log.warn("Could not rewrite header of file activity log {} (left unchanged): {}",
+                     file, e.getMessage());
+            deleteQuietly(tmp);
+            return;
+        }
+        try {
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            Log.info("Updated column header of file activity log {}", file);
+        } catch (IOException e) {
+            Log.warn("Could not replace file activity log {} after header update (left unchanged): {}",
+                     file, e.getMessage());
+            deleteQuietly(tmp);
         }
     }
 

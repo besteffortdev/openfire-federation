@@ -26,6 +26,7 @@ import org.jivesoftware.openfire.session.IncomingServerSession;
 import org.jivesoftware.openfire.session.OutgoingServerSession;
 import org.jivesoftware.openfire.roster.Roster;
 import org.jivesoftware.openfire.roster.RosterItem;
+import org.jivesoftware.openfire.user.UserNotFoundException;
 import org.jivesoftware.openfire.user.PresenceEventDispatcher;
 import org.jivesoftware.openfire.user.PresenceEventListener;
 import org.jivesoftware.util.JiveGlobals;
@@ -36,6 +37,10 @@ import org.xmpp.packet.JID;
 import org.xmpp.packet.Message;
 import org.xmpp.packet.Presence;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateEncodingException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -459,7 +464,9 @@ public class FederationManager {
         Roster roster;
         try {
             roster = XMPPServer.getInstance().getRosterManager().getRoster(user.getNode());
-        } catch (Exception e) {
+        } catch (UserNotFoundException e) {
+            // Routine: the account went away between the presence event and this call.
+            Log.debug("No roster for {} — nothing to probe", user, e);
             return;
         }
         if (roster == null) return;
@@ -2232,21 +2239,25 @@ public class FederationManager {
     /** SHA-256 (lowercase hex) of arbitrary bytes, or null on failure. */
     private static String sha256Hex(byte[] data) {
         try {
-            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(data);
+            byte[] d = MessageDigest.getInstance("SHA-256").digest(data);
             StringBuilder sb = new StringBuilder(d.length * 2);
             for (byte b : d) sb.append(Character.forDigit((b >> 4) & 0xF, 16))
                                .append(Character.forDigit(b & 0xF, 16));
             return sb.toString();
-        } catch (Exception e) {
+        } catch (NoSuchAlgorithmException e) {
+            // Every JVM is required to ship SHA-256, so reaching this means the platform is broken
+            // — and certificate pinning silently stops working. It must not pass unremarked.
+            Log.error("SHA-256 unavailable — certificate pinning is disabled", e);
             return null;
         }
     }
 
     /** SHA-256 (lowercase hex) of a certificate's encoded form (legacy pin format), or null. */
-    private static String sha256Hex(java.security.cert.Certificate cert) {
+    private static String sha256Hex(Certificate cert) {
         try {
             return sha256Hex(cert.getEncoded());
-        } catch (Exception e) {
+        } catch (CertificateEncodingException e) {
+            Log.warn("Peer certificate could not be encoded for pinning: {}", e.getMessage());
             return null;
         }
     }
@@ -2255,27 +2266,24 @@ public class FederationManager {
     private static final String SPKI_PREFIX = "spki:";
 
     /** {@code "spki:<sha256>"} of the LEAF certificate's SubjectPublicKeyInfo, or null on failure. */
-    private static String leafSpkiFp(java.security.cert.Certificate[] chain) {
-        try {
-            String hex = sha256Hex(chain[0].getPublicKey().getEncoded());
-            return hex == null ? null : SPKI_PREFIX + hex;
-        } catch (Exception e) {
-            return null;
-        }
+    private static String leafSpkiFp(Certificate[] chain) {
+        if (chain == null || chain.length == 0 || chain[0].getPublicKey() == null) return null;
+        String hex = sha256Hex(chain[0].getPublicKey().getEncoded());
+        return hex == null ? null : SPKI_PREFIX + hex;
     }
 
     /** The top-of-chain cert the peer presents on the S2S link (outgoing session preferred). */
-    private java.security.cert.Certificate[] peerCertChain(String domain) {
+    private Certificate[] peerCertChain(String domain) {
         String local = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         SessionManager sm = XMPPServer.getInstance().getSessionManager();
         try {
             OutgoingServerSession out = sm.getOutgoingServerSession(new DomainPair(local, domain));
             if (out != null) {
-                java.security.cert.Certificate[] c = out.getPeerCertificates();
+                Certificate[] c = out.getPeerCertificates();
                 if (c != null && c.length > 0) return c;
             }
             for (IncomingServerSession in : sm.getIncomingServerSessions(domain)) {
-                java.security.cert.Certificate[] c = in.getPeerCertificates();
+                Certificate[] c = in.getPeerCertificates();
                 if (c != null && c.length > 0) return c;
             }
         } catch (Exception e) {
@@ -2293,7 +2301,7 @@ public class FederationManager {
      * available (e.g. a plain server-dialback link with no TLS).
      */
     public void observePeerCertificate(String domain) {
-        java.security.cert.Certificate[] chain = peerCertChain(domain);
+        Certificate[] chain = peerCertChain(domain);
         if (chain == null || chain.length == 0) return;   // no TLS cert visible — nothing to pin
         String fp = leafSpkiFp(chain);
         if (fp == null) return;

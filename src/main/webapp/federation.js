@@ -999,7 +999,7 @@ function renderAvScanLog(entries) {
     const tbody = document.getElementById('av-scan-tbody');
     if (!tbody) return;
     if (entries.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">No files scanned yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No files scanned yet.</td></tr>';
         return;
     }
     // Server already returns newest-first; keep that order.
@@ -1009,12 +1009,17 @@ function renderAvScanLog(entries) {
                           : verdict === 'INFECTED' ? 'badge-scan-infected'
                           : 'badge-scan-error';
         const label = verdict === 'CLEAN' ? 'clean' : verdict === 'INFECTED' ? 'infected' : 'error';
+        // Same wording and badges as the Rejected files table, so "which side blocked this?"
+        // reads identically in both.
+        const stageLabel = e.stage === 'egress' ? 'egress (outbound)' : 'ingress (inbound)';
+        const stageBadge = e.stage === 'egress' ? 'badge-out' : 'badge-in';
         return `
         <tr>
             <td class="ts">${new Date(e.when).toLocaleString()}</td>
             <td>${escHtml(e.name)}</td>
             <td>${fmtBytes(e.size)}</td>
             <td>${escHtml(e.origin)}</td>
+            <td><span class="badge ${stageBadge}">${stageLabel}</span></td>
             <td><span class="badge ${badgeClass}">${label}</span></td>
             <td>${escHtml(e.detail)}</td>
         </tr>`;

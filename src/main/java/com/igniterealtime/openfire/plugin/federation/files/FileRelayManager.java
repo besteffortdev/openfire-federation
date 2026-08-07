@@ -29,12 +29,17 @@ import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.io.IOException;
+import java.security.KeyManagementException;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -127,13 +132,19 @@ public class FileRelayManager {
 
     /**
      * One AV scan outcome for the admin UI's "recently scanned files" table — newest first.
-     * {@code verdict} is {@link ClamAvClient.Verdict#name()}. Persisted to
-     * {@link #scanFileLog} and reloaded at start, so the table survives a reload/restart.
+     * {@code verdict} is {@link ClamAvClient.Verdict#name()}. {@code stage} is {@code "egress"}
+     * (scanned here before being offered to a peer) or {@code "ingress"} (scanned on receipt),
+     * so a relayed file produces one row on the sending server and one on the receiving one.
+     * Persisted to {@link #scanFileLog} and reloaded at start, so the table survives a
+     * reload/restart.
      */
     public record ScanLogEntry(long when, String fileName, long sizeBytes, String origin,
-                                String verdict, String detail) { }
+                                String stage, String verdict, String detail) { }
 
     /** Entries kept in memory (and so shown in the admin UI); the on-disk log keeps the full history. */
+    /** Copy-loop buffer for staging and hashing relayed files. */
+    private static final int IO_BUFFER_BYTES = 64 * 1024;
+
     private static final int SCAN_LOG_MAX = 200;
 
     /**
@@ -201,7 +212,7 @@ public class FileRelayManager {
      * of truth — {@link #loadPersistedLogs()} decodes positionally.
      */
     private final FileActivityLog scanFileLog = new FileActivityLog("federation-file-scans.log",
-            "#time\tfile\tsizeBytes\tpeer\tverdict\tdetail");
+            "#time\tfile\tsizeBytes\tpeer\tstage\tverdict\tdetail");
     private final FileActivityLog rejectionFileLog = new FileActivityLog("federation-file-rejections.log",
             "#time\tfile\tsizeBytes\tpeer\tstage\treason\tdetail");
     private ScheduledExecutorService exec;
@@ -255,13 +266,14 @@ public class FileRelayManager {
     }
 
     private void recordScan(String fileName, long sizeBytes, String origin,
-                             String verdict, String detail) {
+                             String stage, String verdict, String detail) {
         ScanLogEntry e = new ScanLogEntry(System.currentTimeMillis(), fileName, sizeBytes,
-                origin == null ? "" : origin, verdict, detail == null ? "" : detail);
+                origin == null ? "" : origin, stage, verdict, detail == null ? "" : detail);
         remember(e);
         // Outside the lock: an append is a small open/write/close, but it is still disk I/O, and
         // the admin UI reads these lists under the same monitor.
-        scanFileLog.append(e.fileName(), Long.toString(e.sizeBytes()), e.origin(), e.verdict(), e.detail());
+        scanFileLog.append(e.fileName(), Long.toString(e.sizeBytes()), e.origin(), e.stage(),
+                e.verdict(), e.detail());
     }
 
     private synchronized void remember(ScanLogEntry e) {
@@ -314,9 +326,15 @@ public class FileRelayManager {
             scanLog.clear();
             for (FileActivityLog.Row r : scans) {          // newest first, matching the deque
                 List<String> f = r.fields();
-                if (f.size() < 5) continue;
-                scanLog.addLast(new ScanLogEntry(r.when(), f.get(0), parseSize(f.get(1)),
-                        f.get(2), f.get(3), f.get(4)));
+                // Six fields since 1.10.2; a five-field row predates the stage column and can
+                // only have come from the ingress scan, which was the sole scan site back then.
+                if (f.size() >= 6) {
+                    scanLog.addLast(new ScanLogEntry(r.when(), f.get(0), parseSize(f.get(1)),
+                            f.get(2), f.get(3), f.get(4), f.get(5)));
+                } else if (f.size() == 5) {
+                    scanLog.addLast(new ScanLogEntry(r.when(), f.get(0), parseSize(f.get(1)),
+                            f.get(2), "ingress", f.get(3), f.get(4)));
+                }
             }
             rejectionLog.clear();
             for (FileActivityLog.Row r : rejections) {
@@ -501,7 +519,8 @@ public class FileRelayManager {
         URI uri;
         try {
             uri = new URI(url);
-        } catch (Exception e) {
+        } catch (URISyntaxException e) {
+            Log.debug("File relay: '{}' is not a parseable URL, treating as non-local", url);
             return false;
         }
         String scheme = uri.getScheme();
@@ -572,7 +591,7 @@ public class FileRelayManager {
             conn.setReadTimeout(30_000);
             conn.setRequestProperty("User-Agent", "openfire-federation-file-relay");
             int status = conn.getResponseCode();
-            if (status != 200) throw new java.io.IOException("HTTP " + status);
+            if (status != 200) throw new IOException("HTTP " + status);
             String ct = conn.getContentType();
             if (ct != null && !ct.isBlank()) {
                 int semi = ct.indexOf(';');
@@ -582,11 +601,11 @@ public class FileRelayManager {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             try (InputStream in = conn.getInputStream();
                  OutputStream out = Files.newOutputStream(store.partPath(t.id))) {
-                byte[] buf = new byte[65536];
+                byte[] buf = new byte[IO_BUFFER_BYTES];
                 int n;
                 while ((n = in.read(buf)) > 0) {
                     total += n;
-                    if (total > cap) throw new java.io.IOException("exceeds size cap (" + cap + " bytes)");
+                    if (total > cap) throw new IOException("exceeds size cap (" + cap + " bytes)");
                     digest.update(buf, 0, n);
                     out.write(buf, 0, n);
                     t.touch();
@@ -600,6 +619,34 @@ public class FileRelayManager {
             t.touch();
             failParked(t.id, "stage-failed");
             return;
+        }
+        // Egress AV gate — scan what we are about to offer to peers, mirroring the ingress scan in
+        // finalizeReceive. Only a file uploaded to this server reaches here (a transit hop never
+        // decodes content), so a relayed file is scanned once at its source and once at its
+        // destination rather than only on arrival. Fails closed for the same reason ingress does:
+        // a file the scanner never saw must not be treated as clean.
+        if (FederationProperties.FILES_AV_ENABLED.getValue()) {
+            ClamAvClient.ScanResult scan = ClamAvClient.scan(store.partPath(t.id));
+            recordScan(t.name, total, t.origin, "egress", scan.verdict().name(), scan.detail());
+            if (scan.verdict() != ClamAvClient.Verdict.CLEAN) {
+                boolean infected = scan.verdict() == ClamAvClient.Verdict.INFECTED;
+                if (infected) {
+                    Log.warn("File relay: AV detected '{}' in locally-uploaded file {} — "
+                           + "not offering it to peers", scan.detail(), t.name);
+                } else {
+                    Log.warn("File relay: AV scan unavailable for locally-uploaded file {} ({}) — "
+                           + "not offering it to peers (fails closed)", t.name, scan.detail());
+                }
+                recordRejection(t.name, total, t.origin, "egress",
+                        infected ? "AV_INFECTED" : "AV_ERROR", scan.detail());
+                store.deletePart(t.id);
+                t.state = State.FAILED;
+                t.rejected = true;
+                tombstoneRejection(t.id);
+                t.touch();
+                failParked(t.id, infected ? "av-infected" : "av-error");
+                return;
+            }
         }
         try {
             store.finalizePart(t.id, t.name, mime, total, sha256);
@@ -996,7 +1043,7 @@ public class FileRelayManager {
             }
             if (FederationProperties.FILES_AV_ENABLED.getValue()) {
                 ClamAvClient.ScanResult scan = ClamAvClient.scan(store.partPath(t.id));
-                recordScan(t.name, t.size, t.origin, scan.verdict().name(), scan.detail());
+                recordScan(t.name, t.size, t.origin, "ingress", scan.verdict().name(), scan.detail());
                 String avWireReason = null;
                 switch (scan.verdict()) {
                     case INFECTED -> {
@@ -1364,15 +1411,15 @@ public class FileRelayManager {
     private static String sha256Hex(byte[] data) {
         try {
             return toHex(MessageDigest.getInstance("SHA-256").digest(data));
-        } catch (Exception e) {
+        } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
 
-    private static String sha256OfFile(Path path) throws Exception {
+    private static String sha256OfFile(Path path) throws IOException, NoSuchAlgorithmException {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         try (InputStream in = Files.newInputStream(path)) {
-            byte[] buf = new byte[65536];
+            byte[] buf = new byte[IO_BUFFER_BYTES];
             int n;
             while ((n = in.read(buf)) > 0) digest.update(buf, 0, n);
         }
@@ -1390,7 +1437,7 @@ public class FileRelayManager {
      * cert — a permissive trust manager is acceptable because the URL was already validated as
      * pointing at this server, and content integrity is re-hashed for the relay anyway.
      */
-    private SSLSocketFactory trustAllFactory() throws Exception {
+    private SSLSocketFactory trustAllFactory() throws NoSuchAlgorithmException, KeyManagementException {
         SSLSocketFactory f = trustAllFactory;
         if (f == null) {
             SSLContext ctx = SSLContext.getInstance("TLS");
@@ -1398,7 +1445,7 @@ public class FileRelayManager {
                 public void checkClientTrusted(X509Certificate[] chain, String authType) { }
                 public void checkServerTrusted(X509Certificate[] chain, String authType) { }
                 public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-            } }, new java.security.SecureRandom());
+            } }, new SecureRandom());
             trustAllFactory = f = ctx.getSocketFactory();
         }
         return f;
