@@ -78,8 +78,8 @@ trade-off, never as a defect on its own.
 
 | Rule | Status here |
 |---|---|
-| **IDS03-J** Do not log unsanitized user input (log forging) | **GAP** — `FileRelayManager:985` and `FederationIQHandler:1961` log a peer-supplied `reason` attribute verbatim. XML attribute-value normalization folds a literal newline to a space, but a `&#10;` character reference survives it, so a hostile peer can forge log lines. |
-| **IDS17-J** Prevent XML external entity attacks | **GAP** — `FederationFileConfig:82` uses a bare `new SAXReader()`. The input is admin-owned `conf/openfire.xml`, so the practical risk is low, but the rule is normative and the fix is three `setFeature` calls. |
+| **IDS03-J** Do not log unsanitized user input (log forging) | **FIXED in 1.10.4** — peer-supplied `reason`, `requester` and `url` reached `Log.*` verbatim at 8 call sites in `FileRelayManager`. XML attribute-value normalization folds a literal newline to a space, but a `&#10;` character reference survives it, so a peer could forge log lines. Now routed through `LogSafe.text()`. *(The first audit also named `FederationIQHandler:1961`; that was a false positive — both of its callers pass string literals, so nothing untrusted reaches it.)* |
+| **IDS17-J** Prevent XML external entity attacks | **FIXED in 1.10.4** — `FederationFileConfig` used a bare `new SAXReader()`. Input is admin-owned `conf/openfire.xml` so practical risk was low, but the rule is normative; DOCTYPE declarations and both external-entity classes are now refused. |
 | **IDS16-J** Prevent XML injection | **PASS** — stanzas are built through dom4j `Element`/`addAttribute`, never string-concatenated. |
 | **FIO16-J** Canonicalize path names before validating them | **PASS** — every remote-supplied transfer id is gated by `isHexId()` (exactly 64 lowercase hex chars) before it can reach `baseDir.resolve(id)`. `handleFileOffer`/`Chunk`/`Error` reach a `Path` only via an already-registered transfer. Verified; do not "harden" again. |
 | **FIO01-J** Create files with appropriate access permissions | **GAP (minor)** — the relay spool and the two activity logs are created at the process umask. Relayed file content sits in that spool; `0700` on the directory would be tighter. |
@@ -111,7 +111,7 @@ trade-off, never as a defect on its own.
 | **OBJ01-J / EJ Item 15** Minimize accessibility | **PASS** — package-private is used deliberately (`FileActivityLog`, `FileRelayStore`). |
 | **OBJ05-J / OBJ13-J** Do not return references to private mutable members | Review item wherever a getter returns a collection. |
 | **EJ Item 17** Minimize mutability | **PASS** — `record` used for value types (`ScanLogEntry`, `StoredFile`, `Row`). |
-| **EJ Item 62** Avoid strings where other types are more appropriate | **GAP** — the strongest design gap here. `stage` is `"egress"`/`"ingress"`, `verdict` and `reason` are `String`, the servlet dispatches on `String action`. Each should be an `enum`; the compiler would then catch a typo that currently ships as a silently-wrong badge in the admin UI. |
+| **EJ Item 62** Avoid strings where other types are more appropriate | **FIXED in 1.10.4, in part.** `stage` → `RelayStage`, rejection `reason` → `RejectionReason`. The payoff was larger than expected: each rejection site used to spell *two* unchecked strings — a log code (`"AV_INFECTED"`) beside a wire code (`"av-infected"`) — and nothing verified they agreed. `RejectionReason` now carries both, and `PERMANENT_REJECT_REASONS` is derived from it instead of restated. **Deliberately not converted:** `verdict`, because it is only ever written from `ClamAvClient.Verdict.name()` — there is no loose string to mistype — and `Verdict` is package-private to the AV client, so publishing it through a record read by the servlet would widen that client's API for no gain. Likewise the servlet's `String action`: that is the browser's wire contract, not an internal representation, and Item 62 is about the latter. |
 | **MET09-J** `equals()` implies `hashCode()` | **PASS** — records generate both. |
 | **EJ Item 54** Return empty collections, not null | **PASS** |
 
@@ -120,7 +120,7 @@ trade-off, never as a defect on its own.
 
 | Rule | Status here |
 |---|---|
-| **S1192** String literals should not be duplicated | **GAP** — `"destination"` ×25, `"origin"` ×23, `"federation"` ×23, `"domain"` ×23, `"remote"` ×15, `"ingress"` ×9. Worth taking seriously: in the large-scale Sonar fault-prediction study, S1192 was the **single strongest predictor** of faults among 174 rules, despite being classified as a minor code smell. These are XML attribute names — they belong in constants. |
+| **S1192** String literals should not be duplicated | **FIXED in 1.10.4** for the protocol vocabulary — ~104 occurrences of `origin`, `destination`, `via`, `remote`, `local`, `ts`, `id` and the `federation` element now resolve to named constants on `FederationStanzaFactory`. Worth taking seriously: in the large-scale Sonar fault-prediction study S1192 was the **single strongest predictor** of faults among 174 rules, despite being rated a minor smell. Two collisions were found and deliberately *not* merged: `"federation"` also names an unrelated `openfire.xml` config block, and `"id"` also names a XEP-0060 PEP `<item/>` id. Hoisting those together would have coupled vocabularies that are free to diverge. |
 | **Cognitive complexity** | **Acceptable** — 14 methods over 60 lines, longest ~115 (`injectPresence`). The 642-line `doPost` god-method was removed in 1.10.1. |
 | **S125** No commented-out code | **PASS** — zero. |
 | **S1135** No `TODO`/`FIXME` tags | **PASS** — zero across Java and JS. Notable; these are the #1 and #2 most common findings in Sonar's own corpus. |
@@ -151,14 +151,37 @@ These are not style. Each has a specific, checkable code consequence.
 
 Ordered by (fault-proneness × effort). Nothing here is a live defect; these are compliance gaps.
 
-1. **Introduce enums for `stage`, `verdict` and `reason`** (EJ Item 62) — highest design value; converts a class of silent UI bugs into compile errors.
-2. **Hoist duplicated XML attribute-name literals into constants** (S1192) — the strongest empirical fault predictor on the list.
-3. **Sanitize peer-supplied strings before logging** (IDS03-J) — 2 call sites, small fix, closes log forging.
-4. **Harden `SAXReader` against XXE** (IDS17-J) — 3 lines, normative rule, low practical risk.
+**Done in 1.10.4:**
+
+1. ~~Introduce enums for `stage` and `reason`~~ (EJ Item 62) — done; `verdict` and the servlet's `action` deliberately left as strings, see section D.
+2. ~~Hoist duplicated protocol literals into constants~~ (S1192) — done, ~104 sites.
+3. ~~Sanitize peer-supplied strings before logging~~ (IDS03-J) — done, 8 sites via `LogSafe`.
+4. ~~Harden `SAXReader` against XXE~~ (IDS17-J) — done.
+
+**Remaining:**
+
 5. **Narrow the 97 broad catches** (ERR07-J) — highest total effort; do it file-by-file during other work, not as one sweep. `FederationManager` first.
 6. **Remove 2 unused imports** (S1128) — trivial.
 7. **Restrict spool/log file permissions to `0700`** (FIO01-J) — one call at creation.
 8. **Add a test source root** (ACM 2.5 / SE 3.10) — blocked offline: JUnit 5 is not in the local `~/.m2`, and adding it needs network access that the `mvn -o` fleet builds deliberately avoid. Highest value once unblocked; start with `FederationApiServlet`'s reply helpers and `FederationRoutingTable`'s Bellman-Ford.
+
+### How 1.10.4 was verified, given there are no tests
+
+Worth recording, because it is the pattern to reuse until item 8 is unblocked. The pre-change tree
+was built in a throwaway `git worktree` alongside the new one, and every string constant in the
+five affected classes compared between the two:
+
+- `FederationStanzaFactory`, `FederationIQHandler`, `FederationPacketInterceptor` and
+  `FederationApiServlet` — **string constants identical**. Since the whole protocol is those
+  literals, that is direct evidence the wire format and the admin-UI JSON did not move.
+- `FileRelayManager` — the only deltas were the *duplicate* stage/reason literals, which is exactly
+  what moving them into enums should remove.
+
+The enums were then executed to confirm they reproduce the removed literals exactly
+(`EGRESS.token()` → `egress`, `AV_INFECTED.wireReason()` → `av-infected`, …), and `LogSafe` was
+exercised against forged newlines, CRLF, tabs, ANSI escapes, over-length input and Unicode. The
+admin UI needed no change: its `REJECTION_REASON_LABELS` keys already match the enum constant names
+and its stage comparisons already match `token()`.
 
 ## Sources
 

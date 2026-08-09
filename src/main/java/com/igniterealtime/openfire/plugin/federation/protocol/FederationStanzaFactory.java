@@ -34,6 +34,45 @@ public final class FederationStanzaFactory {
 
     public static final String NS = "urn:xmpp:federation:1";
 
+    // ── Protocol vocabulary ───────────────────────────────────────────────────
+    // The element and attribute names this protocol is made of. Named rather than repeated so the
+    // wire format has one definition instead of ~90 identical string literals spread over three
+    // classes, and so a reader can see the whole vocabulary in one place. Every writer here has a
+    // matching reader in FederationIQHandler or FileRelayManager; a typo in either used to be
+    // silent, producing a stanza the other side simply ignored.
+
+    /** The IQ child element every federation stanza hangs off, qualified by {@link #NS}. */
+    public static final String ELEMENT = "federation";
+
+    /** Domain a payload originated at. */
+    public static final String ATTR_ORIGIN = "origin";
+
+    /** Domain a payload is ultimately addressed to, as opposed to the next hop it is sent to. */
+    public static final String ATTR_DESTINATION = "destination";
+
+    /**
+     * Deliberately overloaded, and worth knowing about before reusing it: on a {@code routing-update}
+     * entry this is the single next-hop domain of one route, whereas on a room advertisement or a
+     * mapping probe it is the accumulated hop trail used for loop prevention. Same wire name, two
+     * readings — which one applies is decided by the element it sits on.
+     */
+    public static final String ATTR_VIA = "via";
+
+    /** Room mapping: the peer's side of the pairing. */
+    public static final String ATTR_REMOTE = "remote";
+
+    /** Room mapping: our side of the pairing. */
+    public static final String ATTR_LOCAL = "local";
+
+    /** Epoch-millis send stamp, echoed back by a mapping-pong so the sender can compute an RTT. */
+    public static final String ATTR_TS = "ts";
+
+    /**
+     * File relay: the transfer id (the SHA-256 of the upload URL). Distinct from the {@code id} of
+     * a PEP {@code <item/>}, which is XEP-0060's and is deliberately not shared with this constant.
+     */
+    public static final String ATTR_ID = "id";
+
     private static final Logger Log = LoggerFactory.getLogger(FederationStanzaFactory.class);
 
     private FederationStanzaFactory() {}
@@ -71,7 +110,7 @@ public final class FederationStanzaFactory {
      */
     public static IQ peerAnnounce(String toDomain, boolean isReply, boolean untrusted) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element ann = fed.addElement("peer-announce");
         if (isReply) ann.addAttribute("reply", "true");
         if (untrusted) ann.addAttribute("untrusted", "true");
@@ -82,7 +121,7 @@ public final class FederationStanzaFactory {
 
     public static IQ peerWithdraw(String toDomain) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         fed.addElement("peer-withdraw");
         return iq;
     }
@@ -94,7 +133,7 @@ public final class FederationStanzaFactory {
      */
     public static IQ peerDisable(String toDomain) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         fed.addElement("peer-disable");
         return iq;
     }
@@ -103,13 +142,13 @@ public final class FederationStanzaFactory {
 
     public static IQ routingUpdate(String toDomain, Collection<RouteEntry> table) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element upd = fed.addElement("routing-update");
         for (RouteEntry entry : table) {
             Element e = upd.addElement("entry");
-            e.addAttribute("destination", entry.destination());
-            e.addAttribute("hops",        String.valueOf(entry.hops()));
-            e.addAttribute("via",         entry.nextHop());
+            e.addAttribute(ATTR_DESTINATION, entry.destination());
+            e.addAttribute("hops", String.valueOf(entry.hops()));
+            e.addAttribute(ATTR_VIA, entry.nextHop());
         }
         return iq;
     }
@@ -121,7 +160,7 @@ public final class FederationStanzaFactory {
      */
     public static IQ routingSolicit(String toDomain) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         fed.addElement("routing-solicit");
         return iq;
     }
@@ -149,14 +188,14 @@ public final class FederationStanzaFactory {
     public static IQ roomAdvertisement(String toDomain, List<FederatedRoom> rooms,
                                        String originDomain, String via) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element adv = fed.addElement("room-advertisement");
-        if (originDomain != null) adv.addAttribute("origin", originDomain);
-        if (via != null && !via.isEmpty()) adv.addAttribute("via", via);
+        if (originDomain != null) adv.addAttribute(ATTR_ORIGIN, originDomain);
+        if (via != null && !via.isEmpty()) adv.addAttribute(ATTR_VIA, via);
         for (FederatedRoom room : rooms) {
             Element r = adv.addElement("room");
-            r.addAttribute("jid",         room.jid());
-            r.addAttribute("name",        room.name()        != null ? room.name()        : "");
+            r.addAttribute("jid", room.jid());
+            r.addAttribute("name", room.name()        != null ? room.name()        : "");
             r.addAttribute("description", room.description() != null ? room.description() : "");
             // Per-room visibility ACL travels with the ad so every relay enforces it. The attribute
             // is emitted only for a non-empty ACL; an empty ACL means "visible to nobody", so such a
@@ -186,13 +225,13 @@ public final class FederationStanzaFactory {
     public static IQ roomMapping(String nextHop, String destination, String originDomain,
                                  String localJid, String remoteJid) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element mapping = fed.addElement("room-mapping");
-        mapping.addAttribute("destination", destination);
-        mapping.addAttribute("origin",      originDomain);
+        mapping.addAttribute(ATTR_DESTINATION, destination);
+        mapping.addAttribute(ATTR_ORIGIN, originDomain);
         Element map = mapping.addElement("map");
-        map.addAttribute("local",  localJid);
-        map.addAttribute("remote", remoteJid);
+        map.addAttribute(ATTR_LOCAL, localJid);
+        map.addAttribute(ATTR_REMOTE, remoteJid);
         return iq;
     }
 
@@ -242,15 +281,15 @@ public final class FederationStanzaFactory {
                                       String originDomain, String localJid, String remoteJid,
                                       String token, String reason) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element mapping = fed.addElement(element);
-        mapping.addAttribute("destination", destination);
-        mapping.addAttribute("origin",      originDomain);
-        if (token  != null && !token.isEmpty())  mapping.addAttribute("token",  token);
+        mapping.addAttribute(ATTR_DESTINATION, destination);
+        mapping.addAttribute(ATTR_ORIGIN, originDomain);
+        if (token  != null && !token.isEmpty())  mapping.addAttribute("token", token);
         if (reason != null && !reason.isEmpty()) mapping.addAttribute("reason", reason);
         Element map = mapping.addElement("map");
-        map.addAttribute("local",  localJid);
-        map.addAttribute("remote", remoteJid);
+        map.addAttribute(ATTR_LOCAL, localJid);
+        map.addAttribute(ATTR_REMOTE, remoteJid);
         return iq;
     }
 
@@ -281,12 +320,12 @@ public final class FederationStanzaFactory {
     private static IQ mappingProbe(String element, String nextHop, String destination,
                                    String originDomain, String viaTrail, String ts) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element probe = fed.addElement(element);
-        probe.addAttribute("destination", destination);
-        probe.addAttribute("origin",      originDomain);
-        if (viaTrail != null && !viaTrail.isEmpty()) probe.addAttribute("via", viaTrail);
-        if (ts != null && !ts.isEmpty())             probe.addAttribute("ts",  ts);
+        probe.addAttribute(ATTR_DESTINATION, destination);
+        probe.addAttribute(ATTR_ORIGIN, originDomain);
+        if (viaTrail != null && !viaTrail.isEmpty()) probe.addAttribute(ATTR_VIA, viaTrail);
+        if (ts != null && !ts.isEmpty())             probe.addAttribute(ATTR_TS, ts);
         return iq;
     }
 
@@ -316,11 +355,11 @@ public final class FederationStanzaFactory {
                                 String srcMapped,
                                 Packet payload) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element fwd = fed.addElement("muc-forward");
-        fwd.addAttribute("destination", finalDestination);
+        fwd.addAttribute(ATTR_DESTINATION, finalDestination);
         if (targetRoom != null) fwd.addAttribute("targetRoom", targetRoom);
-        fwd.addAttribute("via",         viaTrail);
+        fwd.addAttribute(ATTR_VIA, viaTrail);
         if (srcMapped != null) fwd.addAttribute("src", srcMapped);
         fwd.add(payload.getElement().createCopy());
         return iq;
@@ -342,10 +381,10 @@ public final class FederationStanzaFactory {
     public static IQ directForward(String nextHop, String finalDestination,
                                    String viaTrail, Message payload) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element fwd = fed.addElement("direct-forward");
-        fwd.addAttribute("destination", finalDestination);
-        fwd.addAttribute("via",         viaTrail);
+        fwd.addAttribute(ATTR_DESTINATION, finalDestination);
+        fwd.addAttribute(ATTR_VIA, viaTrail);
         fwd.add(payload.getElement().createCopy());
         return iq;
     }
@@ -359,10 +398,10 @@ public final class FederationStanzaFactory {
     public static IQ presenceForward(String nextHop, String finalDestination,
                                      String viaTrail, Presence payload) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element fwd = fed.addElement("presence-forward");
-        fwd.addAttribute("destination", finalDestination);
-        fwd.addAttribute("via",         viaTrail);
+        fwd.addAttribute(ATTR_DESTINATION, finalDestination);
+        fwd.addAttribute(ATTR_VIA, viaTrail);
         fwd.add(payload.getElement().createCopy());
         return iq;
     }
@@ -375,10 +414,10 @@ public final class FederationStanzaFactory {
      */
     public static IQ iqForward(String nextHop, String finalDestination, String viaTrail, IQ payload) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element fwd = fed.addElement("iq-forward");
-        fwd.addAttribute("destination", finalDestination);
-        fwd.addAttribute("via",         viaTrail);
+        fwd.addAttribute(ATTR_DESTINATION, finalDestination);
+        fwd.addAttribute(ATTR_VIA, viaTrail);
         fwd.add(payload.getElement().createCopy());
         return iq;
     }
@@ -393,14 +432,14 @@ public final class FederationStanzaFactory {
     public static IQ userDirectory(String toDomain, Collection<UserDirectory.UserPresence> users,
                                    String originDomain, String via) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element dir = fed.addElement("user-directory");
-        if (originDomain != null)              dir.addAttribute("origin", originDomain);
-        if (via != null && !via.isEmpty())     dir.addAttribute("via", via);
+        if (originDomain != null)              dir.addAttribute(ATTR_ORIGIN, originDomain);
+        if (via != null && !via.isEmpty())     dir.addAttribute(ATTR_VIA, via);
         for (UserDirectory.UserPresence u : users) {
             Element e = dir.addElement("user");
             e.addAttribute("jid", u.jid());
-            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show",   u.show());
+            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show", u.show());
             if (u.status() != null && !u.status().isEmpty()) e.addAttribute("status", u.status());
         }
         return iq;
@@ -417,14 +456,14 @@ public final class FederationStanzaFactory {
     public static IQ bookmarkPush(String toDomain, Collection<UserDirectory.UserPresence> users,
                                   String originDomain, String via) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element push = fed.addElement("bookmark-push");
-        if (originDomain != null)           push.addAttribute("origin", originDomain);
-        if (via != null && !via.isEmpty())  push.addAttribute("via", via);
+        if (originDomain != null)           push.addAttribute(ATTR_ORIGIN, originDomain);
+        if (via != null && !via.isEmpty())  push.addAttribute(ATTR_VIA, via);
         for (UserDirectory.UserPresence u : users) {
             Element e = push.addElement("user");
             e.addAttribute("jid", u.jid());
-            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show",   u.show());
+            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show", u.show());
             if (u.status() != null && !u.status().isEmpty()) e.addAttribute("status", u.status());
         }
         return iq;
@@ -439,12 +478,12 @@ public final class FederationStanzaFactory {
     public static IQ fileRequest(String nextHop, String destination, String origin,
                                  String id, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element req = fed.addElement("file-request");
-        req.addAttribute("destination", destination);
-        req.addAttribute("origin",      origin);
-        req.addAttribute("id",          id);
-        if (via != null && !via.isEmpty()) req.addAttribute("via", via);
+        req.addAttribute(ATTR_DESTINATION, destination);
+        req.addAttribute(ATTR_ORIGIN, origin);
+        req.addAttribute(ATTR_ID, id);
+        if (via != null && !via.isEmpty()) req.addAttribute(ATTR_VIA, via);
         return iq;
     }
 
@@ -456,18 +495,18 @@ public final class FederationStanzaFactory {
                                String name, String mime, long size, String sha256,
                                int chunkSize, int totalChunks, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element offer = fed.addElement("file-offer");
-        offer.addAttribute("destination", destination);
-        offer.addAttribute("origin",      origin);
-        offer.addAttribute("id",          id);
-        offer.addAttribute("name",        name != null ? name : "file");
-        offer.addAttribute("mime",        mime != null ? mime : "application/octet-stream");
-        offer.addAttribute("size",        Long.toString(size));
+        offer.addAttribute(ATTR_DESTINATION, destination);
+        offer.addAttribute(ATTR_ORIGIN, origin);
+        offer.addAttribute(ATTR_ID, id);
+        offer.addAttribute("name", name != null ? name : "file");
+        offer.addAttribute("mime", mime != null ? mime : "application/octet-stream");
+        offer.addAttribute("size", Long.toString(size));
         if (sha256 != null && !sha256.isEmpty()) offer.addAttribute("sha256", sha256);
-        offer.addAttribute("chunkSize",   Integer.toString(chunkSize));
+        offer.addAttribute("chunkSize", Integer.toString(chunkSize));
         offer.addAttribute("totalChunks", Integer.toString(totalChunks));
-        if (via != null && !via.isEmpty()) offer.addAttribute("via", via);
+        if (via != null && !via.isEmpty()) offer.addAttribute(ATTR_VIA, via);
         return iq;
     }
 
@@ -475,13 +514,13 @@ public final class FederationStanzaFactory {
     public static IQ fileChunk(String nextHop, String destination, String origin, String id,
                                int seq, String dataB64, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element chunk = fed.addElement("file-chunk");
-        chunk.addAttribute("destination", destination);
-        chunk.addAttribute("origin",      origin);
-        chunk.addAttribute("id",          id);
-        chunk.addAttribute("seq",         Integer.toString(seq));
-        if (via != null && !via.isEmpty()) chunk.addAttribute("via", via);
+        chunk.addAttribute(ATTR_DESTINATION, destination);
+        chunk.addAttribute(ATTR_ORIGIN, origin);
+        chunk.addAttribute(ATTR_ID, id);
+        chunk.addAttribute("seq", Integer.toString(seq));
+        if (via != null && !via.isEmpty()) chunk.addAttribute(ATTR_VIA, via);
         chunk.setText(dataB64);
         return iq;
     }
@@ -490,13 +529,13 @@ public final class FederationStanzaFactory {
     public static IQ fileError(String nextHop, String destination, String origin, String id,
                                String reason, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element err = fed.addElement("file-error");
-        err.addAttribute("destination", destination);
-        err.addAttribute("origin",      origin);
-        err.addAttribute("id",          id);
+        err.addAttribute(ATTR_DESTINATION, destination);
+        err.addAttribute(ATTR_ORIGIN, origin);
+        err.addAttribute(ATTR_ID, id);
         if (reason != null && !reason.isEmpty()) err.addAttribute("reason", reason);
-        if (via != null && !via.isEmpty())       err.addAttribute("via", via);
+        if (via != null && !via.isEmpty())       err.addAttribute(ATTR_VIA, via);
         return iq;
     }
 
@@ -507,9 +546,9 @@ public final class FederationStanzaFactory {
      */
     public static IQ fileRelay(String nextHop, Element fileElement, String newVia) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement("federation", NS);
+        Element fed = iq.setChildElement(ELEMENT, NS);
         Element copy = fileElement.createCopy();
-        copy.addAttribute("via", newVia);
+        copy.addAttribute(ATTR_VIA, newVia);
         fed.add(copy);
         return iq;
     }

@@ -1,6 +1,7 @@
 package com.igniterealtime.openfire.plugin.federation.files;
 
 import com.igniterealtime.openfire.plugin.federation.FederationManager;
+import com.igniterealtime.openfire.plugin.federation.LogSafe;
 import com.igniterealtime.openfire.plugin.federation.FederationProperties;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
 import org.dom4j.DocumentHelper;
@@ -42,6 +43,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.BitSet;
@@ -57,6 +59,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Transparent federation of HTTP File Upload (XEP-0363) shares.
@@ -131,15 +135,84 @@ public class FileRelayManager {
     }
 
     /**
+     * Which end of a relay a scan or a rejection happened at. A relayed file is examined twice —
+     * once by the server that holds the upload, once by the server that receives it — so this is
+     * what distinguishes the two rows an operator sees for a single file.
+     */
+    public enum RelayStage {
+        /** Examined here before the file was ever offered to a peer. */
+        EGRESS,
+        /** Examined on receipt from a peer, at the point of delivery to a local recipient. */
+        INGRESS;
+
+        /** Lowercase token used in the admin-UI JSON and in the on-disk activity logs. */
+        public String token() {
+            return name().toLowerCase(Locale.ROOT);
+        }
+
+        /**
+         * Decodes a token written by {@link #token()}. Anything unrecognised is {@link #INGRESS},
+         * which also covers a pre-1.10.2 log row that has no stage column at all: back then the
+         * ingress scan was the only scan site that existed.
+         */
+        static RelayStage fromToken(String token) {
+            return EGRESS.token().equals(token) ? EGRESS : INGRESS;
+        }
+    }
+
+    /**
+     * Why a file was blocked, covering every gate: the extension allowlist (enforced at both ends),
+     * the ingress content-sniff check, the SHA-256 integrity check, and a positive or failed AV
+     * scan.
+     *
+     * <p>Each constant carries the {@code file-error} {@code reason} its rejection normally puts on
+     * the wire, so the admin-UI classification and the protocol code cannot drift apart — they were
+     * previously two hand-written strings per rejection site ({@code "AV_INFECTED"} next to
+     * {@code "av-infected"}) that nothing checked for agreement.
+     *
+     * <p>{@link #wireReason()} is the canonical code, not a mandate: egress deliberately reports the
+     * blander {@code policy-rejected} for an extension block rather than telling a peer precisely
+     * which local policy stopped it. Call sites are free to send something else.
+     */
+    public enum RejectionReason {
+        EXTENSION_NOT_ALLOWED("extension-not-allowed"),
+        CONTENT_MISMATCH("content-mismatch"),
+        HASH_MISMATCH("hash-mismatch"),
+        AV_INFECTED("av-infected"),
+        AV_ERROR("av-error");
+
+        private final String wireReason;
+
+        RejectionReason(String wireReason) {
+            this.wireReason = wireReason;
+        }
+
+        /** The {@code file-error} reason code peers see for this class of rejection. */
+        public String wireReason() {
+            return wireReason;
+        }
+
+        /** Decodes a persisted row's reason column; null when this build doesn't know the code. */
+        static RejectionReason fromName(String name) {
+            for (RejectionReason r : values()) {
+                if (r.name().equals(name)) return r;
+            }
+            return null;
+        }
+    }
+
+    /**
      * One AV scan outcome for the admin UI's "recently scanned files" table — newest first.
-     * {@code verdict} is {@link ClamAvClient.Verdict#name()}. {@code stage} is {@code "egress"}
-     * (scanned here before being offered to a peer) or {@code "ingress"} (scanned on receipt),
-     * so a relayed file produces one row on the sending server and one on the receiving one.
      * Persisted to {@link #scanFileLog} and reloaded at start, so the table survives a
      * reload/restart.
+     *
+     * <p>{@code verdict} stays a {@link String} on purpose. It is only ever written from
+     * {@link ClamAvClient.Verdict#name()}, so there is no loose string to mistype, and
+     * {@code Verdict} is an implementation detail of the package-private AV client — publishing it
+     * through this record would widen that client's API for no gain at the one place it is read.
      */
     public record ScanLogEntry(long when, String fileName, long sizeBytes, String origin,
-                                String stage, String verdict, String detail) { }
+                                RelayStage stage, String verdict, String detail) { }
 
     /** Entries kept in memory (and so shown in the admin UI); the on-disk log keeps the full history. */
     /** Copy-loop buffer for staging and hashing relayed files. */
@@ -149,15 +222,10 @@ public class FileRelayManager {
 
     /**
      * One rejected file for the admin UI's "Rejected files" table — newest first, persisted the
-     * same way as {@link ScanLogEntry}. Covers every way a file can be blocked: the extension
-     * allowlist (checked at both egress and ingress), the ingress content-sniff check, a SHA-256
-     * mismatch, or a positive/failed AV scan. {@code stage} is {@code "egress"} (blocked here
-     * before ever being offered to a peer) or {@code "ingress"} (blocked on receipt from a peer);
-     * {@code reason} is a short machine code ({@code EXTENSION_NOT_ALLOWED},
-     * {@code CONTENT_MISMATCH}, {@code HASH_MISMATCH}, {@code AV_INFECTED}, {@code AV_ERROR}).
+     * same way as {@link ScanLogEntry}.
      */
     public record RejectionEntry(long when, String fileName, long sizeBytes, String origin,
-                                  String stage, String reason, String detail) { }
+                                  RelayStage stage, RejectionReason reason, String detail) { }
 
     private static final int REJECTION_LOG_MAX = 200;
 
@@ -169,10 +237,16 @@ public class FileRelayManager {
      * straight through to its true destination (transit hops never touch it), one server marking a
      * reason permanent here and every other server recognizing the same code is enough for the
      * classification to propagate correctly across an arbitrary chain of hops with no wire changes.
+     *
+     * <p>Derived from {@link RejectionReason} rather than listed again, so a new rejection kind is
+     * recognised as permanent by construction. {@code policy-rejected} is added on top: it is the
+     * deliberately vague code egress sends instead of naming the policy that blocked the file, so
+     * it has no {@code RejectionReason} of its own.
      */
-    private static final Set<String> PERMANENT_REJECT_REASONS = Set.of(
-            "policy-rejected", "extension-not-allowed", "content-mismatch", "hash-mismatch",
-            "av-infected", "av-error");
+    private static final Set<String> PERMANENT_REJECT_REASONS =
+            Stream.concat(Stream.of("policy-rejected"),
+                          Arrays.stream(RejectionReason.values()).map(RejectionReason::wireReason))
+                  .collect(Collectors.toUnmodifiableSet());
 
     /**
      * A local room or 1:1 recipient waiting on a file we're pulling for them — recorded purely so
@@ -266,13 +340,13 @@ public class FileRelayManager {
     }
 
     private void recordScan(String fileName, long sizeBytes, String origin,
-                             String stage, String verdict, String detail) {
+                             RelayStage stage, String verdict, String detail) {
         ScanLogEntry e = new ScanLogEntry(System.currentTimeMillis(), fileName, sizeBytes,
                 origin == null ? "" : origin, stage, verdict, detail == null ? "" : detail);
         remember(e);
         // Outside the lock: an append is a small open/write/close, but it is still disk I/O, and
         // the admin UI reads these lists under the same monitor.
-        scanFileLog.append(e.fileName(), Long.toString(e.sizeBytes()), e.origin(), e.stage(),
+        scanFileLog.append(e.fileName(), Long.toString(e.sizeBytes()), e.origin(), e.stage().token(),
                 e.verdict(), e.detail());
     }
 
@@ -287,12 +361,12 @@ public class FileRelayManager {
     }
 
     private void recordRejection(String fileName, long sizeBytes, String origin,
-                                  String stage, String reason, String detail) {
+                                  RelayStage stage, RejectionReason reason, String detail) {
         RejectionEntry e = new RejectionEntry(System.currentTimeMillis(), fileName, sizeBytes,
                 origin == null ? "" : origin, stage, reason, detail == null ? "" : detail);
         remember(e);
         rejectionFileLog.append(e.fileName(), Long.toString(e.sizeBytes()), e.origin(),
-                e.stage(), e.reason(), e.detail());
+                e.stage().token(), e.reason().name(), e.detail());
     }
 
     private synchronized void remember(RejectionEntry e) {
@@ -330,18 +404,23 @@ public class FileRelayManager {
                 // only have come from the ingress scan, which was the sole scan site back then.
                 if (f.size() >= 6) {
                     scanLog.addLast(new ScanLogEntry(r.when(), f.get(0), parseSize(f.get(1)),
-                            f.get(2), f.get(3), f.get(4), f.get(5)));
+                            f.get(2), RelayStage.fromToken(f.get(3)), f.get(4), f.get(5)));
                 } else if (f.size() == 5) {
                     scanLog.addLast(new ScanLogEntry(r.when(), f.get(0), parseSize(f.get(1)),
-                            f.get(2), "ingress", f.get(3), f.get(4)));
+                            f.get(2), RelayStage.INGRESS, f.get(3), f.get(4)));
                 }
             }
             rejectionLog.clear();
             for (FileActivityLog.Row r : rejections) {
                 List<String> f = r.fields();
                 if (f.size() < 6) continue;
+                // A reason this build doesn't know can only have been written by a newer one. Skip
+                // the row rather than invent a classification for it: the on-disk log still holds
+                // the full history, and a table is more honest empty than wrong.
+                RejectionReason reason = RejectionReason.fromName(f.get(4));
+                if (reason == null) continue;
                 rejectionLog.addLast(new RejectionEntry(r.when(), f.get(0), parseSize(f.get(1)),
-                        f.get(2), f.get(3), f.get(4), f.get(5)));
+                        f.get(2), RelayStage.fromToken(f.get(3)), reason, f.get(5)));
             }
             Log.info("File relay activity logs restored — {} scan entrie(s), {} rejection entrie(s) "
                    + "from {} and {}", scanLog.size(), rejectionLog.size(),
@@ -429,10 +508,10 @@ public class FileRelayManager {
         ensureLocalContent(id, url, name);
         Element ann = DocumentHelper.createElement(
                 QName.get(ANNOTATION, Namespace.get(FederationStanzaFactory.NS)));
-        ann.addAttribute("id",     id);
-        ann.addAttribute("url",    url);
-        ann.addAttribute("name",   name);
-        ann.addAttribute("origin", localDomain());
+        ann.addAttribute(FederationStanzaFactory.ATTR_ID, id);
+        ann.addAttribute("url", url);
+        ann.addAttribute("name", name);
+        ann.addAttribute(FederationStanzaFactory.ATTR_ORIGIN, localDomain());
         return ann;
     }
 
@@ -520,7 +599,7 @@ public class FileRelayManager {
         try {
             uri = new URI(url);
         } catch (URISyntaxException e) {
-            Log.debug("File relay: '{}' is not a parseable URL, treating as non-local", url);
+            Log.debug("File relay: '{}' is not a parseable URL, treating as non-local", LogSafe.text(url));
             return false;
         }
         String scheme = uri.getScheme();
@@ -569,8 +648,8 @@ public class FileRelayManager {
                    + "the allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
             // Detail stays short on purpose: the configured allowlist is a setting one screen away,
             // and repeating all ~35 extensions on every row made the table unreadable.
-            recordRejection(t.name, 0, t.origin, "egress", "EXTENSION_NOT_ALLOWED",
-                    "not on allowed list");
+            recordRejection(t.name, 0, t.origin, RelayStage.EGRESS,
+                    RejectionReason.EXTENSION_NOT_ALLOWED, "not on allowed list");
             t.state = State.FAILED;
             t.rejected = true;
             tombstoneRejection(t.id);
@@ -613,7 +692,8 @@ public class FileRelayManager {
             }
             sha256 = toHex(digest.digest());
         } catch (Exception e) {
-            Log.warn("File relay: could not stage local upload {} ({}): {}", t.name, t.url, e.getMessage());
+            Log.warn("File relay: could not stage local upload {} ({}): {}",
+                     t.name, LogSafe.text(t.url), e.getMessage());
             store.deletePart(t.id);
             t.state = State.FAILED;
             t.touch();
@@ -627,7 +707,7 @@ public class FileRelayManager {
         // a file the scanner never saw must not be treated as clean.
         if (FederationProperties.FILES_AV_ENABLED.getValue()) {
             ClamAvClient.ScanResult scan = ClamAvClient.scan(store.partPath(t.id));
-            recordScan(t.name, total, t.origin, "egress", scan.verdict().name(), scan.detail());
+            recordScan(t.name, total, t.origin, RelayStage.EGRESS, scan.verdict().name(), scan.detail());
             if (scan.verdict() != ClamAvClient.Verdict.CLEAN) {
                 boolean infected = scan.verdict() == ClamAvClient.Verdict.INFECTED;
                 if (infected) {
@@ -637,14 +717,15 @@ public class FileRelayManager {
                     Log.warn("File relay: AV scan unavailable for locally-uploaded file {} ({}) — "
                            + "not offering it to peers (fails closed)", t.name, scan.detail());
                 }
-                recordRejection(t.name, total, t.origin, "egress",
-                        infected ? "AV_INFECTED" : "AV_ERROR", scan.detail());
+                RejectionReason reason = infected ? RejectionReason.AV_INFECTED
+                                                  : RejectionReason.AV_ERROR;
+                recordRejection(t.name, total, t.origin, RelayStage.EGRESS, reason, scan.detail());
                 store.deletePart(t.id);
                 t.state = State.FAILED;
                 t.rejected = true;
                 tombstoneRejection(t.id);
                 t.touch();
-                failParked(t.id, infected ? "av-infected" : "av-error");
+                failParked(t.id, reason.wireReason());
                 return;
             }
         }
@@ -688,10 +769,10 @@ public class FileRelayManager {
     private void rewriteElement(Element messageEl, LocalDest dest, String... hints) {
         Element ann = annotationOf(messageEl);
         if (ann == null) return;
-        String id     = ann.attributeValue("id");
+        String id     = ann.attributeValue(FederationStanzaFactory.ATTR_ID);
         String url    = ann.attributeValue("url");
         String name   = sanitizeFileName(ann.attributeValue("name", "file"));
-        String origin = ann.attributeValue("origin", "");
+        String origin = ann.attributeValue(FederationStanzaFactory.ATTR_ORIGIN, "");
         messageEl.remove(ann);
         if (id == null || !isHexId(id) || url == null || url.isBlank()) return;
         if (origin.equals(localDomain())) return;   // our own share echoed back — original URL is right
@@ -799,8 +880,8 @@ public class FileRelayManager {
 
     /** Relays a file-* element toward its destination (we are a transit hop). */
     public void relayToward(String elementName, Element el, String fromDomain) {
-        String destination = el.attributeValue("destination");
-        String via         = el.attributeValue("via", "");
+        String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
+        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String local       = localDomain();
         if (FederationStanzaFactory.viaContains(via, local)) {
             Log.warn("{} loop detected (via={}), dropping", elementName, via);
@@ -822,8 +903,8 @@ public class FileRelayManager {
     /** A peer asks for content: serve it, park the request while our own copy is in flight, or refuse. */
     public void handleFileRequest(String fromDomain, Element el) {
         if (!enabled()) return;
-        String id        = el.attributeValue("id");
-        String requester = el.attributeValue("origin");
+        String id        = el.attributeValue(FederationStanzaFactory.ATTR_ID);
+        String requester = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         if (id == null || !isHexId(id) || requester == null || requester.isBlank()
                 || requester.equals(localDomain())) {
             return;
@@ -836,7 +917,8 @@ public class FileRelayManager {
         if (t != null && t.state != State.FAILED) {
             // Our copy is still staging/arriving (hub fan-out): serve this peer when it lands.
             parkedRequests.computeIfAbsent(id, k -> ConcurrentHashMap.newKeySet()).add(requester);
-            Log.debug("File relay: parked request for {} from {} (local copy {})", id, requester, t.state);
+            Log.debug("File relay: parked request for {} from {} (local copy {})",
+                      id, LogSafe.text(requester), t.state);
             return;
         }
         if (t != null && t.rejected) {
@@ -857,7 +939,7 @@ public class FileRelayManager {
 
     /** A holder announces an inbound transfer we asked for — set up chunk assembly. */
     public void handleFileOffer(String fromDomain, Element el) {
-        String id = el.attributeValue("id");
+        String id = el.attributeValue(FederationStanzaFactory.ATTR_ID);
         if (id == null || store.has(id)) return;
         Transfer t = transfers.get(id);
         if (t == null) {
@@ -914,7 +996,7 @@ public class FileRelayManager {
 
     /** One base64 slice of an inbound transfer; assembly is offset-addressed so order is irrelevant. */
     public void handleFileChunk(String fromDomain, Element el) {
-        String id = el.attributeValue("id");
+        String id = el.attributeValue(FederationStanzaFactory.ATTR_ID);
         if (id == null) return;
         Transfer t = transfers.get(id);
         if (t == null || t.state != State.RECEIVING) return;
@@ -969,7 +1051,7 @@ public class FileRelayManager {
      * not-found) just stops waiting so the servlet can 404 quickly, same as before.
      */
     public void handleFileError(String fromDomain, Element el) {
-        String id = el.attributeValue("id");
+        String id = el.attributeValue(FederationStanzaFactory.ATTR_ID);
         if (id == null) return;
         String reason = el.attributeValue("reason", "unspecified");
         Transfer t = transfers.get(id);
@@ -982,7 +1064,7 @@ public class FileRelayManager {
             return;
         }
         if (t != null && t.state == State.REQUESTED) {
-            Log.info("File relay: holder refused {} ({})", id, reason);
+            Log.info("File relay: holder refused {} ({})", id, LogSafe.text(reason));
             t.state = State.FAILED;
             if (PERMANENT_REJECT_REASONS.contains(reason)) {
                 t.rejected = true;
@@ -1005,10 +1087,10 @@ public class FileRelayManager {
                 if (!t.sha256.equalsIgnoreCase(actual)) {
                     Log.warn("File relay: hash mismatch for {} — expected {}, got {}; discarding",
                              t.id, t.sha256, actual);
-                    recordRejection(t.name, t.size, t.origin, "ingress", "HASH_MISMATCH",
-                            "expected " + t.sha256 + ", got " + actual);
+                    recordRejection(t.name, t.size, t.origin, RelayStage.INGRESS,
+                            RejectionReason.HASH_MISMATCH, "expected " + t.sha256 + ", got " + actual);
                     failTransfer(t, true);
-                    failParked(t.id, "hash-mismatch");
+                    failParked(t.id, RejectionReason.HASH_MISMATCH.wireReason());
                     notifyLocalDestinationsOfRejection(t.id, t.name);
                     return;
                 }
@@ -1018,10 +1100,10 @@ public class FileRelayManager {
             if (!FileTypePolicy.isExtensionAllowed(t.name)) {
                 Log.warn("File relay: rejecting received file '{}' — extension not on the "
                        + "allowed list ({})", t.name, FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue());
-                recordRejection(t.name, t.size, t.origin, "ingress", "EXTENSION_NOT_ALLOWED",
-                        "not on allowed list");
+                recordRejection(t.name, t.size, t.origin, RelayStage.INGRESS,
+                        RejectionReason.EXTENSION_NOT_ALLOWED, "not on allowed list");
                 failTransfer(t, true);
-                failParked(t.id, "extension-not-allowed");
+                failParked(t.id, RejectionReason.EXTENSION_NOT_ALLOWED.wireReason());
                 notifyLocalDestinationsOfRejection(t.id, t.name);
                 return;
             }
@@ -1035,34 +1117,33 @@ public class FileRelayManager {
                         : FileTypePolicy.extensionOf(t.name).isEmpty()
                                 ? "no file extension to verify content against"
                                 : "unreadable";
-                recordRejection(t.name, t.size, t.origin, "ingress", "CONTENT_MISMATCH", detail);
+                recordRejection(t.name, t.size, t.origin, RelayStage.INGRESS,
+                        RejectionReason.CONTENT_MISMATCH, detail);
                 failTransfer(t, true);   // checkContent already logged the specific mismatch
-                failParked(t.id, "content-mismatch");
+                failParked(t.id, RejectionReason.CONTENT_MISMATCH.wireReason());
                 notifyLocalDestinationsOfRejection(t.id, t.name);
                 return;
             }
             if (FederationProperties.FILES_AV_ENABLED.getValue()) {
                 ClamAvClient.ScanResult scan = ClamAvClient.scan(store.partPath(t.id));
-                recordScan(t.name, t.size, t.origin, "ingress", scan.verdict().name(), scan.detail());
-                String avWireReason = null;
-                switch (scan.verdict()) {
+                recordScan(t.name, t.size, t.origin, RelayStage.INGRESS, scan.verdict().name(), scan.detail());
+                RejectionReason avReason = switch (scan.verdict()) {
                     case INFECTED -> {
                         Log.warn("File relay: AV detected '{}' in received file {} — discarding",
                                  scan.detail(), t.name);
-                        recordRejection(t.name, t.size, t.origin, "ingress", "AV_INFECTED", scan.detail());
-                        avWireReason = "av-infected";
+                        yield RejectionReason.AV_INFECTED;
                     }
-                    case ERROR    -> {
+                    case ERROR -> {
                         Log.warn("File relay: AV scan unavailable for {} ({}) — "
                                + "discarding (fails closed)", t.name, scan.detail());
-                        recordRejection(t.name, t.size, t.origin, "ingress", "AV_ERROR", scan.detail());
-                        avWireReason = "av-error";
+                        yield RejectionReason.AV_ERROR;
                     }
-                    case CLEAN    -> { }
-                }
-                if (scan.verdict() != ClamAvClient.Verdict.CLEAN) {
+                    case CLEAN -> null;
+                };
+                if (avReason != null) {
+                    recordRejection(t.name, t.size, t.origin, RelayStage.INGRESS, avReason, scan.detail());
                     failTransfer(t, true);
-                    failParked(t.id, avWireReason);
+                    failParked(t.id, avReason.wireReason());
                     notifyLocalDestinationsOfRejection(t.id, t.name);
                     return;
                 }
@@ -1123,7 +1204,7 @@ public class FileRelayManager {
             String local = localDomain();
             var hop = manager.getRoutingTable().findNextHop(requester);
             if (hop.isEmpty()) {
-                Log.debug("File relay: no route to requester {} for {} — dropping", requester, id);
+                Log.debug("File relay: no route to requester {} for {} — dropping", LogSafe.text(requester), id);
                 return;
             }
             try {
@@ -1141,7 +1222,8 @@ public class FileRelayManager {
                         }
                         var seqHop = manager.getRoutingTable().findNextHop(requester);
                         if (seqHop.isEmpty()) {
-                            Log.warn("File relay: lost route to {} mid-transfer of {} — aborting", requester, id);
+                            Log.warn("File relay: lost route to {} mid-transfer of {} — aborting",
+                                     LogSafe.text(requester), id);
                             return;
                         }
                         String b64 = Base64.getEncoder().encodeToString(
@@ -1156,7 +1238,7 @@ public class FileRelayManager {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
-                Log.warn("File relay: send of {} to {} failed: {}", id, requester, e.getMessage());
+                Log.warn("File relay: send of {} to {} failed: {}", id, LogSafe.text(requester), e.getMessage());
             }
         });
     }
@@ -1167,7 +1249,7 @@ public class FileRelayManager {
                 XMPPServer.getInstance().getPacketRouter().route(
                         FederationStanzaFactory.fileError(nextHop, requester, localDomain(), id, reason, ""));
             } catch (Exception e) {
-                Log.debug("File relay: could not send file-error to {}: {}", requester, e.getMessage());
+                Log.debug("File relay: could not send file-error to {}: {}", LogSafe.text(requester), e.getMessage());
             }
         });
     }

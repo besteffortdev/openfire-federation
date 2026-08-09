@@ -83,7 +83,7 @@ public class FederationIQHandler extends IQHandler {
     public FederationIQHandler(FederationManager manager) {
         super("Federation IQ Handler");
         this.manager = manager;
-        this.info    = new IQHandlerInfo("federation", FederationStanzaFactory.NS);
+        this.info    = new IQHandlerInfo(FederationStanzaFactory.ELEMENT, FederationStanzaFactory.NS);
     }
 
     @Override
@@ -295,8 +295,8 @@ public class FederationIQHandler extends IQHandler {
     private void handleRoutingUpdate(String fromDomain, Element el) {
         List<RouteEntry> received = new ArrayList<>();
         for (Element entry : el.elements("entry")) {
-            String dest = entry.attributeValue("destination");
-            String via  = entry.attributeValue("via");
+            String dest = entry.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
+            String via  = entry.attributeValue(FederationStanzaFactory.ATTR_VIA);
             int hops;
             try {
                 hops = Integer.parseInt(entry.attributeValue("hops", "99"));
@@ -351,8 +351,8 @@ public class FederationIQHandler extends IQHandler {
     // ── room-advertisement ────────────────────────────────────────────────────
 
     private void handleRoomAdvertisement(String fromDomain, Element el) {
-        String origin      = el.attributeValue("origin");
-        String via         = el.attributeValue("via", "");
+        String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
+        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         // Drop if this server already forwarded this advertisement (loop guard).
@@ -416,8 +416,8 @@ public class FederationIQHandler extends IQHandler {
     // ── room-mapping ──────────────────────────────────────────────────────────
 
     private void handleRoomMapping(String fromDomain, Element el) {
-        String destination = el.attributeValue("destination");
-        String origin      = el.attributeValue("origin");
+        String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
+        String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         // Relay if we are not the final destination (multi-hop topology).
@@ -425,8 +425,8 @@ public class FederationIQHandler extends IQHandler {
             manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
                 nextHop -> {
                     for (Element map : el.elements("map")) {
-                        String theirLocal  = map.attributeValue("local");
-                        String theirRemote = map.attributeValue("remote");
+                        String theirLocal  = map.attributeValue(FederationStanzaFactory.ATTR_LOCAL);
+                        String theirRemote = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);
                         if (theirLocal != null && theirRemote != null) {
                             // theirRemote is a room IN OUR NETWORK homed on `destination`.
                             if (!untrustedAllowsServer(fromDomain, destination)) {
@@ -456,8 +456,8 @@ public class FederationIQHandler extends IQHandler {
         for (Element map : el.elements("map")) {
             // "local"  = originator's local room JID (= our remote room)
             // "remote" = originator's remote room JID (= our local room)
-            String theirLocal  = map.attributeValue("local");
-            String theirRemote = map.attributeValue("remote");
+            String theirLocal  = map.attributeValue(FederationStanzaFactory.ATTR_LOCAL);
+            String theirRemote = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);
             if (theirLocal != null && theirRemote != null) {
                 // Authorization: only accept a mapping onto a local room the admin has
                 // explicitly enabled for federation AND explicitly shared with this origin via
@@ -496,8 +496,8 @@ public class FederationIQHandler extends IQHandler {
         String actualOrigin = originOf(el, fromDomain);
         String token = el.attributeValue("token", "");
         for (Element map : el.elements("map")) {
-            String theirLocal = map.attributeValue("local");   // sender's local = our remote room
-            String ourLocal   = map.attributeValue("remote");  // our local room
+            String theirLocal = map.attributeValue(FederationStanzaFactory.ATTR_LOCAL);   // sender's local = our remote room
+            String ourLocal   = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);  // our local room
             if (ourLocal != null) manager.onMappingAccepted(ourLocal, actualOrigin, theirLocal, token);
         }
     }
@@ -506,7 +506,7 @@ public class FederationIQHandler extends IQHandler {
         if (relayMappingControl("room-mapping-reject", el)) return;
         String actualOrigin = originOf(el, fromDomain);
         for (Element map : el.elements("map")) {
-            String ourLocal = map.attributeValue("remote");
+            String ourLocal = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);
             if (ourLocal != null) manager.onMappingRejected(ourLocal, actualOrigin);
         }
     }
@@ -516,7 +516,7 @@ public class FederationIQHandler extends IQHandler {
         String actualOrigin = originOf(el, fromDomain);
         String token = el.attributeValue("token", "");
         for (Element map : el.elements("map")) {
-            String ourLocal = map.attributeValue("remote");
+            String ourLocal = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);
             if (ourLocal != null && tokenOk(ourLocal, actualOrigin, token, "disable")) {
                 manager.onMappingDisabledByPeer(ourLocal, actualOrigin);
             }
@@ -528,8 +528,8 @@ public class FederationIQHandler extends IQHandler {
         String actualOrigin = originOf(el, fromDomain);
         String token = el.attributeValue("token", "");
         for (Element map : el.elements("map")) {
-            String theirLocal = map.attributeValue("local");
-            String ourLocal   = map.attributeValue("remote");
+            String theirLocal = map.attributeValue(FederationStanzaFactory.ATTR_LOCAL);
+            String ourLocal   = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);
             if (ourLocal != null && tokenOk(ourLocal, actualOrigin, token, "enable")) {
                 manager.onMappingEnabledByPeer(ourLocal, actualOrigin, theirLocal);
             }
@@ -537,7 +537,7 @@ public class FederationIQHandler extends IQHandler {
     }
 
     private String originOf(Element el, String fromDomain) {
-        String origin = el.attributeValue("origin");
+        String origin = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         return (origin != null) ? origin : fromDomain;
     }
 
@@ -546,17 +546,17 @@ public class FederationIQHandler extends IQHandler {
      * relayed (the caller must stop), false when we are the destination and should apply it locally.
      */
     private boolean relayMappingControl(String element, Element el) {
-        String destination = el.attributeValue("destination");
+        String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         if (destination == null || localDomain.equals(destination)) return false;
-        String origin = el.attributeValue("origin");
+        String origin = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String token  = el.attributeValue("token");
         String reason = el.attributeValue("reason");
         manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
             nextHop -> {
                 for (Element map : el.elements("map")) {
-                    String l = map.attributeValue("local");
-                    String r = map.attributeValue("remote");
+                    String l = map.attributeValue(FederationStanzaFactory.ATTR_LOCAL);
+                    String r = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);
                     if (l != null && r != null) {
                         try {
                             XMPPServer.getInstance().getPacketRouter().route(
@@ -580,7 +580,7 @@ public class FederationIQHandler extends IQHandler {
      */
     private void handleMappingPing(String fromDomain, Element el) {
         if (relayMappingProbe("mapping-ping", fromDomain, el)) return;
-        String origin = el.attributeValue("origin");
+        String origin = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         if (origin == null || origin.isEmpty()) return;
         if (!manager.getRoomManager().hasMappingWith(origin)) {
             Log.debug("mapping-ping from {} — no active mapping with it, not answering", origin);
@@ -588,7 +588,7 @@ public class FederationIQHandler extends IQHandler {
         }
         // The origin provably speaks the probe protocol — remember that for our own break detection.
         manager.markProbeCapable(origin);
-        String ts = el.attributeValue("ts");
+        String ts = el.attributeValue(FederationStanzaFactory.ATTR_TS);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         manager.getRoutingTable().findNextHop(origin).ifPresentOrElse(
             nextHop -> {
@@ -605,8 +605,8 @@ public class FederationIQHandler extends IQHandler {
     /** A pong for one of our probes arrived — the round trip to that mapped domain works. */
     private void handleMappingPong(String fromDomain, Element el) {
         if (relayMappingProbe("mapping-pong", fromDomain, el)) return;
-        String origin = el.attributeValue("origin");
-        if (origin != null && !origin.isEmpty()) manager.onMappingPong(origin, el.attributeValue("ts"));
+        String origin = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
+        if (origin != null && !origin.isEmpty()) manager.onMappingPong(origin, el.attributeValue(FederationStanzaFactory.ATTR_TS));
     }
 
     /**
@@ -614,10 +614,10 @@ public class FederationIQHandler extends IQHandler {
      * (relayed or dropped), false when we are the destination and should process it locally.
      */
     private boolean relayMappingProbe(String element, String fromDomain, Element el) {
-        String destination = el.attributeValue("destination");
+        String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         if (destination == null || localDomain.equals(destination)) return false;
-        String via = el.attributeValue("via", "");
+        String via = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("{} loop detected (via={}), dropping", element, via);
             return true;
@@ -628,8 +628,8 @@ public class FederationIQHandler extends IQHandler {
                      element, fromDomain, destination);
             return true;
         }
-        String origin = el.attributeValue("origin");
-        String ts = el.attributeValue("ts");
+        String origin = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
+        String ts = el.attributeValue(FederationStanzaFactory.ATTR_TS);
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
         manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
             nextHop -> {
@@ -661,8 +661,8 @@ public class FederationIQHandler extends IQHandler {
     // ── room-unmap ────────────────────────────────────────────────────────────
 
     private void handleRoomUnmap(String fromDomain, Element el) {
-        String destination = el.attributeValue("destination");
-        String origin      = el.attributeValue("origin");
+        String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
+        String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         // Relay if we are not the final destination (multi-hop topology).
@@ -674,8 +674,8 @@ public class FederationIQHandler extends IQHandler {
             manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
                 nextHop -> {
                     for (Element map : el.elements("map")) {
-                        String theirLocal  = map.attributeValue("local");
-                        String theirRemote = map.attributeValue("remote");
+                        String theirLocal  = map.attributeValue(FederationStanzaFactory.ATTR_LOCAL);
+                        String theirRemote = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);
                         if (theirLocal != null && theirRemote != null) {
                             try {
                                 XMPPServer.getInstance().getPacketRouter()
@@ -695,8 +695,8 @@ public class FederationIQHandler extends IQHandler {
         String actualOrigin = (origin != null) ? origin : fromDomain;
         String token = el.attributeValue("token", "");
         for (Element map : el.elements("map")) {
-            String theirLocal  = map.attributeValue("local");   // originator's local  = our remote
-            String theirRemote = map.attributeValue("remote");  // originator's remote = our local
+            String theirLocal  = map.attributeValue(FederationStanzaFactory.ATTR_LOCAL);   // originator's local  = our remote
+            String theirRemote = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);  // originator's remote = our local
             if (theirRemote != null) {
                 if (!tokenOk(theirRemote, actualOrigin, token, "unmap")) continue;
                 if (theirLocal != null) {
@@ -717,9 +717,9 @@ public class FederationIQHandler extends IQHandler {
     // ── muc-forward ───────────────────────────────────────────────────────────
 
     private void handleMucForward(String fromDomain, Element el) {
-        String finalDest   = el.attributeValue("destination");
+        String finalDest   = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String targetRoom  = el.attributeValue("targetRoom");
-        String via         = el.attributeValue("via", "");
+        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         // The mapped server this traffic enters us through (far end of our mapping / a hub).
         // Used as the occupant's arrivedVia so a mapping-disable evicts exactly its arrivals.
         // Older peers omit it — fall back to the immediate sender so behaviour degrades safely.
@@ -833,8 +833,8 @@ public class FederationIQHandler extends IQHandler {
      * routing table.  The embedded {@code from} is trusted to the same degree as any S2S sender.
      */
     private void handleDirectForward(String fromDomain, Element el) {
-        String finalDest   = el.attributeValue("destination");
-        String via         = el.attributeValue("via", "");
+        String finalDest   = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
+        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
@@ -930,8 +930,8 @@ public class FederationIQHandler extends IQHandler {
      * forwarded first so our own interceptor doesn't re-relay it.
      */
     private void handlePresenceForward(String fromDomain, Element el) {
-        String finalDest   = el.attributeValue("destination");
-        String via         = el.attributeValue("via", "");
+        String finalDest   = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
+        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
@@ -1011,8 +1011,8 @@ public class FederationIQHandler extends IQHandler {
      * the result relays back the same way and correlates.
      */
     private void handleIqForward(String fromDomain, Element el) {
-        String finalDest   = el.attributeValue("destination");
-        String via         = el.attributeValue("via", "");
+        String finalDest   = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
+        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
@@ -1232,8 +1232,8 @@ public class FederationIQHandler extends IQHandler {
 
     /** Caches an inbound user-directory and relays it onward (loop-guarded). */
     private void handleUserDirectory(String fromDomain, Element el) {
-        String origin      = el.attributeValue("origin");
-        String via         = el.attributeValue("via", "");
+        String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
+        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
@@ -1253,7 +1253,7 @@ public class FederationIQHandler extends IQHandler {
             if (jid != null && !jid.isBlank()) {
                 users.add(new UserDirectory.UserPresence(
                         jid.strip(),
-                        u.attributeValue("show",   ""),
+                        u.attributeValue("show", ""),
                         u.attributeValue("status", "")));
             }
         }
@@ -1266,8 +1266,8 @@ public class FederationIQHandler extends IQHandler {
 
     /** Injects an inbound bookmark-push into local users' storage and relays it onward (loop-guarded). */
     private void handleBookmarkPush(String fromDomain, Element el) {
-        String origin      = el.attributeValue("origin");
-        String via         = el.attributeValue("via", "");
+        String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
+        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
@@ -1287,7 +1287,7 @@ public class FederationIQHandler extends IQHandler {
             if (jid != null && !jid.isBlank()) {
                 users.add(new UserDirectory.UserPresence(
                         jid.strip(),
-                        u.attributeValue("show",   ""),
+                        u.attributeValue("show", ""),
                         u.attributeValue("status", "")));
             }
         }
@@ -1318,7 +1318,7 @@ public class FederationIQHandler extends IQHandler {
     private void handleFileRelay(String element, String fromDomain, Element el) {
         var relay = manager.getFileRelay();
         if (relay == null) return;
-        String destination = el.attributeValue("destination");
+        String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         if (destination != null && !localDomain.equals(destination)) {
             if (!untrustedAllowsServer(fromDomain, destination)) {
@@ -1477,7 +1477,7 @@ public class FederationIQHandler extends IQHandler {
         try {
             Element copy = deliverEl.createCopy();
             copy.addAttribute("from", virtualFrom);
-            copy.addAttribute("to",   room.getJID().toString());
+            copy.addAttribute("to", room.getJID().toString());
             Message archived = new Message(copy);
             JID sender = new JID(senderNick);
             // In-memory "replay recent history on join" buffer (classic XEP-0045 muc#history) — every
@@ -1507,7 +1507,7 @@ public class FederationIQHandler extends IQHandler {
         for (MUCOccupant occupant : occupants) {
             Element copy = deliverEl.createCopy();
             copy.addAttribute("from", virtualFrom);
-            copy.addAttribute("to",   occupant.getUserAddress().toString());
+            copy.addAttribute("to", occupant.getUserAddress().toString());
             Message delivery = new Message(copy);
             FederationStanzaFactory.markAsForwarded(delivery);
             FederationStanzaFactory.directDeliver(delivery);

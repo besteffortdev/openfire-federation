@@ -7,6 +7,7 @@ import org.dom4j.io.SAXReader;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xml.sax.SAXException;
 
 import java.io.File;
 import java.nio.file.Path;
@@ -61,8 +62,34 @@ public class FederationFileConfig {
     private volatile IngestResult lastResult = IngestResult.EMPTY;
     private volatile Long lastLoadedAtMillis = null;
 
+    /**
+     * Name of the block we read out of {@code openfire.xml}. Deliberately <em>not</em> shared with
+     * {@link com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory#ELEMENT}:
+     * that one is the wire protocol's IQ child element and happens to spell the same word. They are
+     * free to diverge, so they stay separate constants.
+     */
+    private static final String CONFIG_ELEMENT = "federation";
+
     public Path configFile() {
         return JiveGlobals.getHomePath().resolve("conf").resolve("openfire.xml");
+    }
+
+    /**
+     * A {@link SAXReader} with entity resolution switched off (CERT IDS17-J).
+     *
+     * <p>{@code openfire.xml} is admin-owned, so this is defence in depth rather than a live hole —
+     * but it is cheap, and "the file is trusted" stops being true the moment someone templates that
+     * file out of a config-management system fed from somewhere else. Blocking DOCTYPE outright is
+     * the strongest of the three settings and the other two are belt-and-braces for parsers that
+     * honour them selectively; Openfire's own config never contains a DTD, so nothing legitimate is
+     * lost.
+     */
+    private static SAXReader hardenedReader() throws SAXException {
+        SAXReader reader = new SAXReader();
+        reader.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        reader.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        reader.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        return reader;
     }
 
     public IngestResult lastResult() { return lastResult; }
@@ -79,9 +106,9 @@ public class FederationFileConfig {
 
         Element fedEl;
         try {
-            Document doc = new SAXReader().read(file);
+            Document doc = hardenedReader().read(file);
             Element root = doc.getRootElement();
-            fedEl = root == null ? null : root.element("federation");
+            fedEl = root == null ? null : root.element(CONFIG_ELEMENT);
         } catch (Exception e) {
             Log.warn("Failed to parse {} for federation config: {}", file, e.getMessage());
             return remember(IngestResult.EMPTY);
