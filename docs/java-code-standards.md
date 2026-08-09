@@ -66,12 +66,38 @@ trade-off, never as a defect on its own.
 |---|---|
 | **ERR00-J** Never suppress or ignore a checked exception | **JUSTIFIED** — 12 `catch (… ignored)` blocks. All are genuine best-effort cleanup (`Files.deleteIfExists`, `socket.close`) or a parse whose failure has a defined fallback. Google's rule allows this *if the exception variable is named `ignored`/`expected`* — which it is. Keep that naming; it is what makes the intent reviewable. |
 | **ERR07-J** Do not throw `RuntimeException`, `Exception`, or `Throwable` (Sonar S112) | **PASS** — one `throws Exception` left, `FederationIQHandler.parsePacket`. |
-| **ERR07-J (catch side)** Do not catch `Exception`/`Throwable` where a narrower type exists | **GAP** — 97 broad catches: 37 in `FederationManager`, 20 in `FederationIQHandler`, 18 in `FileRelayManager`. Some are deliberate isolation barriers around Openfire internals; most are not. |
+| **ERR07-J (catch side)** Do not catch `Exception`/`Throwable` where a narrower type exists | **MOSTLY COMPLIANT — the raw count was misleading.** See the note below; 4 genuine narrowings landed in 1.10.5 and the rest are deliberate. |
 | **ERR01-J / IDS15-J** An exception must not expose sensitive info across a trust boundary | Review item — federation error stanzas travel to peers. |
 | **ERR03-J** Restore prior object state on failure (EJ Item 76, failure atomicity) | **PASS** in the relay: a failed transfer deletes the part file, tombstones, and fails parked requests as one unit. |
 | **ERR04-J / ERR05-J** Never complete abruptly from `finally` | **PASS** |
 | **EJ Item 69** Use exceptions only for exceptional conditions | **PASS** |
 | **EJ Item 75** Include failure-capture information in the detail message | Mostly pass — log messages carry the id/peer/reason. |
+
+#### On the "97 broad catches" — a correction to this document's first draft
+
+The original audit ranked this the highest-effort remaining gap. Classifying all 97 before touching
+any of them showed that was wrong, and the number itself was the misleading part:
+
+| Category | Count | Verdict |
+|---|---|---|
+| Guards a whole method that calls into Openfire internals from a plugin thread | 10 | **Must stay broad.** An exception escaping `finalizeReceive`, `findLocalMucRoom` or `syncLocalRosterOnSubscriptionRelay` reaches an executor or an interceptor, where it kills the task or breaks presence relay. |
+| Guards a `ScheduledExecutorService` task body | 3 | **Must stay broad** — and this is not merely permitted but *required* by CERT **TPS03-J**, "ensure that tasks executing in a thread pool do not fail silently". An uncaught exception cancels the task permanently. The code already says so in a comment. |
+| Guards 2–20 lines of pure in-memory or Openfire-API work | 64 | **Nothing to narrow to.** These call methods that declare no checked exception; "narrowing" would mean `catch (RuntimeException)`, which is not an improvement. |
+| Per-item barrier inside a loop (one bad user/room must not abort the batch) | several | Deliberate. |
+| Genuinely narrowable — guards I/O or parsing with a real checked exception | ~6 | 4 fixed in 1.10.5. |
+
+So the honest read is that this codebase is *already* close to compliant with ERR07-J, and a
+mechanical sweep would have made it worse by removing isolation barriers that a plugin needs.
+The remaining two candidates were examined and deliberately left broad:
+
+- `FileRelayStore.init()` declares `IOException`, but narrowing it turns a graceful "file
+  federation disabled, everything else keeps working" into a plugin-load failure.
+- `ClamAvClient.scan()` must return a `Verdict` on *any* failure — that is what makes the AV gate
+  fail closed. A narrower catch would let a `RuntimeException` escape and skip the scan-log row.
+
+**Lesson worth keeping:** a linter count of "broad catches" is a prompt to look, not a defect
+total. In a server plugin, the boundary where your code is called by someone else's event loop is
+exactly where a broad catch belongs.
 
 ### B. Security and trust boundaries
 *CERT IDS/FIO/SEC/MSC, OWASP*
@@ -82,7 +108,7 @@ trade-off, never as a defect on its own.
 | **IDS17-J** Prevent XML external entity attacks | **FIXED in 1.10.4** — `FederationFileConfig` used a bare `new SAXReader()`. Input is admin-owned `conf/openfire.xml` so practical risk was low, but the rule is normative; DOCTYPE declarations and both external-entity classes are now refused. |
 | **IDS16-J** Prevent XML injection | **PASS** — stanzas are built through dom4j `Element`/`addAttribute`, never string-concatenated. |
 | **FIO16-J** Canonicalize path names before validating them | **PASS** — every remote-supplied transfer id is gated by `isHexId()` (exactly 64 lowercase hex chars) before it can reach `baseDir.resolve(id)`. `handleFileOffer`/`Chunk`/`Error` reach a `Path` only via an already-registered transfer. Verified; do not "harden" again. |
-| **FIO01-J** Create files with appropriate access permissions | **GAP (minor)** — the relay spool and the two activity logs are created at the process umask. Relayed file content sits in that spool; `0700` on the directory would be tighter. |
+| **FIO01-J** Create files with appropriate access permissions | **FIXED in 1.10.5** — the relay spool is now forced to `rwx------` on every `init()` and on a store relocation, not just at creation, so an existing loose directory gets tightened too. Deliberately **not** extended to the two activity logs: they live in Openfire's `logs/` beside `openfire.log`, hold metadata rather than content, and are meant to be tailed and shipped by whatever the operator already runs there. |
 | **FIO13-J** Do not log sensitive information outside a trust boundary | Ongoing concern. This is the same family as the `readme.html` leak of the real domain into published release jars — see `.github-sync/`. |
 | **MSC02-J** Generate strong random numbers | **PASS** — `SecureRandom`; no `Math.random()` anywhere. |
 | **MSC03-J** Never hard-code sensitive information | **PASS** |
@@ -124,7 +150,7 @@ trade-off, never as a defect on its own.
 | **Cognitive complexity** | **Acceptable** — 14 methods over 60 lines, longest ~115 (`injectPresence`). The 642-line `doPost` god-method was removed in 1.10.1. |
 | **S125** No commented-out code | **PASS** — zero. |
 | **S1135** No `TODO`/`FIXME` tags | **PASS** — zero across Java and JS. Notable; these are the #1 and #2 most common findings in Sonar's own corpus. |
-| **S1128** No unused imports | **GAP (trivial)** — 2: `java.util.Map` in `S2SMonitor`, `MultiUserChatService` in `FederationIQHandler`. |
+| **S1128** No unused imports | **FIXED in 1.10.5** — both removed. |
 | **S3740** No raw types | **PASS** |
 | **Naming conventions** | **PASS** |
 | **Parameterized logging** | **PASS** — `Log.debug("… {}", x)` throughout; zero concatenated log calls. |
@@ -158,11 +184,14 @@ Ordered by (fault-proneness × effort). Nothing here is a live defect; these are
 3. ~~Sanitize peer-supplied strings before logging~~ (IDS03-J) — done, 8 sites via `LogSafe`.
 4. ~~Harden `SAXReader` against XXE~~ (IDS17-J) — done.
 
+**Done in 1.10.5:**
+
+5. ~~Narrow the broad catches~~ (ERR07-J) — **re-scoped after measurement.** 4 narrowed; the rest are deliberate isolation barriers, 3 of them required by CERT TPS03-J. See the correction note in section A — the "97" figure was misleading and a mechanical sweep would have been a regression.
+6. ~~Remove unused imports~~ (S1128) — done.
+7. ~~Restrict spool permissions~~ (FIO01-J) — done, spool only, logs deliberately excluded.
+
 **Remaining:**
 
-5. **Narrow the 97 broad catches** (ERR07-J) — highest total effort; do it file-by-file during other work, not as one sweep. `FederationManager` first.
-6. **Remove 2 unused imports** (S1128) — trivial.
-7. **Restrict spool/log file permissions to `0700`** (FIO01-J) — one call at creation.
 8. **Add a test source root** (ACM 2.5 / SE 3.10) — blocked offline: JUnit 5 is not in the local `~/.m2`, and adding it needs network access that the `mvn -o` fleet builds deliberately avoid. Highest value once unblocked; start with `FederationApiServlet`'s reply helpers and `FederationRoutingTable`'s Bellman-Ford.
 
 ### How 1.10.4 was verified, given there are no tests

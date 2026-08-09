@@ -15,7 +15,6 @@ import org.jivesoftware.openfire.vcard.VCardManager;
 import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
-import org.jivesoftware.openfire.muc.MultiUserChatService;
 import org.jivesoftware.openfire.pep.PEPService;
 import org.jivesoftware.openfire.pep.PEPServiceManager;
 import org.jivesoftware.openfire.pubsub.Node;

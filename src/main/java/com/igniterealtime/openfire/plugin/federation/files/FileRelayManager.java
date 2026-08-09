@@ -1031,7 +1031,7 @@ public class FileRelayManager {
             try {
                 t.out.seek((long) seq * t.chunkSize);
                 t.out.write(data);
-            } catch (Exception e) {
+            } catch (IOException e) {
                 Log.warn("File relay: write failed for {}: {}", id, e.getMessage());
                 failTransfer(t);
                 return;

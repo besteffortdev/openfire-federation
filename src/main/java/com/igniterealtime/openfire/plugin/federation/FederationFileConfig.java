@@ -2,6 +2,7 @@ package com.igniterealtime.openfire.plugin.federation;
 
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import org.dom4j.Document;
+import org.dom4j.DocumentException;
 import org.dom4j.Element;
 import org.dom4j.io.SAXReader;
 import org.jivesoftware.util.JiveGlobals;
@@ -109,7 +110,7 @@ public class FederationFileConfig {
             Document doc = hardenedReader().read(file);
             Element root = doc.getRootElement();
             fedEl = root == null ? null : root.element(CONFIG_ELEMENT);
-        } catch (Exception e) {
+        } catch (DocumentException | SAXException e) {
             Log.warn("Failed to parse {} for federation config: {}", file, e.getMessage());
             return remember(IngestResult.EMPTY);
         }
