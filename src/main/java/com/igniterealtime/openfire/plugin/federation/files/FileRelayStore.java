@@ -11,6 +11,7 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -52,9 +53,36 @@ final class FileRelayStore {
     synchronized void init() throws IOException {
         Path dir = resolveConfiguredDir();
         Files.createDirectories(dir);
+        restrictToOwner(dir);
         baseDir = dir;
         int loaded = reindex();
         Log.info("File relay store initialised at {} — {} file(s)", baseDir, loaded);
+    }
+
+    /**
+     * Narrows the spool directory to owner-only (CERT FIO01-J, "create files with appropriate
+     * access permissions").
+     *
+     * <p>What sits here is the actual content of other people's files in transit, so the process
+     * umask is the wrong thing to leave it to — a default of {@code 022} makes every relayed file
+     * world-readable to any account on the host. Applied on every {@link #init()} rather than only
+     * at creation, so a directory that already exists with looser bits gets tightened too.
+     *
+     * <p>Deliberately not extended to the activity logs: those live in Openfire's own {@code logs/}
+     * directory beside {@code openfire.log}, hold metadata rather than content, and are meant to be
+     * tailed and shipped by whatever the operator already runs there. Locking them down while the
+     * far more detailed {@code openfire.log} stays readable would cost real operational convenience
+     * and buy close to nothing.
+     *
+     * <p>Never fatal: a non-POSIX filesystem simply doesn't support this, which is not a reason to
+     * refuse to start.
+     */
+    private static void restrictToOwner(Path dir) {
+        try {
+            Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"));
+        } catch (UnsupportedOperationException | IOException e) {
+            Log.debug("Could not restrict permissions on file relay store {}: {}", dir, e.getMessage());
+        }
     }
 
     /**
@@ -78,6 +106,7 @@ final class FileRelayStore {
         List<Path> originals = new ArrayList<>(); // old-dir paths actually copied, for reclaim on success
         try {
             Files.createDirectories(newDir);
+            restrictToOwner(newDir);          // a relocated spool must be no more open than the old one
             int migrated = 0;
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(oldDir, "*.meta")) {
                 for (Path meta : ds) {
@@ -223,7 +252,7 @@ final class FileRelayStore {
                     Long.parseLong(p.getProperty("size", "0")),
                     p.getProperty("sha256", ""),
                     Long.parseLong(p.getProperty("storedAt", "0")));
-        } catch (Exception e) {
+        } catch (IOException | NumberFormatException e) {
             Log.warn("Unreadable relay meta {} — skipping: {}", metaPath, e.getMessage());
             return null;
         }

@@ -663,7 +663,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
      */
     private boolean isFederationProtocolStanza(Packet packet) {
         return packet.getElement()
-                     .element(org.dom4j.QName.get("federation", FederationStanzaFactory.NS)) != null;
+                     .element(org.dom4j.QName.get(FederationStanzaFactory.ELEMENT, FederationStanzaFactory.NS)) != null;
     }
 
     /**

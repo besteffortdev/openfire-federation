@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -255,8 +256,8 @@ final class FileActivityLog {
         long when;
         try {
             when = Instant.parse(parts[0]).toEpochMilli();
-        } catch (Exception e) {
-            return null;
+        } catch (DateTimeParseException e) {
+            return null;                     // not a record line — a header, or a truncated write
         }
         List<String> fields = new ArrayList<>(parts.length - 1);
         for (String p : Arrays.asList(parts).subList(1, parts.length)) fields.add(unescape(p));
