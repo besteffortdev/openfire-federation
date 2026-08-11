@@ -855,7 +855,8 @@ public class FederationIQHandler extends IQHandler {
             // recipient's reply is a fresh outbound message caught and relayed back symmetrically).
             Message msg = new Message(payloadEl.createCopy());
             JID mto = msg.getTo();
-            if (mto != null && isLocalConferenceDomain(mto.getDomain())) {
+            if (!deliverableHere(mto, "direct-forward", fromDomain)) return;
+            if (isLocalConferenceDomain(mto.getDomain())) {
                 // groupchat/PM from a remote occupant to a LOCAL room (federated remote-room join) —
                 // route to the MUC service unmarked so the room broadcasts it and the re-broadcast to
                 // other remote occupants stays clean for relay back.  No re-relay risk: a stanza
@@ -950,16 +951,19 @@ public class FederationIQHandler extends IQHandler {
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             Presence pres = new Presence(payloadEl.createCopy());
+            JID pto = pres.getTo();
+            // Checked ahead of the probe branch too: answering a probe for a user who does not live
+            // here would disclose local presence to a peer that addressed someone else's server.
+            if (!deliverableHere(pto, "presence-forward", fromDomain)) return;
             // A probe for a local user: Openfire's own answer would be routed past the interceptor and
             // never cross the overlay, so answer explicitly with the user's current presence.
             if (pres.getType() == Presence.Type.probe) {
-                manager.answerPresenceProbe(pres.getFrom(), pres.getTo());
+                manager.answerPresenceProbe(pres.getFrom(), pto);
                 Log.info("presence-forward: answered probe {} -> {} (from {})",
-                         pres.getFrom(), pres.getTo(), fromDomain);
+                         pres.getFrom(), pto, fromDomain);
                 return;
             }
-            JID pto = pres.getTo();
-            if (pto != null && isLocalConferenceDomain(pto.getDomain())) {
+            if (isLocalConferenceDomain(pto.getDomain())) {
                 // A remote user joining/leaving a LOCAL room directly over the overlay — hand it to
                 // the MUC service unmarked so the room's reflected presences stay clean and get
                 // relayed back to the occupant.  No re-relay risk (local-conference early-returns).
@@ -1031,6 +1035,7 @@ public class FederationIQHandler extends IQHandler {
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             IQ iq = new IQ(payloadEl.createCopy());
+            if (!deliverableHere(iq.getTo(), "iq-forward", fromDomain)) return;
             IQ.Type type = iq.getType();
             if (type == IQ.Type.get || type == IQ.Type.set) {
                 // A REQUEST landed here.  Openfire's own handlers (vCard etc.) deliver their reply via
@@ -1074,6 +1079,37 @@ public class FederationIQHandler extends IQHandler {
         return XMPPServer.getInstance().getMultiUserChatManager()
                          .getMultiUserChatServices().stream()
                          .anyMatch(svc -> svc.getServiceDomain().equals(domain));
+    }
+
+    /**
+     * Whether an overlay envelope that names US as its final destination is carrying a stanza we may
+     * actually deliver: one addressed to this server, one of its MUC services, or another component
+     * registered here.
+     *
+     * <p>The envelope's {@code destination} says where the OVERLAY hop ends; it says nothing about
+     * who the embedded stanza is addressed to, and the two were never compared. A configured peer
+     * could therefore hand us an envelope claiming this server as the destination while embedding a
+     * recipient somewhere else entirely — and because the delivery branch hands the stanza to
+     * Openfire's own packet router, the server would dutifully emit it over native S2S. That makes
+     * this server a relay for traffic it never authorized, under its own identity. The
+     * {@code from}-spoofing gate does not catch it: that one validates the sender, not the recipient.
+     *
+     * @param stanza human-readable stanza kind, for the rejection log line
+     */
+    private boolean deliverableHere(JID to, String stanza, String fromDomain) {
+        if (to == null || to.getDomain() == null || to.getDomain().isBlank()) {
+            Log.warn("SECURITY: dropping {} from {} — final destination is us but the payload has no "
+                   + "recipient", stanza, fromDomain);
+            return false;
+        }
+        XMPPServer server = XMPPServer.getInstance();
+        if (server.isLocal(to) || isLocalConferenceDomain(to.getDomain()) || server.matchesComponent(to)) {
+            return true;
+        }
+        Log.warn("SECURITY: dropping {} from {} — final destination is us but the payload is "
+               + "addressed to {}, which is not served here (refusing to relay it onward)",
+                 stanza, fromDomain, to.getDomain());
+        return false;
     }
 
     /**
@@ -1326,6 +1362,14 @@ public class FederationIQHandler extends IQHandler {
                 return;
             }
             relay.relayToward(element, el, fromDomain);
+            return;
+        }
+        // The gate above only covered traffic we pass THROUGH. An untrusted peer addressing this
+        // server directly reached the relay unchecked — including file-request, which asks us to
+        // hand over content. Same rule as handleRoomMapping applies to its local branch.
+        if (!untrustedAllowsServer(fromDomain, localDomain)) {
+            Log.warn("SECURITY: dropping {} from untrusted peer {} addressed to this server, which "
+                   + "it has not been exposed to", element, fromDomain);
             return;
         }
         switch (element) {

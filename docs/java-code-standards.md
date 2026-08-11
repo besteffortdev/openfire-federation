@@ -190,9 +190,25 @@ Ordered by (fault-proneness × effort). Nothing here is a live defect; these are
 6. ~~Remove unused imports~~ (S1128) — done.
 7. ~~Restrict spool permissions~~ (FIO01-J) — done, spool only, logs deliberately excluded.
 
+**Done in 1.10.6** (from an external review; these *were* live defects, not compliance gaps):
+
+8. ~~File relay ids acted as bearer authorization~~ — a per-share capability (`token`) now gates
+   `file-request`, plus a route-back binding on the claimed requester and the untrusted-exposure gate
+   applied to the local branch of `handleFileRelay`. See [security.md](security.md#per-share-file-capability).
+9. ~~Overlay envelopes were not bound to their embedded recipient~~ — `deliverableHere` rejects a stanza
+   addressed off-server at the final hop, closing a confused-deputy relay for configured peers.
+10. ~~A half-started relay kept rewriting URLs~~ — explicit `available` state; an unusable store or
+    unmounted endpoint now degrades to leaving the original URL alone, and is recoverable without a restart.
+11. ~~Staging had no absolute deadline and shared a pool with the sweep meant to time it out~~ — split pools,
+    absolute budget, cancellable connections, bounded shutdown.
+12. ~~A `file-error` mid-stream did not abort the receive~~ — recipients were told "rejected" for a file that
+    then downloaded fine.
+13. ~~The server-wide S2S idle timeout was never restored~~ — saved and given back on stop, with
+    compare-and-set so an administrator's own value survives.
+
 **Remaining:**
 
-8. **Add a test source root** (ACM 2.5 / SE 3.10) — blocked offline: JUnit 5 is not in the local `~/.m2`, and adding it needs network access that the `mvn -o` fleet builds deliberately avoid. Highest value once unblocked; start with `FederationApiServlet`'s reply helpers and `FederationRoutingTable`'s Bellman-Ford.
+14. **Add a test source root** (ACM 2.5 / SE 3.10) — blocked offline: JUnit 5 is not in the local `~/.m2`, and adding it needs network access that the `mvn -o` fleet builds deliberately avoid. Highest value once unblocked; start with `FederationApiServlet`'s reply helpers and `FederationRoutingTable`'s Bellman-Ford. The 1.10.6 items above are a sharper argument for it than the compliance gaps were: every one of them is a state-machine or trust-boundary bug that a unit test would have caught and a code read did not.
 
 ### How 1.10.4 was verified, given there are no tests
 

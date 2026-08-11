@@ -73,6 +73,15 @@ public final class FederationStanzaFactory {
      */
     public static final String ATTR_ID = "id";
 
+    /**
+     * File relay: the per-share capability. Minted by the origin, published in the {@code fed-file}
+     * annotation (so exactly the servers that receive the announcing message learn it) and echoed
+     * back in a {@code file-request}, which the holder will not answer without it. The relay id is
+     * derived from the upload URL and is therefore visible to every server on the message path,
+     * which makes it an identifier, not a credential — this attribute is the credential.
+     */
+    public static final String ATTR_TOKEN = "token";
+
     private static final Logger Log = LoggerFactory.getLogger(FederationStanzaFactory.class);
 
     private FederationStanzaFactory() {}
@@ -474,15 +483,20 @@ public final class FederationStanzaFactory {
     /**
      * Asks {@code destination} (the server believed to hold the content) to stream file {@code id}
      * back to {@code origin} (the requester — us).  Routed hop-by-hop like a mapping probe.
+     *
+     * @param token the {@link #ATTR_TOKEN} capability read from the {@code fed-file} annotation that
+     *              announced this share; omitted when we have none (content announced by a peer
+     *              running a build older than 1.10.6)
      */
     public static IQ fileRequest(String nextHop, String destination, String origin,
-                                 String id, String via) {
+                                 String id, String token, String via) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement(ELEMENT, NS);
         Element req = fed.addElement("file-request");
         req.addAttribute(ATTR_DESTINATION, destination);
         req.addAttribute(ATTR_ORIGIN, origin);
         req.addAttribute(ATTR_ID, id);
+        if (token != null && !token.isEmpty()) req.addAttribute(ATTR_TOKEN, token);
         if (via != null && !via.isEmpty()) req.addAttribute(ATTR_VIA, via);
         return iq;
     }
