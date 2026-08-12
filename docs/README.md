@@ -10,5 +10,8 @@ code. The [top-level README](../README.md) is the install/usage entry point; the
 | [room-mapping.md](room-mapping.md) | Room mapping & multi-hop MUC forwarding — the `muc-forward` hop decision, injection past MUC's non-occupant check, hub fan-out, and ghost-free teardown (`FederationIQHandler`/`FederationManager`). |
 | [file-federation.md](file-federation.md) | Transparent HTTP-Upload (XEP-0363) file relay — annotate + stage at the origin, rewrite + pull at the destination, park-and-serve hubs, transit hops that never keep a copy (`FileRelayManager`). |
 | [java-code-standards.md](java-code-standards.md) | The coding standard this plugin is reviewed against — the ranked AI-code complaint list, the agreed Java canon (Oracle, Google, *Effective Java*, SEI CERT, OWASP, Sonar) and the ACM/IEEE ethics obligations, each marked PASS/GAP/JUSTIFIED for this repo. |
+| **[protocol/](protocol/README.md)** | **Wire specification.** Every stanza that travels between two federated servers, with examples — written so a *non-Openfire* server (Prosody, ejabberd, Tigase, or something bespoke) can implement an interoperable module. Eleven documents; start at [protocol/01-transport.md](protocol/01-transport.md). |
 
 Each doc keeps the same shape: design context up top, annotated snippets from the actual source below.
+The one exception is `protocol/`, which is normative and deliberately implementation-neutral: it
+describes the wire contract, not this codebase.

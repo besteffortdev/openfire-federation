@@ -315,6 +315,12 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"bookmarkPush\":").append(FederationProperties.BOOKMARK_PUSH.getValue()).append(",");
         sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
         sb.append("\"filesEnabled\":").append(FederationProperties.FILES_ENABLED.getValue()).append(",");
+        // Distinct from filesEnabled: the switch can be on while the relay itself failed to come up
+        // (unusable storage directory, download endpoint not mounted). Shares then keep their
+        // original URLs instead of being rewritten to an endpoint that would never answer, so an
+        // operator needs to be able to see the difference.
+        sb.append("\"filesRelayAvailable\":")
+          .append(mgr.getFileRelay() != null && mgr.getFileRelay().isAvailable()).append(",");
         sb.append("\"filesMaxSizeMB\":").append(FederationProperties.FILES_MAX_MB.getValue()).append(",");
         sb.append("\"filesRetentionDays\":").append(FederationProperties.FILES_RETENTION_DAYS.getValue()).append(",");
         sb.append("\"filesStorageDir\":\"").append(esc(FederationProperties.FILES_STORAGE_DIR.getValue())).append("\",");

@@ -26,6 +26,7 @@ import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
@@ -54,6 +55,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
@@ -103,6 +105,37 @@ public class FileRelayManager {
     private static final int  MAX_REQUEST_ATTEMPTS    = 3;
     private static final long FAILED_ENTRY_TTL_MS     = 600_000L;
 
+    /**
+     * Workers for everything that blocks on a socket or a disk: staging fetches and outbound chunk
+     * streams. Deliberately separate from {@link #maintenance} — when both shared one two-thread
+     * pool, a pair of stalled staging fetches starved the sweep that was supposed to time them out.
+     */
+    private static final int  IO_WORKERS              = 4;
+    /** How long {@link #stop()} waits for workers to actually finish before reporting they did not. */
+    private static final long WORKER_SHUTDOWN_MS      = 5_000L;
+    /**
+     * Fixed part of a staging fetch's ABSOLUTE budget. The connect/read timeouts alone bound only
+     * the gaps between bytes, so a source trickling one byte every 29 s could hold a worker (and,
+     * before the pools were split, the whole relay) indefinitely.
+     */
+    private static final long STAGE_BASE_BUDGET_MS    = 60_000L;
+    /** Streaming allowance for the staging budget: conservative floor throughput, as ClamAvClient does. */
+    private static final long STAGE_FLOOR_BYTES_PER_S = 256L * 1024L;
+    /** Bytes of entropy in a share capability — see {@link FederationStanzaFactory#ATTR_TOKEN}. */
+    private static final int  SHARE_TOKEN_BYTES       = 16;
+    /** Concurrent outbound sends across all peers; a further request is refused, not queued. */
+    private static final int  MAX_INFLIGHT_SENDS      = 8;
+    /**
+     * The one chunk geometry both ends of the protocol agree on: a sender clamps to it, a receiver
+     * rejects an offer outside it. Two independent numbers (a property minimum on one side, a
+     * literal bound on the other) let an administrator configure a size that allocated a huge buffer
+     * here and was then refused by every peer.
+     */
+    private static final int  MIN_CHUNK_BYTES         = 16 * 1024;
+    private static final int  MAX_CHUNK_BYTES         = 1024 * 1024;
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
     /** Lifecycle of content we do not (yet) have locally. Complete content lives in the store. */
     private enum State { FETCHING, REQUESTED, RECEIVING, FAILED }
 
@@ -116,6 +149,8 @@ public class FileRelayManager {
         /** Neighbour we routed the file-request through — the only direction a legitimate
          *  file-offer/chunk/error may arrive from (see {@link #isFromExpectedDirection}). */
         volatile String expectedFrom = "";
+        /** Share capability: minted here when we are the origin, else read from the annotation. */
+        volatile String token = "";
         volatile List<String> hints = List.of();
         volatile long size = -1;
         volatile String sha256 = "";
@@ -289,40 +324,111 @@ public class FileRelayManager {
             "#time\tfile\tsizeBytes\tpeer\tstage\tverdict\tdetail");
     private final FileActivityLog rejectionFileLog = new FileActivityLog("federation-file-rejections.log",
             "#time\tfile\tsizeBytes\tpeer\tstage\treason\tdetail");
-    private ScheduledExecutorService exec;
+    /** Sweep and purge only — never blocked behind a stalled transfer. */
+    private ScheduledExecutorService maintenance;
+    /** Staging fetches and outbound chunk streams. */
+    private ExecutorService io;
     private ServletContextHandler servletContext;
     private volatile SSLSocketFactory trustAllFactory;
+    /**
+     * Whether this relay can actually do its job: an open store, running workers, and a registered
+     * download endpoint. False makes {@link #enabled()} false, so nothing is annotated on the way
+     * out and no share URL is rewritten on the way in.
+     *
+     * <p>Before this existed, a store or servlet that failed to initialise still left a non-null
+     * manager in place: outbound messages were annotated for content that could never be staged, and
+     * inbound messages had a working remote URL replaced with a local endpoint that 404ed forever.
+     * Leaving the original URL in place is a far better degraded mode than breaking the link.
+     */
+    private volatile boolean available;
+    /** Live staging connections, so {@link #stop()} can actually break a blocking socket read. */
+    private final Set<HttpURLConnection> activeFetches = ConcurrentHashMap.newKeySet();
+    /** {@code requester|id} of sends in progress: bounds fan-out and collapses duplicate requests. */
+    private final Set<String> inFlightSends = ConcurrentHashMap.newKeySet();
 
     public FileRelayManager(FederationManager manager) {
         this.manager = manager;
     }
 
+    /**
+     * Brings the relay up. Each stage can fail independently, and any failure leaves
+     * {@link #available} false rather than a half-built relay that still rewrites URLs — the
+     * workers start regardless so {@link #storageDirChanged()} can recover a bad directory without
+     * a server restart.
+     */
     public void start() {
+        startWorkers();
         try {
             store.init();
         } catch (Exception e) {
-            Log.error("File relay store init failed — file federation disabled: {}", e.getMessage(), e);
+            Log.error("File relay store init failed — file federation is UNAVAILABLE (shares keep "
+                    + "their original URLs). Fix files.storageDir and save it to retry: {}",
+                      e.getMessage(), e);
             return;
         }
-        ThreadFactory tf = r -> {
-            Thread t = new Thread(r, "federation-file-relay");
+        try {
+            loadPersistedLogs();
+        } catch (Exception e) {
+            // The activity log is an optional audit convenience. A damaged or hand-edited file must
+            // not take the plugin's whole start() down with it — nothing above this point depends on
+            // it, and the in-memory tables simply begin empty.
+            Log.warn("Could not restore file relay activity logs (starting with empty tables): {}",
+                     e.getMessage(), e);
+        }
+        if (!registerServlet()) return;
+        available = true;
+    }
+
+    private void startWorkers() {
+        maintenance = Executors.newSingleThreadScheduledExecutor(daemonFactory("federation-file-maintenance"));
+        io = Executors.newFixedThreadPool(IO_WORKERS, daemonFactory("federation-file-relay"));
+        maintenance.scheduleWithFixedDelay(this::sweep, 30, 30, TimeUnit.SECONDS);
+        maintenance.scheduleWithFixedDelay(this::purge, 1, 6 * 60, TimeUnit.MINUTES);
+    }
+
+    private static ThreadFactory daemonFactory(String name) {
+        return r -> {
+            Thread t = new Thread(r, name);
             t.setDaemon(true);
             return t;
         };
-        loadPersistedLogs();
-        exec = Executors.newScheduledThreadPool(2, tf);
-        exec.scheduleWithFixedDelay(this::sweep, 30, 30, TimeUnit.SECONDS);
-        exec.scheduleWithFixedDelay(this::purge, 1, 6 * 60, TimeUnit.MINUTES);
-        registerServlet();
+    }
+
+    /** True when the relay can stage, serve and download — see {@link #available}. */
+    public boolean isAvailable() {
+        return available;
     }
 
     /**
      * Applies a changed {@code files.storageDir} property: moves the store (and its complete
-     * entries) to the newly-configured directory. Returns null on success, else an error message
-     * (the store then keeps serving from its previous directory).
+     * entries) to the newly-configured directory, or opens it for the first time when an earlier
+     * directory failed at startup. Returns null on success, else an error message (the store then
+     * keeps serving from its previous directory, if it had one).
+     *
+     * <p>Doubles as the operator's recovery action: saving a usable directory re-runs whatever part
+     * of {@link #start()} did not complete, so a permissions or servlet problem does not need a
+     * server restart to clear.
      */
     public String storageDirChanged() {
-        return store.reopenIfMoved();
+        // Deliberately NOT synchronized on this manager: a migration copies every stored file, and
+        // holding the monitor that guards the activity-log tables across that would stall every scan
+        // and every admin-UI read for its duration. The store serialises concurrent callers itself.
+        String error = store.reopenIfMoved();
+        refreshAvailability();
+        return error;
+    }
+
+    /** Re-evaluates {@link #available} against what is actually working right now. */
+    private void refreshAvailability() {
+        boolean was = available;
+        boolean ready = store.isOpen() && maintenance != null && io != null
+                     && (servletContext != null || registerServlet());
+        available = ready;
+        if (ready && !was) {
+            Log.info("File relay is now available — downloads served from /federation-files");
+        } else if (!ready && was) {
+            Log.warn("File relay is no longer available — shares will keep their original URLs");
+        }
     }
 
     /**
@@ -444,7 +550,18 @@ public class FileRelayManager {
     }
 
     public void stop() {
-        if (exec != null) exec.shutdownNow();
+        available = false;
+        // shutdownNow() interrupts, but a thread blocked reading an HTTP socket does not notice an
+        // interrupt — closing the connection underneath it is what actually unblocks it. Without
+        // this a hot reload could leave old workers writing into the same spool as the new manager.
+        for (HttpURLConnection conn : activeFetches) {
+            try { conn.disconnect(); } catch (Exception ignored) { }
+        }
+        activeFetches.clear();
+        shutdownAndAwait(maintenance, "maintenance");
+        shutdownAndAwait(io, "I/O");
+        maintenance = null;
+        io = null;
         unregisterServlet();
         for (Transfer t : transfers.values()) {
             synchronized (t) { closeQuietly(t); }
@@ -453,18 +570,38 @@ public class FileRelayManager {
         parkedRequests.clear();
         localDestinations.clear();
         rejectionTombstones.clear();
+        inFlightSends.clear();
     }
 
-    private void registerServlet() {
+    /** Stops a pool and waits a bounded time for it, so shutdown can report what it could not stop. */
+    private static void shutdownAndAwait(ExecutorService pool, String what) {
+        if (pool == null) return;
+        pool.shutdownNow();
+        try {
+            if (!pool.awaitTermination(WORKER_SHUTDOWN_MS, TimeUnit.MILLISECONDS)) {
+                Log.warn("File relay {} workers did not stop within {}ms — a stalled task may still "
+                       + "be running against the spool", what, WORKER_SHUTDOWN_MS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** @return true when the download endpoint is mounted; the relay is unusable without it. */
+    private boolean registerServlet() {
         try {
             servletContext = new ServletContextHandler();
             servletContext.setContextPath("/federation-files");
             servletContext.addServlet(new ServletHolder(new FederationFileServlet(this)), "/*");
             HttpBindManager.getInstance().addJettyHandler(servletContext);
             Log.info("File relay download endpoint registered at /federation-files on the HTTP-bind port");
+            return true;
         } catch (Exception e) {
             servletContext = null;
-            Log.error("Could not register file relay servlet — downloads will 404: {}", e.getMessage(), e);
+            Log.error("Could not register file relay servlet — file federation is UNAVAILABLE "
+                    + "(shares keep their original URLs rather than pointing at a dead endpoint): {}",
+                      e.getMessage(), e);
+            return false;
         }
     }
 
@@ -479,10 +616,25 @@ public class FileRelayManager {
         }
     }
 
-    private boolean enabled() { return FederationProperties.FILES_ENABLED.getValue(); }
+    /**
+     * Both the admin's switch and our own health. Annotating or rewriting when the relay cannot
+     * serve would replace a URL that works with one that never will, so an unavailable relay is
+     * treated exactly like a disabled one.
+     */
+    private boolean enabled() { return available && FederationProperties.FILES_ENABLED.getValue(); }
 
     private String localDomain() {
         return XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+    }
+
+    /**
+     * Absolute wall-clock budget for one staging fetch: a fixed allowance plus a streaming allowance
+     * sized from the configured size cap at a deliberately conservative floor throughput, so a
+     * healthy fetch of a maximum-size file is never cut short while a wedged or trickling source is
+     * still bounded. Mirrors {@code ClamAvClient.overallDeadlineMs}, for the same reason.
+     */
+    private long stageBudgetMs() {
+        return STAGE_BASE_BUDGET_MS + (maxSizeBytes() / STAGE_FLOOR_BYTES_PER_S) * 1000L;
     }
 
     private long maxSizeBytes() {
@@ -505,13 +657,18 @@ public class FileRelayManager {
         if (url == null) return null;
         String id = sha256Hex(url.getBytes(StandardCharsets.UTF_8));
         String name = fileNameFromUrl(url);
-        ensureLocalContent(id, url, name);
+        String token = ensureLocalContent(id, url, name);
         Element ann = DocumentHelper.createElement(
                 QName.get(ANNOTATION, Namespace.get(FederationStanzaFactory.NS)));
         ann.addAttribute(FederationStanzaFactory.ATTR_ID, id);
         ann.addAttribute("url", url);
         ann.addAttribute("name", name);
         ann.addAttribute(FederationStanzaFactory.ATTR_ORIGIN, localDomain());
+        // Publishing the capability HERE is what scopes it: the annotation travels with the message,
+        // so exactly the servers that carry the announcement can later ask for the content.
+        if (token != null && !token.isBlank()) {
+            ann.addAttribute(FederationStanzaFactory.ATTR_TOKEN, token);
+        }
         return ann;
     }
 
@@ -624,20 +781,31 @@ public class FileRelayManager {
         return false;
     }
 
-    /** Stages the content of a locally-uploaded file into the relay store (no-op when present). */
-    private void ensureLocalContent(String id, String url, String name) {
-        if (store.has(id)) return;
+    /**
+     * Stages the content of a locally-uploaded file into the relay store (no-op when present).
+     *
+     * @return this share's capability token, to be published in the annotation. Minted inside the
+     *         {@code compute} so concurrent shares of the same URL agree on one token; carried
+     *         across a retry of a failed staging attempt so an annotation already in flight stays
+     *         valid. Empty only for content staged before 1.10.6, which has none.
+     */
+    private String ensureLocalContent(String id, String url, String name) {
+        FileRelayStore.StoredFile stored = store.get(id);
+        if (stored != null) return stored.token();
         Transfer t = transfers.compute(id, (k, cur) -> {
             if (cur != null && cur.state != State.FAILED) return cur;      // fetch/receive in flight
             Transfer nt = new Transfer(k, State.FETCHING);
             nt.url = url;
             nt.name = name;
             nt.origin = localDomain();
+            nt.token = (cur != null && !cur.token.isBlank()) ? cur.token : newShareToken();
             return nt;
         });
-        if (t.state == State.FETCHING && t.url != null && exec != null) {
-            exec.execute(() -> fetchLocalUpload(t));
+        ExecutorService pool = io;   // read once: stop() nulls the field
+        if (t.state == State.FETCHING && t.url != null && pool != null) {
+            pool.execute(() -> fetchLocalUpload(t));
         }
+        return t.token;
     }
 
     /** Downloads the upload-service URL (loopback, self-signed certs accepted) into the store. */
@@ -660,8 +828,11 @@ public class FileRelayManager {
         String sha256;
         long total = 0;
         String mime = "application/octet-stream";
+        HttpURLConnection conn = null;
+        long deadline = System.currentTimeMillis() + stageBudgetMs();
         try {
-            HttpURLConnection conn = (HttpURLConnection) new java.net.URL(t.url).openConnection();
+            conn = (HttpURLConnection) new java.net.URL(t.url).openConnection();
+            activeFetches.add(conn);
             if (conn instanceof HttpsURLConnection https) {
                 https.setSSLSocketFactory(trustAllFactory());
                 https.setHostnameVerifier(trustAllHostnames());
@@ -683,6 +854,19 @@ public class FileRelayManager {
                 byte[] buf = new byte[IO_BUFFER_BYTES];
                 int n;
                 while ((n = in.read(buf)) > 0) {
+                    // Three ways out that the socket timeouts alone cannot give us: an absolute
+                    // budget (a trickling source resets the read timeout on every byte), plugin
+                    // shutdown, and the sweep having already given up on this transfer — without
+                    // the last one a fetch could finalize content the sweep had marked FAILED.
+                    if (System.currentTimeMillis() > deadline) {
+                        throw new IOException("staging exceeded its " + stageBudgetMs() + "ms budget");
+                    }
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new InterruptedIOException("file relay is shutting down");
+                    }
+                    if (t.state != State.FETCHING) {
+                        throw new IOException("transfer is no longer staging (" + t.state + ")");
+                    }
                     total += n;
                     if (total > cap) throw new IOException("exceeds size cap (" + cap + " bytes)");
                     digest.update(buf, 0, n);
@@ -699,6 +883,11 @@ public class FileRelayManager {
             t.touch();
             failParked(t.id, "stage-failed");
             return;
+        } finally {
+            if (conn != null) {
+                activeFetches.remove(conn);
+                conn.disconnect();
+            }
         }
         // Egress AV gate — scan what we are about to offer to peers, mirroring the ingress scan in
         // finalizeReceive. Only a file uploaded to this server reaches here (a transit hop never
@@ -730,7 +919,7 @@ public class FileRelayManager {
             }
         }
         try {
-            store.finalizePart(t.id, t.name, mime, total, sha256);
+            store.finalizePart(t.id, t.name, mime, total, sha256, t.token);
             transfers.remove(t.id, t);
             Log.info("File relay: staged local upload {} ({} bytes) as {}", t.name, total, t.id);
             serveParked(t.id);
@@ -773,11 +962,12 @@ public class FileRelayManager {
         String url    = ann.attributeValue("url");
         String name   = sanitizeFileName(ann.attributeValue("name", "file"));
         String origin = ann.attributeValue(FederationStanzaFactory.ATTR_ORIGIN, "");
+        String token  = ann.attributeValue(FederationStanzaFactory.ATTR_TOKEN, "");
         messageEl.remove(ann);
         if (id == null || !isHexId(id) || url == null || url.isBlank()) return;
         if (origin.equals(localDomain())) return;   // our own share echoed back — original URL is right
 
-        registerExpected(id, name, origin, dest, hints);
+        registerExpected(id, name, origin, token, dest, hints);
 
         String newUrl = publicUrlFor(id, name);
         for (Element body : messageEl.elements("body")) {
@@ -797,7 +987,8 @@ public class FileRelayManager {
     }
 
     /** Records that {@code id} should exist here and starts (or retries) the overlay pull. */
-    private void registerExpected(String id, String name, String origin, LocalDest dest, String... hints) {
+    private void registerExpected(String id, String name, String origin, String token,
+                                  LocalDest dest, String... hints) {
         // Already have the content: it will be served straight from the store and can never be
         // rejected, so there is nothing to notify — registering a dest here would only leak.
         if (store.has(id)) return;
@@ -810,6 +1001,7 @@ public class FileRelayManager {
             Transfer nt = new Transfer(k, State.REQUESTED);
             nt.name = name;
             nt.origin = origin;
+            nt.token = token == null ? "" : token;
             nt.hints = List.copyOf(hintList);
             return nt;
         });
@@ -837,7 +1029,8 @@ public class FileRelayManager {
             if (nextHop.isEmpty()) continue;
             try {
                 XMPPServer.getInstance().getPacketRouter().route(
-                        FederationStanzaFactory.fileRequest(nextHop.get(), target, localDomain(), t.id, ""));
+                        FederationStanzaFactory.fileRequest(nextHop.get(), target, localDomain(),
+                                t.id, t.token, ""));
                 t.expectedFrom = nextHop.get();   // legitimate offer/chunk/error must come back this way
                 t.lastRequestAt = System.currentTimeMillis();
                 t.requestAttempts.incrementAndGet();
@@ -876,6 +1069,64 @@ public class FileRelayManager {
         return t.expectedFrom != null && t.expectedFrom.equalsIgnoreCase(fromDomain);
     }
 
+    // ── Authorizing a request for our content ──────────────────────────────────
+
+    /** A fresh share capability: 128 bits of {@link SecureRandom}, hex, carried as an attribute. */
+    private static String newShareToken() {
+        byte[] raw = new byte[SHARE_TOKEN_BYTES];
+        RANDOM.nextBytes(raw);
+        return toHex(raw);
+    }
+
+    /**
+     * Whether a {@code file-request} presents the capability this share was announced with.
+     *
+     * <p>The relay id is {@code SHA-256(upload URL)} and rides in the annotation through every
+     * server on the message path, so it identifies content but proves nothing about entitlement to
+     * it. Before this check, any allowlisted peer that had merely relayed (or otherwise learned) an
+     * id could fetch a usable copy of the file — including a transit organisation that is
+     * deliberately never given one, which contradicts the scoping the pull model is documented to
+     * provide. The token restores it: only servers that received the announcing message have it.
+     *
+     * <p>Compared in constant time. When WE hold no token the check passes: that is content staged
+     * before 1.10.6, which has no capability to compare against and ages out with the retention
+     * window rather than becoming permanently unfetchable on upgrade.
+     */
+    private boolean shareTokenOk(String id, String presented) {
+        String expected = expectedToken(id);
+        if (expected == null || expected.isBlank()) return true;
+        if (presented == null || presented.isBlank()) return false;
+        return MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII),
+                                     presented.getBytes(StandardCharsets.US_ASCII));
+    }
+
+    /** The capability we associate with {@code id}: from the stored entry, else an in-flight transfer. */
+    private String expectedToken(String id) {
+        FileRelayStore.StoredFile sf = store.get(id);
+        if (sf != null && sf.token() != null && !sf.token().isBlank()) return sf.token();
+        Transfer t = transfers.get(id);
+        return t != null ? t.token : null;
+    }
+
+    /**
+     * Whether a request may claim to originate from {@code requester} given the neighbour it
+     * actually arrived from — the counterpart, for inbound requests, of
+     * {@link #isFromExpectedDirection}'s check on inbound responses. Without it a peer could name
+     * any domain and have us stream a file toward a server that never asked for it.
+     *
+     * <p>Enforced for untrusted peers only, matching the deliberate asymmetry in
+     * {@code FederationIQHandler.payloadOriginOk}: across the trusted mesh, diamond topologies and
+     * hub fan-out legitimately deliver traffic off the reverse path, so a strict check there would
+     * drop real requests. On the trusted side the share capability is what bounds this.
+     */
+    private boolean requesterDirectionOk(String fromDomain, String requester) {
+        if (fromDomain == null || fromDomain.isBlank()) return false;
+        if (!manager.getPeerRegistry().isUntrusted(fromDomain)) return true;
+        if (requester.equalsIgnoreCase(fromDomain)) return true;   // our neighbour, asking for itself
+        return manager.getRoutingTable().findNextHop(requester)
+                      .map(hop -> hop.equalsIgnoreCase(fromDomain)).orElse(false);
+    }
+
     // ── Overlay protocol: request / offer / chunk / error ──────────────────────
 
     /** Relays a file-* element toward its destination (we are a transit hop). */
@@ -905,8 +1156,22 @@ public class FileRelayManager {
         if (!enabled()) return;
         String id        = el.attributeValue(FederationStanzaFactory.ATTR_ID);
         String requester = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
+        String token     = el.attributeValue(FederationStanzaFactory.ATTR_TOKEN);
         if (id == null || !isHexId(id) || requester == null || requester.isBlank()
                 || requester.equals(localDomain())) {
+            return;
+        }
+        if (!requesterDirectionOk(fromDomain, requester)) {
+            Log.warn("SECURITY: ignoring file-request for {} claiming to come from {} — it arrived "
+                   + "from {}, which is not on the route back to that domain", id, LogSafe.text(requester),
+                     fromDomain);
+            return;
+        }
+        if (!shareTokenOk(id, token)) {
+            // The peer is allowlisted (it got this far) but was never told about this share.
+            Log.warn("SECURITY: refusing file-request for {} from {} — {} share capability",
+                     id, LogSafe.text(requester), token == null || token.isBlank() ? "no" : "wrong");
+            sendError(requester, id, "not-authorized");
             return;
         }
         if (store.has(id)) {
@@ -939,6 +1204,7 @@ public class FileRelayManager {
 
     /** A holder announces an inbound transfer we asked for — set up chunk assembly. */
     public void handleFileOffer(String fromDomain, Element el) {
+        if (!available) return;   // no store to assemble into
         String id = el.attributeValue(FederationStanzaFactory.ATTR_ID);
         if (id == null || store.has(id)) return;
         Transfer t = transfers.get(id);
@@ -961,7 +1227,7 @@ public class FileRelayManager {
             return;
         }
         long cap = maxSizeBytes();
-        if (size < 0 || size > cap || chunkSize < 1 || chunkSize > 1024 * 1024
+        if (size < 0 || size > cap || chunkSize < 1 || chunkSize > MAX_CHUNK_BYTES
                 || totalChunks < 0 || totalChunks != (int) ((size + chunkSize - 1) / chunkSize)) {
             Log.warn("File relay: rejecting file-offer for {} from {} — implausible geometry "
                    + "(size={}, chunkSize={}, totalChunks={}, cap={})",
@@ -996,6 +1262,7 @@ public class FileRelayManager {
 
     /** One base64 slice of an inbound transfer; assembly is offset-addressed so order is irrelevant. */
     public void handleFileChunk(String fromDomain, Element el) {
+        if (!available) return;
         String id = el.attributeValue(FederationStanzaFactory.ATTR_ID);
         if (id == null) return;
         Transfer t = transfers.get(id);
@@ -1051,6 +1318,7 @@ public class FileRelayManager {
      * not-found) just stops waiting so the servlet can 404 quickly, same as before.
      */
     public void handleFileError(String fromDomain, Element el) {
+        if (!available) return;
         String id = el.attributeValue(FederationStanzaFactory.ATTR_ID);
         if (id == null) return;
         String reason = el.attributeValue("reason", "unspecified");
@@ -1063,14 +1331,17 @@ public class FileRelayManager {
                      id, fromDomain, t.expectedFrom);
             return;
         }
-        if (t != null && t.state == State.REQUESTED) {
-            Log.info("File relay: holder refused {} ({})", id, LogSafe.text(reason));
-            t.state = State.FAILED;
-            if (PERMANENT_REJECT_REASONS.contains(reason)) {
-                t.rejected = true;
-                tombstoneRejection(id);
+        // RECEIVING counts as well as REQUESTED. Handling only REQUESTED meant an error arriving
+        // mid-stream did not stop the transfer: the local recipients were told below that the file
+        // was rejected, while the chunks already in flight went on to complete and the file became
+        // downloadable anyway — two contradictory outcomes for one share. It also left the part file
+        // and its descriptor open until the idle sweep noticed, up to two minutes later.
+        if (t != null && (t.state == State.REQUESTED || t.state == State.RECEIVING)) {
+            Log.info("File relay: holder refused {} ({}) — aborting transfer in state {}",
+                     id, LogSafe.text(reason), t.state);
+            synchronized (t) {
+                failTransfer(t, PERMANENT_REJECT_REASONS.contains(reason));
             }
-            t.touch();
         }
         if (PERMANENT_REJECT_REASONS.contains(reason)) {
             failParked(id, reason);
@@ -1148,7 +1419,9 @@ public class FileRelayManager {
                     return;
                 }
             }
-            store.finalizePart(t.id, t.name, t.mime, t.size, t.sha256);
+            // Keeping the token makes us a legitimate holder for onward requests: a hub that pulled
+            // a share can authorize the same spokes the origin would have, with no extra protocol.
+            store.finalizePart(t.id, t.name, t.mime, t.size, t.sha256, t.token);
             transfers.remove(t.id, t);
             localDestinations.remove(t.id);   // delivered cleanly — no rejection can follow
             Log.info("File relay: received {} ({} bytes) as {}", t.name, t.size, t.id);
@@ -1189,58 +1462,99 @@ public class FileRelayManager {
 
     // ── Serving content to a peer ──────────────────────────────────────────────
 
-    /** Streams a stored file to {@code requester} as file-offer + file-chunk IQs (async, throttled). */
+    /**
+     * Streams a stored file to {@code requester} as file-offer + file-chunk IQs (async, throttled).
+     *
+     * <p>Bounded two ways, because a peer that asks repeatedly used to queue one full send per
+     * request: a send already running for this peer and id is not started again, and the number of
+     * concurrent sends across all peers is capped — beyond that a requester is told the relay is
+     * busy (a transient reason it will retry) rather than having work queued on its behalf.
+     */
     private void startSend(String id, String requester) {
-        if (exec == null) return;
-        exec.execute(() -> {
-            FileRelayStore.StoredFile sf = store.get(id);
-            if (sf == null) {
-                sendError(requester, id, "not-found");
-                return;
-            }
-            int chunkSize = Math.max(16 * 1024, FederationProperties.FILES_CHUNK_BYTES.getValue());
-            int totalChunks = (int) ((sf.size() + chunkSize - 1) / chunkSize);
-            int delayMs = Math.max(0, FederationProperties.FILES_CHUNK_DELAY_MS.getValue());
-            String local = localDomain();
-            var hop = manager.getRoutingTable().findNextHop(requester);
-            if (hop.isEmpty()) {
-                Log.debug("File relay: no route to requester {} for {} — dropping", LogSafe.text(requester), id);
-                return;
-            }
+        ExecutorService pool = io;   // read once: stop() nulls the field
+        if (pool == null) return;
+        String sendKey = requester + '|' + id;
+        if (!inFlightSends.add(sendKey)) {
+            Log.debug("File relay: already streaming {} to {} — ignoring repeat request",
+                      id, LogSafe.text(requester));
+            return;
+        }
+        if (inFlightSends.size() > MAX_INFLIGHT_SENDS) {
+            inFlightSends.remove(sendKey);
+            Log.warn("File relay: {} concurrent sends already running — refusing {} for {}",
+                     MAX_INFLIGHT_SENDS, id, LogSafe.text(requester));
+            sendError(requester, id, "busy");
+            return;
+        }
+        pool.execute(() -> {
             try {
-                XMPPServer.getInstance().getPacketRouter().route(
-                        FederationStanzaFactory.fileOffer(hop.get(), requester, local, id,
-                                sf.name(), sf.mime(), sf.size(), sf.sha256(), chunkSize, totalChunks, ""));
-                try (InputStream in = Files.newInputStream(store.contentPath(id))) {
-                    byte[] buf = new byte[chunkSize];
-                    for (int seq = 0; seq < totalChunks; seq++) {
-                        int read = 0;
-                        while (read < chunkSize) {
-                            int n = in.read(buf, read, chunkSize - read);
-                            if (n < 0) break;
-                            read += n;
-                        }
-                        var seqHop = manager.getRoutingTable().findNextHop(requester);
-                        if (seqHop.isEmpty()) {
-                            Log.warn("File relay: lost route to {} mid-transfer of {} — aborting",
-                                     LogSafe.text(requester), id);
-                            return;
-                        }
-                        String b64 = Base64.getEncoder().encodeToString(
-                                read == buf.length ? buf : java.util.Arrays.copyOf(buf, read));
-                        XMPPServer.getInstance().getPacketRouter().route(
-                                FederationStanzaFactory.fileChunk(seqHop.get(), requester, local, id, seq, b64, ""));
-                        if (delayMs > 0) Thread.sleep(delayMs);
-                    }
-                }
-                Log.info("File relay: served {} ({} bytes, {} chunk(s)) to {}",
-                         sf.name(), sf.size(), totalChunks, requester);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception e) {
-                Log.warn("File relay: send of {} to {} failed: {}", id, LogSafe.text(requester), e.getMessage());
+                streamTo(id, requester);
+            } finally {
+                inFlightSends.remove(sendKey);
             }
         });
+    }
+
+    /** The body of one send, on an I/O worker. */
+    private void streamTo(String id, String requester) {
+        FileRelayStore.StoredFile sf = store.get(id);
+        if (sf == null) {
+            sendError(requester, id, "not-found");
+            return;
+        }
+        int chunkSize = chunkBytes();
+        int totalChunks = (int) ((sf.size() + chunkSize - 1) / chunkSize);
+        int delayMs = Math.max(0, FederationProperties.FILES_CHUNK_DELAY_MS.getValue());
+        String local = localDomain();
+        var hop = manager.getRoutingTable().findNextHop(requester);
+        if (hop.isEmpty()) {
+            Log.debug("File relay: no route to requester {} for {} — dropping", LogSafe.text(requester), id);
+            return;
+        }
+        try {
+            XMPPServer.getInstance().getPacketRouter().route(
+                    FederationStanzaFactory.fileOffer(hop.get(), requester, local, id,
+                            sf.name(), sf.mime(), sf.size(), sf.sha256(), chunkSize, totalChunks, ""));
+            try (InputStream in = Files.newInputStream(store.contentPath(id))) {
+                byte[] buf = new byte[chunkSize];
+                for (int seq = 0; seq < totalChunks; seq++) {
+                    int read = 0;
+                    while (read < chunkSize) {
+                        int n = in.read(buf, read, chunkSize - read);
+                        if (n < 0) break;
+                        read += n;
+                    }
+                    var seqHop = manager.getRoutingTable().findNextHop(requester);
+                    if (seqHop.isEmpty()) {
+                        Log.warn("File relay: lost route to {} mid-transfer of {} — aborting",
+                                 LogSafe.text(requester), id);
+                        return;
+                    }
+                    String b64 = Base64.getEncoder().encodeToString(
+                            read == buf.length ? buf : java.util.Arrays.copyOf(buf, read));
+                    XMPPServer.getInstance().getPacketRouter().route(
+                            FederationStanzaFactory.fileChunk(seqHop.get(), requester, local, id, seq, b64, ""));
+                    if (delayMs > 0) Thread.sleep(delayMs);
+                }
+            }
+            Log.info("File relay: served {} ({} bytes, {} chunk(s)) to {}",
+                     sf.name(), sf.size(), totalChunks, requester);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            Log.warn("File relay: send of {} to {} failed: {}", id, LogSafe.text(requester), e.getMessage());
+        }
+    }
+
+    /**
+     * Raw bytes per chunk, clamped to the geometry every receiver enforces in
+     * {@link #handleFileOffer}. The property's own minimum is not enough: it has no maximum, so an
+     * administrator could persist a value that allocates a huge buffer here and is then rejected out
+     * of hand by the far side, failing every transfer between otherwise compatible peers.
+     */
+    private static int chunkBytes() {
+        return Math.min(MAX_CHUNK_BYTES,
+                        Math.max(MIN_CHUNK_BYTES, FederationProperties.FILES_CHUNK_BYTES.getValue()));
     }
 
     private void sendError(String requester, String id, String reason) {

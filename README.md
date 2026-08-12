@@ -331,6 +331,7 @@ In‑repo deep‑dives (design + annotated code) for the core subsystems live un
 | [docs/routing.md](docs/routing.md) | Distance‑vector (Bellman‑Ford) overlay routing: gossip merge, split‑horizon, stale‑route withdrawal, peer‑down purge — walked through the real `FederationRoutingTable` code. |
 | [docs/room-mapping.md](docs/room-mapping.md) | Room mapping & multi‑hop MUC forwarding: the `muc-forward` hop decision, injection past MUC's non‑occupant check, hub fan‑out, ghost‑free teardown. |
 | [docs/file-federation.md](docs/file-federation.md) | Transparent HTTP‑Upload (XEP‑0363) file relay: annotate + stage at the origin, rewrite + pull at the destination, park‑and‑serve hubs, copy‑free transit. |
+| **[docs/protocol/](docs/protocol/README.md)** | **Wire specification** — every stanza exchanged between two federated servers, with examples, written for implementers on **non‑Openfire** servers (Prosody, ejabberd, Tigase, …) who want to build an interoperable module. Eleven documents covering the envelope, peering, routing, rooms, MUC and 1:1 traffic, the file relay, the normative validation rules, and a conformance checklist. |
 
 The in‑console **documentation/readme** link ([`src/main/resources/readme.html`](src/main/resources/readme.html))
 has a screenshot‑level admin walkthrough.

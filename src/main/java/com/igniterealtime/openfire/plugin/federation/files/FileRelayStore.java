@@ -31,7 +31,14 @@ final class FileRelayStore {
 
     private static final Logger Log = LoggerFactory.getLogger(FileRelayStore.class);
 
-    record StoredFile(String id, String name, String mime, long size, String sha256, long storedAt) {}
+    /**
+     * @param token per-share capability minted by the origin and carried in the {@code fed-file}
+     *              annotation, so only a server that received the announcing message can request the
+     *              content. Empty for entries staged by a build older than 1.10.6 — see
+     *              {@code FileRelayManager.shareTokenOk}.
+     */
+    record StoredFile(String id, String name, String mime, long size, String sha256, String token,
+                      long storedAt) {}
 
     private final Map<String, StoredFile> index = new ConcurrentHashMap<>();
     private volatile Path baseDir;
@@ -101,7 +108,20 @@ final class FileRelayStore {
     synchronized String reopenIfMoved() {
         Path newDir = resolveConfiguredDir();
         Path oldDir = baseDir;
-        if (oldDir == null || newDir.equals(oldDir)) return null;
+        if (oldDir == null) {
+            // The store never opened — its directory was unusable at start. A newly-configured
+            // directory is then a chance to initialise, not a migration. Returning "success"
+            // without doing so (the pre-1.10.6 behaviour) reported the setting as applied while
+            // the store stayed dead and every relayed file 404ed for the life of the process.
+            try {
+                init();
+                return null;
+            } catch (IOException e) {
+                Log.error("Could not open file relay store at {}: {}", newDir, e.getMessage(), e);
+                return "Could not use directory '" + newDir + "': " + e.getMessage();
+            }
+        }
+        if (newDir.equals(oldDir)) return null;
         List<Path> copied = new ArrayList<>();    // new-dir paths written, for rollback on failure
         List<Path> originals = new ArrayList<>(); // old-dir paths actually copied, for reclaim on success
         try {
@@ -178,15 +198,32 @@ final class FileRelayStore {
         return loaded;
     }
 
+    /** True once a directory has been opened successfully — the relay is unusable until then. */
+    boolean isOpen()            { return baseDir != null; }
     boolean has(String id)      { return index.containsKey(id); }
     StoredFile get(String id)   { return index.get(id); }
     Path contentPath(String id) { return baseDir.resolve(id); }
     Path partPath(String id)    { return baseDir.resolve(id + ".part"); }
 
-    /** Promotes an assembled {@code .part} file to a complete, indexed entry. */
-    StoredFile finalizePart(String id, String name, String mime, long size, String sha256) throws IOException {
+    /**
+     * Promotes an assembled {@code .part} file to a complete, indexed entry.
+     *
+     * <p>Synchronized on the same monitor as {@link #reopenIfMoved}: both the part and the content
+     * path must resolve against ONE {@code baseDir}. Without that, a relocation landing between the
+     * two {@code resolve} calls moved a part across directories, and a transfer finishing just after
+     * the migration's copy loop was dropped from the rebuilt index with its only bytes orphaned in
+     * the old directory — a completed share that could never be downloaded again.
+     *
+     * <p>A transfer that was assembling when a relocation committed now fails here deterministically
+     * (its {@code .part} is in the old directory and was deliberately not migrated) and re-requests
+     * into the new location, which is the documented behaviour for in-flight transfers — rather than
+     * sometimes succeeding into an unreachable orphan.
+     */
+    synchronized StoredFile finalizePart(String id, String name, String mime, long size,
+                                         String sha256, String token) throws IOException {
         Files.move(partPath(id), contentPath(id), StandardCopyOption.REPLACE_EXISTING);
-        StoredFile sf = new StoredFile(id, name, mime, size, sha256, System.currentTimeMillis());
+        StoredFile sf = new StoredFile(id, name, mime, size, sha256,
+                token == null ? "" : token, System.currentTimeMillis());
         writeMeta(sf);
         index.put(id, sf);
         return sf;
@@ -200,8 +237,12 @@ final class FileRelayStore {
         }
     }
 
-    /** Removes entries older than {@code maxAgeMillis} and stray part files older than one day. */
-    int purgeOlderThan(long maxAgeMillis) {
+    /**
+     * Removes entries older than {@code maxAgeMillis} and stray part files older than one day.
+     * Synchronized with {@link #reopenIfMoved} so a purge can never enumerate one directory and
+     * delete out of another.
+     */
+    synchronized int purgeOlderThan(long maxAgeMillis) {
         long now = System.currentTimeMillis();
         int removed = 0;
         for (StoredFile sf : index.values().toArray(new StoredFile[0])) {
@@ -234,6 +275,9 @@ final class FileRelayStore {
         p.setProperty("mime",     sf.mime());
         p.setProperty("size",     Long.toString(sf.size()));
         p.setProperty("sha256",   sf.sha256() != null ? sf.sha256() : "");
+        // The share capability. It is why the spool is owner-only (see restrictToOwner): a local
+        // account able to read these sidecars could request any relayed file from this server.
+        p.setProperty("token",    sf.token() != null ? sf.token() : "");
         p.setProperty("storedAt", Long.toString(sf.storedAt()));
         try (OutputStream out = Files.newOutputStream(baseDir.resolve(sf.id() + ".meta"))) {
             p.store(out, null);
@@ -251,6 +295,7 @@ final class FileRelayStore {
                     p.getProperty("mime", "application/octet-stream"),
                     Long.parseLong(p.getProperty("size", "0")),
                     p.getProperty("sha256", ""),
+                    p.getProperty("token", ""),     // absent in sidecars written before 1.10.6
                     Long.parseLong(p.getProperty("storedAt", "0")));
         } catch (IOException | NumberFormatException e) {
             Log.warn("Unreadable relay meta {} — skipping: {}", metaPath, e.getMessage());

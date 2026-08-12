@@ -105,6 +105,30 @@ with a `SECURITY:` tag. Remote users are injected under their home-qualified nic
 peers are trusted to represent **their own** users honestly — a compromised peer can still misrepresent users
 of domains it relays.
 
+## Recipient binding on overlay envelopes
+
+An overlay envelope carries both a `destination` (where the *hop* ends) and an embedded stanza with its own
+`to`. Those are separate claims, and until 1.10.6 only the first was checked: a peer could name this server
+as the final destination while embedding a recipient somewhere else, and since the delivery branch hands the
+stanza to Openfire's own packet router, the server would emit it over native S2S — acting as a relay for
+traffic it never authorized, under its own identity. The `from`-spoofing gate above does not catch this; it
+validates the sender, not the recipient.
+
+`direct-forward`, `presence-forward` and `iq-forward` now require the embedded `to` to resolve to something
+actually served here — this XMPP domain, one of its MUC services, or a registered component — before
+delivering. A mismatch is dropped and logged with a `SECURITY:` tag naming the domain that was refused. The
+check applies to presence probes too: answering one addressed to another server's user would disclose local
+presence to a peer that never had standing to ask.
+
+## Per-share file capability
+
+The file relay's `id` is `SHA-256(upload URL)` and rides in the annotation through every server on the
+message path — it identifies content, it is not a credential. The origin therefore mints a random per-share
+`token`, publishes it in that same annotation (so exactly the servers in scope receive it), and a holder
+refuses a `file-request` that cannot echo it back. See
+[file-federation.md](file-federation.md#the-share-capability-token) for the mechanics and the
+whole-mesh upgrade requirement.
+
 ## Per-room visibility
 
 Each federated room has a **Visible** control (next to its toggle) listing the servers allowed to see it —

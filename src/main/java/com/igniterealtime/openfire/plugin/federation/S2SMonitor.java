@@ -47,6 +47,14 @@ public class S2SMonitor {
     static final         String DISABLE_IDLE_JIVE_KEY  = "plugin.federation.disableS2SIdle";
     static final         boolean DISABLE_IDLE_DEFAULT  = true;
 
+    // Where the pre-plugin idle timeout is parked so it can be given back. Persisted rather than
+    // held in a field because the plugin re-applies its own value on every start: only the FIRST
+    // start ever sees the administrator's original setting, and a field would not survive to the
+    // stop() that has to restore it.
+    static final         String SAVED_IDLE_JIVE_KEY    = "plugin.federation.savedS2SIdleMillis";
+    /** Openfire's documented "never time out" sentinel for xmpp.server.session.idle. */
+    private static final long   IDLE_NEVER_MS          = -1L;
+
     // reconnectSeconds = back-off cap (max interval between retry attempts).
     // The scheduler always polls every RECONNECT_POLL_SECONDS; per-peer nextRetryAt
     // controls when each peer is actually retried.
@@ -126,6 +134,7 @@ public class S2SMonitor {
         if (scheduler != null) {
             scheduler.shutdownNow();
         }
+        restoreS2SIdleReaper("the plugin is stopping");
     }
 
     /**
@@ -198,6 +207,9 @@ public class S2SMonitor {
             Log.info("S2S idle reaper left untouched ({}=false); note federation keepalives "
                      + "cannot keep one-way S2S sockets alive — expect periodic idle reconnects.",
                      DISABLE_IDLE_JIVE_KEY);
+            // The setting may have been flipped to false while a previous run's -1 is still in
+            // place, which is exactly what the log below used to promise would restore it.
+            restoreS2SIdleReaper(DISABLE_IDLE_JIVE_KEY + " is false");
             return;
         }
         try {
@@ -206,16 +218,51 @@ public class S2SMonitor {
                 Log.debug("S2S idle reaper already disabled — nothing to do");
                 return;
             }
+            // Remember what we are overwriting BEFORE overwriting it. Written first so a crash
+            // between the two lines leaves a recoverable value rather than a lost one.
+            JiveGlobals.setProperty(SAVED_IDLE_JIVE_KEY, Long.toString(current * 1000L));
             // -1ms is Openfire's documented "never time out" sentinel for
             // xmpp.server.session.idle (it is also the property's minimum value).
             // Do NOT use Duration.ZERO — 0ms can be read as an immediate-timeout.
-            ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.setValue(Duration.ofMillis(-1));
+            ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.setValue(Duration.ofMillis(IDLE_NEVER_MS));
             Log.info("Disabled Openfire's S2S idle reaper (was {}s, set to -1=never) — federation "
                      + "manages liveness via poll/reconnect; one-way S2S sockets would otherwise be "
-                     + "reaped every {}s. Set {}=false to restore Openfire's timeout.",
+                     + "reaped every {}s. The previous value is restored when the plugin stops, or "
+                     + "on the next start with {}=false.",
                      current, current, DISABLE_IDLE_JIVE_KEY);
         } catch (Exception e) {
             Log.warn("Could not disable S2S idle timeout: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Gives Openfire back the S2S idle timeout this plugin took away. The setting is SERVER-WIDE, so
+     * leaving it at "never" after an uninstall silently changes how every S2S connection on the host
+     * behaves, including domains that have nothing to do with federation — and the startup log used
+     * to tell administrators it would be restored, which it never was.
+     *
+     * <p>Compare-and-set: only restored while our own {@code -1} sentinel is still in place. An
+     * administrator who set their own value in the meantime keeps it, and the saved value is dropped
+     * either way so this can never resurrect a stale number on a later run.
+     */
+    private void restoreS2SIdleReaper(String why) {
+        String saved = JiveGlobals.getProperty(SAVED_IDLE_JIVE_KEY);
+        if (saved == null || saved.isBlank()) return;
+        try {
+            Duration current = ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.getValue();
+            long currentMs = current == null ? IDLE_NEVER_MS : current.toMillis();
+            if (currentMs != IDLE_NEVER_MS) {
+                Log.info("Not restoring the S2S idle timeout ({}): it is now {}ms, which this plugin "
+                       + "did not set — leaving the administrator's value alone.", why, currentMs);
+            } else {
+                long restored = Long.parseLong(saved.strip());
+                ConnectionSettings.Server.IDLE_TIMEOUT_PROPERTY.setValue(Duration.ofMillis(restored));
+                Log.info("Restored Openfire's S2S idle timeout to {}s ({}).", restored / 1000L, why);
+            }
+        } catch (Exception e) {
+            Log.warn("Could not restore the S2S idle timeout from '{}': {}", saved, e.getMessage());
+        } finally {
+            JiveGlobals.deleteProperty(SAVED_IDLE_JIVE_KEY);
         }
     }
 
