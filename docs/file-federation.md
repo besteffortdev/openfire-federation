@@ -84,7 +84,8 @@ private void sendRequest(Transfer t) {
     for (String target : candidates) {
         var nextHop = manager.getRoutingTable().findNextHop(target);
         if (nextHop.isEmpty()) continue;
-        route(FederationStanzaFactory.fileRequest(nextHop.get(), target, localDomain(), t.id, ""));
+        route(FederationStanzaFactory.fileRequest(nextHop.get(), target, localDomain(), t.id, t.token, ""));
+        t.expectedFrom = nextHop.get();   // legitimate offer/chunk/error must come back this way
         t.requestAttempts.incrementAndGet();
         return;
     }
