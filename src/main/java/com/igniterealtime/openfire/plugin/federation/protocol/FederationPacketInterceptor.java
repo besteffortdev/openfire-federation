@@ -106,6 +106,30 @@ public class FederationPacketInterceptor implements PacketInterceptor {
     private static final ThreadLocal<Boolean> IN_CAPTURE_PASS = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     /**
+     * Set while {@link #deliverOverlayReply} hands a genuine overlay IQ reply to the router. Such a
+     * reply matches the same {@code id|from|to} key as the spurious local bounce, so if it arrives
+     * first (sub-millisecond LAN hops can beat the router's own bounce) {@link #consumeSpuriousBounce}
+     * would swallow the REAL error and let the fake not-allowed through — e.g. a PEP item-not-found,
+     * which clients act on, surfacing as not-allowed. Marking the stanza instead would add a second
+     * child element to an IQ, which RFC 6120 forbids, hence a thread flag rather than a marker.
+     */
+    private static final ThreadLocal<Boolean> IN_OVERLAY_REPLY = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    /**
+     * Routes a result/error IQ that arrived over the overlay to its local requester, bypassing this
+     * interceptor exactly as a {@code fed-origin}-marked stanza would. Local delivery invokes the
+     * interceptor chain synchronously on this thread, so the flag covers it.
+     */
+    public static void deliverOverlayReply(IQ reply) {
+        IN_OVERLAY_REPLY.set(Boolean.TRUE);
+        try {
+            XMPPServer.getInstance().getPacketRouter().route(reply);
+        } finally {
+            IN_OVERLAY_REPLY.set(Boolean.FALSE);
+        }
+    }
+
+    /**
      * Re-runs Openfire's post-processing interceptor chain over a 1:1 message that federation
      * delivered or relayed off the normal routing path, so the server-side capture hooks that live
      * in that chain — a message archiver, and through it XEP-0313 MAM — actually see it.
@@ -162,6 +186,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             throws PacketRejectedException {
 
         if (IN_CAPTURE_PASS.get()) return;   // our own synthetic pass — see runArchiveCapturePass
+        if (IN_OVERLAY_REPLY.get()) return;  // genuine overlay reply — see deliverOverlayReply
 
         if (FederationStanzaFactory.isMarkedAsForwarded(packet)) return;
 
@@ -366,18 +391,56 @@ public class FederationPacketInterceptor implements PacketInterceptor {
      */
     private void enforceRoomTraversalPolicy(Packet packet, boolean toLocalConference)
             throws PacketRejectedException {
-        if (FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()) return;  // traversal permitted
-
         if (!toLocalConference) return;
 
         JID from = packet.getFrom();
         if (from == null) return;
         if (!XMPPServer.getInstance().isRemote(from)) return;  // local users are allowed
 
+        // Across an untrusted edge, traversal is limited to rooms shared with that side, whatever the
+        // global toggle says: the toggle exists for the trusted mesh, and leaving it on must not hand an
+        // untrusted partner every public room on this server.
+        String edge = untrustedEdgeFor(from.getDomain());
+        if (edge != null) {
+            if (untrustedTraversalAllowed(packet, from.getDomain(), edge)) return;
+            Log.warn("SECURITY: blocking room access from {} to {} — it comes through untrusted peer {} "
+                   + "and that room is not shared with it", from, packet.getTo(), edge);
+            throw new PacketRejectedException("This room is not shared with your server.");
+        }
+
+        if (FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()) return;  // traversal permitted
+
         Log.info("Blocking direct S2S MUC access from {} to {} — remote-room traversal disabled",
                  from, packet.getTo());
         throw new PacketRejectedException(
                 "Direct cross-server access to this room is disabled; use federation.");
+    }
+
+    /**
+     * The untrusted peer a remote sender reaches us through — the sender's own server when that is an
+     * untrusted peer, or the next hop toward it when that hop is one — or null for the trusted mesh.
+     */
+    private String untrustedEdgeFor(String senderDomain) {
+        var registry = manager.getPeerRegistry();
+        if (registry.isUntrusted(senderDomain)) return senderDomain;
+        String hop = manager.getRoutingTable().findNextHop(senderDomain).orElse(null);
+        return hop != null && registry.isUntrusted(hop) ? hop : null;
+    }
+
+    /**
+     * Whether a stanza from across an untrusted edge may reach a local MUC address: a room that is
+     * federation-enabled and shared (visibility ACL) with the sender's server or with the edge it comes
+     * through, or a disco#info query on the service itself, which clients send before joining.
+     */
+    private boolean untrustedTraversalAllowed(Packet packet, String senderDomain, String edge) {
+        JID to = packet.getTo();
+        if (to.getNode() == null) {
+            return packet instanceof IQ iq && iq.getType() == IQ.Type.get
+                && iq.getChildElement() != null
+                && "http://jabber.org/protocol/disco#info".equals(iq.getChildElement().getNamespaceURI());
+        }
+        String room = to.toBareJID();
+        return manager.roomSharedWith(room, senderDomain) || manager.roomSharedWith(room, edge);
     }
 
     // ── 1:1 private-message relay ──────────────────────────────────────────────

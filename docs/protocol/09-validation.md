@@ -17,15 +17,17 @@ Everything below follows from those two.
 ## Rule ordering
 
 ```
+0.  sender identity             — before anything: a bare server JID, not us
 1.  peer allowlist              — before dispatch, uniformly
 2.  loop guard (via)            — before any processing
 3.  payload origin (from)       — before relay AND before delivery
+3b. claimed origin (origin/src) — untrusted senders, control actions and muc-forward
 4.  untrusted exposure          — per action, against a server domain
 5.  recipient binding (to)      — final hop only
-6.  application authorisation   — room federated? mapping active? token valid?
+6.  application authorisation   — room federated? mapping state? token valid? subscribed?
 ```
 
-Ordering matters. Check 1 first so it covers every action uniformly. Check 3 before relaying, not
+Ordering matters. Checks 0 and 1 come first so they cover every action uniformly. Check 3 before relaying, not
 only before delivering — a forged identity must not be laundered onward by a hop that was not itself
 the destination.
 
@@ -37,6 +39,20 @@ the convention or your own; the point is that these are auditable events, not de
 
 ---
 
+## 0. Sender identity
+
+```
+if the IQ's from has a node or a resource, or its domain is our own:
+    log; drop; return result
+peer := from's domain
+```
+
+Federation traffic is server-to-server and every implementation sends it from its bare domain JID.
+An XMPP server dispatches an IQ addressed to itself to the namespace's handler **whoever sent it** —
+a local client, or any user on a server it has an S2S link with. Without this check, any user account
+on an allowlisted server could address you directly and be taken for that server's federation module,
+with all of the peer's rights. Added in **1.10.8**.
+
 ## 1. The peer allowlist
 
 ```
@@ -47,7 +63,8 @@ if allowlist mode is enabled and the sending domain is not an approved peer:
 Applied **once, before dispatch**, so it covers every action including ones added later.
 
 This implementation defaults the allowlist **on**, meaning both sides must have explicitly added each
-other. Turning it off gives open federation with auto-registration of any server that connects.
+other. Turning it off gives open federation with auto-registration of any server that connects — as
+an **untrusted** peer with nothing exposed (since 1.10.8; trusted before).
 
 If your XMPP server's S2S is itself restricted to known domains, this is redundant. If it is
 internet-facing, this is the trust boundary.
@@ -149,6 +166,32 @@ fall-back-to-sender value used elsewhere.
 claim origins behind itself. This grants no new power — an on-path relay can already tamper with the
 legitimate traffic it carries, because there is no end-to-end signing.
 
+## 3b. Claimed origins on control actions
+
+Many actions carry an `origin` attribute naming the server they act for, and `muc-forward` carries
+`src`, the mapped server traffic enters through. These are claims, just like a payload's `from`.
+
+```
+claimedOriginOk(sender, origin):
+    if sender is trusted                       → allow   (same asymmetry as rule 3)
+    if origin == sender                        → allow
+    if next hop toward origin == sender        → allow
+    DROP
+```
+
+Applies, from an untrusted sender, to `room-advertisement`, `room-mapping`, every
+`room-mapping-*` lifecycle action, `room-unmap`, `mapping-ping`/`mapping-pong` (on both the relay and
+the local branch), and to `muc-forward`'s `src`.
+
+Unlike rule 3, an **unroutable** origin is refused: a control action for a server you cannot reach is
+not one you could carry out, so there is nothing to give the benefit of the doubt to. Without this
+rule an untrusted peer could replace or wipe any server's room list mesh-wide, reject or unmap mappings
+it had no part in, or forge probe answers that hide a broken path.
+
+On `muc-forward` the `src` check runs before **both** branches: on the relay branch the next hop
+receives the stanza from you, a trusted neighbour, and would accept an untrusted peer's `src` without
+checking it.
+
 ## 4. Untrusted-peer exposure gate
 
 An untrusted peer is given an explicit list of **server domains** it may see and act on. Everything
@@ -164,12 +207,16 @@ Where it applies, and against what:
 
 | Action | Checked against |
 |--------|-----------------|
+| `routing-update` | entries naming one of our **trusted** configured peers are refused; the rest install as *edge* routes ([03](03-routing.md#merge-algorithm)) |
 | `room-mapping`, relay branch | the `destination` |
 | `room-mapping`, local branch | **our own domain** |
+| `room-mapping-*` lifecycle, `room-unmap`, relay | the `destination` |
 | `mapping-ping` / `mapping-pong`, relay | the `destination` |
 | `muc-forward` | the `destination`, or our own domain when we are it |
 | `file-*`, relay branch | the `destination` |
 | `file-*`, addressed to us | **our own domain** |
+| `direct-forward`, `presence-forward`, `iq-forward` | the `destination`, or our own domain when we are it |
+| stanzas to a local MUC address, from a sender behind an untrusted edge | the room must be federated and shared with the sender's server or the edge ([05](05-muc-traffic.md#direct-room-access-without-a-mapping)) |
 | `user-directory`, `bookmark-push` | refused outright from an untrusted link ([08](08-directory.md)) |
 
 Two notes:
@@ -179,9 +226,10 @@ Two notes:
 which asks you to hand over content. Both `room-mapping` and `file-*` check their local branch
 explicitly. (The `file-*` local check was added in 1.10.6.)
 
-**`direct-forward`, `presence-forward` and `iq-forward` are deliberately not gated.** 1:1 messaging
-crossing an untrusted edge is the point of having one, and reachability is already bounded by the
-filtered routing view an untrusted peer receives.
+**`direct-forward`, `presence-forward` and `iq-forward` are gated too** (since 1.10.8). They were
+once left ungated on the reasoning that the filtered routing view bounds where an untrusted peer can
+reach; it does not — that view bounds what the peer is told, while `destination` is its own choice, and
+the next hop sees the relayed stanza arrive from a trusted neighbour.
 
 ### Outbound side
 
@@ -190,6 +238,11 @@ The gate has a sending half, and both are required for the exposure model to mea
 - `routing-update` — filtered to exposed destinations ([03](03-routing.md#untrusted-peers)).
 - `room-advertisement` — filtered to rooms homed on exposed servers, then by per-room visibility.
 - `user-directory` / `bookmark-push` — never sent at all.
+- Relayed `room-advertisement` for an origin the peer is not exposed to — not sent, not even as an
+  empty withdrawal (since 1.10.9).
+- `direct-forward`, `presence-forward`, `iq-forward` — sent only when the payload's sender is on an
+  exposed server or one of its subdomains (since 1.10.9;
+  [06](06-direct-traffic.md#untrusted-peer-exposure-gate)).
 
 ## 5. Recipient binding
 
@@ -242,6 +295,21 @@ You may not map onto a room that was never offered to you. Without the ACL half,
 observed a room JID — including a transit hop that merely relayed an advertisement toward someone
 else — could map an arbitrary local room and siphon its roster and messages.
 
+### Mapping requests — never over an established mapping
+
+A request for a (local room, origin) pair that already has an `ACTIVE` or disabled mapping does not
+replace it. See [04](04-rooms.md#room-mapping--the-request) for what it does instead.
+
+### Mapping lifecycle — state
+
+```
+accept  requires PENDING_OUT, and names the room we requested
+reject  requires PENDING_OUT
+disable requires ACTIVE
+enable  requires DISABLED_REMOTE
+otherwise → drop, log SECURITY
+```
+
 ### Mapping lifecycle tokens
 
 ```
@@ -254,6 +322,26 @@ otherwise            → reject, log SECURITY
 
 Applies to `room-mapping-disable`, `-enable`, `room-unmap`. Relay hops MUST carry the token through
 unchanged; dropping it makes the destination's check fail and the action is silently discarded.
+
+### Room injection — bound to the entry server
+
+```
+if targetRoom has no ACTIVE mapping whose remote domain == src       → DROP
+```
+
+The "has an active mapping" check above is necessary but not sufficient: the mapping must be with the
+server the traffic enters through.
+
+### Presence probes and PEP reads
+
+```
+presence probe for a local user:  answer only if the prober has a FROM/BOTH subscription
+PEP items GET for a local user:   serve only if the node's access model allows the requester
+```
+
+Both answer on a user's behalf, so both must apply the user's own access rules — RFC 6121 §4.3.2 for
+probes, the node's XEP-0060 access model for PEP. Before 1.10.8 neither did: any peer could read any
+user's availability, and any PEP node including whitelist ones.
 
 ### Probe answering
 
@@ -352,13 +440,20 @@ Prevents a write outside the region the geometry accounted for.
 
 | Rule | Applies to | Failure |
 |------|-----------|---------|
+| Sender identity | every action | drop |
 | Peer allowlist | every action | drop |
 | `via` loop guard | every action carrying `via` | drop |
 | Payload origin | `muc-forward`, `direct-`/`presence-`/`iq-forward` | drop |
-| Untrusted exposure | mapping, probes, `muc-forward`, `file-*` | drop |
+| Claimed origin | ads, mapping actions, unmap, probes, `muc-forward` `src` (untrusted) | drop |
+| Untrusted exposure | mapping actions, probes, `muc-forward`, `file-*`, 1:1 forwards | drop |
+| Route trust class | `routing-update` | edge route never out-bids a clean one |
 | Recipient binding | `direct-`/`presence-`/`iq-forward`, final hop | drop |
 | Room federation-enabled | `muc-forward` injection | drop |
 | Active mapping exists | `muc-forward` injection | drop |
+| Mapping is with `src` | `muc-forward` injection | drop |
+| Lifecycle state | mapping accept/reject/disable/enable | drop |
+| Subscription | presence probe answering | do not answer |
+| PEP access model | `iq-forward` PEP items GET | `forbidden` |
 | Room shared with origin | `room-mapping` | reject that `<map/>` |
 | Lifecycle token | mapping disable/enable/unmap | reject that `<map/>` |
 | Mapping exists | `mapping-ping` answering | do not answer |

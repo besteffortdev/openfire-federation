@@ -9,6 +9,35 @@ goes further: it builds a **federation overlay** on top of S2S so that a single 
 **mapped across several servers at once**, with messages and presence relayed **multi‑hop** between servers
 that have no direct link. End users do nothing special — they just join their local room.
 
+```mermaid
+flowchart LR
+    R1(["💬 room A"]) --- S1
+    R4(["💬 room A"]) --- S4
+    R3(["💬 room B"]) --- S3
+    S1[Server 1] === S2[Server 2<br/>hub]
+    S4[Server 4] === S2
+    S3[Server 3] === S2
+    S2 === S5["Server 5<br/>⚠️ untrusted<br/>allows: Server 3"]
+    S5 === S6["Server 6<br/>⚠️ untrusted<br/>allows: Server 7"]
+    S6 === S7[Server 7]
+    S7 --- R7(["💬 room B"])
+
+    classDef server fill:#eef4ff,stroke:#3b6fd8,color:#0b1f44
+    classDef untrusted fill:#fff4e5,stroke:#d9822b,stroke-dasharray:5 3,color:#4a2a00
+    classDef roomA fill:#ffffff,stroke:#2e9e44,stroke-width:2px,color:#0b1f44
+    classDef roomB fill:#ffffff,stroke:#e0a800,stroke-width:2px,color:#0b1f44
+    class S1,S2,S3,S4,S7 server
+    class S5,S6 untrusted
+    class R1,R4 roomA
+    class R3,R7 roomB
+    linkStyle 0,1,3,4 stroke:#2e9e44,stroke-width:3px
+    linkStyle 2,5,6,7,8,9 stroke:#e0a800,stroke-width:3px
+```
+
+*Room A on Servers 1 and 4 is one mapped room, relayed through the hub (green). Room B links Server 3 to
+Server 7 across four hops (yellow), passing through two untrusted peers: each one is only allowed to reach
+the server on its list, which is exactly what room B needs and nothing more.*
+
 ## Contents
 
 - [Features](#features)
@@ -268,9 +297,10 @@ talking to. The controls at a glance:
 
 | Control | What it enforces |
 |---------|------------------|
+| **Server‑only federation traffic** | Federation IQs must come from a peer server's bare domain — a user account can never act as its server's federation plugin. |
 | **Opt‑in rooms** | A peer can only map or inject into a room an admin toggled **Federated**; anything else is dropped and logged `SECURITY:`. |
 | **Peer allowlist** *(default on)* | Only peers you added may federate — **both ends must add each other**. `plugin.federation.peerAllowlist=false` for open federation. |
-| **Untrusted peers** | An untrusted peer gets no routes or rooms except the specific servers you expose to it — the edge‑server / partner‑gateway pattern. Foreign‑domain peers default untrusted. |
+| **Untrusted peers** | An untrusted peer gets no routes or rooms except the specific servers you expose to it, may act (rooms, files, 1:1 traffic) only toward those servers, speaks only for its own side, and its routes can never out‑bid the trusted mesh — the edge‑server / partner‑gateway pattern. Foreign‑domain and auto‑registered peers default untrusted. |
 | **Trust is per‑link** | Both ends must declare the same trust level, or the link is blocked (*Trust mismatch*) until they agree. |
 | **Deniable routes** | **Deny** a route/room a peer advertises: torn down and dropped on receive, one‑sided, persisted, survives re‑advertisement. |
 | **Mapping probe** | Active mappings are pinged end‑to‑end; 3 misses → **⚠ not responding**, ghosts dropped; auto‑recovers when pongs resume. |
@@ -278,7 +308,8 @@ talking to. The controls at a glance:
 | **S2S key pinning (TOFU)** | Pins each peer's leaf public key; a key change auto‑marks it untrusted (*⚠ cert changed*) until reviewed. |
 | **Anti‑spoofing** | Every forwarded stanza's `from` is validated per hop — no peer may speak for your users or from the wrong direction. |
 | **Per‑room visibility** | Each room lists which servers may see it (default: none); the set travels with the advertisement so off‑path servers never learn it exists. |
-| **Mapping consent** | Mapping requires the other admin's **Accept**; a per‑mapping token is re‑checked on every later lifecycle message. |
+| **Mapping consent** | Mapping requires the other admin's **Accept**; each lifecycle message is valid only from the matching state, a per‑mapping token is re‑checked on every later one, and room traffic must arrive through a mapping on that room. |
+| **Presence & PEP privacy** | Relayed presence probes are answered only for subscribers; relayed PEP reads honour each node's access model. |
 | **Admin API CSRF** | A double‑submit `fed-csrf` token guards all Federation‑tab API calls. |
 | **File filtering & AV** | Extension allowlist (egress + ingress) + magic‑number sniff + optional ClamAV (fails closed); transit hops never decode content. |
 

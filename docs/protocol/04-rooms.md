@@ -94,7 +94,14 @@ else                    → replace cached rooms for `source`
 
 relay onward to other peers, with via + our own domain,
     filtered per peer by visibility and by untrusted-peer exposure
+    (an untrusted peer not exposed to `source` is skipped outright)
 ```
+
+The filtered list is sent **even when empty**, so a peer that falls out of a room's visibility receives
+the withdrawal. The one exception is an untrusted peer that was never exposed to `source`: it receives
+nothing for that origin at all, because the `origin` attribute of an empty advertisement still names a
+server it was not meant to learn about. (Since 1.10.9; earlier versions sent it the empty list, which a
+1.10.8+ receiver drops and logs as a `SECURITY:` claimed-origin violation.)
 
 The **JID safety check** is normative and covered in
 [09-validation.md](09-validation.md#peer-supplied-jids). Peer-supplied room JIDs get cached, routed on,
@@ -190,7 +197,22 @@ and both MUST be implemented:
    peer that ever observed a room JID — including a transit hop that merely relayed an advertisement
    toward somebody else — could map an arbitrary local room and siphon its roster and messages.
 2. **Untrusted-peer exposure** — if the sending link is untrusted, our own domain must be in that
-   peer's exposed-servers list.
+   peer's exposed-servers list, and `origin` must be that peer itself or a server routed through it
+   ([09](09-validation.md#claimed-origins-on-control-actions)).
+
+A request **never overwrites an established mapping**. If one already exists for the same local room
+and origin:
+
+| Existing state | What the request does |
+|----------------|----------------------|
+| `ACTIVE`, same remote room | Re-send our `room-mapping-accept` with the **existing** token (the requester probably lost its state and is waiting in `PENDING_OUT`). The mapping stays as it is. |
+| `ACTIVE`, different remote room | Ignored. |
+| `DISABLED_LOCAL` / `DISABLED_REMOTE` | Ignored — an admin's explicit decision is not undone by a request. |
+| `PENDING_OUT`, same remote room | Both admins asked for this pairing. The lexicographically **lower** domain accepts it; the higher one re-sends its own request and waits for that accept. |
+| anything else | Replaced by a fresh `PENDING_IN`. |
+
+Before 1.10.8 a request replaced whatever mapping existed with a token-less pending record — cutting a
+live mapping, and emptying the token so any later disable or unmap for it passed the token check.
 
 A room may be configured to **auto-accept**, in which case the destination immediately proceeds to the
 accept step. Nothing on the wire distinguishes an auto-accept from a human one.
@@ -262,6 +284,23 @@ if stored is empty                          → accept  (legacy peer, pre-token)
 if stored == presented                      → accept
 otherwise                                   → reject, log SECURITY
 ```
+
+### State rules for inbound lifecycle actions
+
+Each inbound action is legal from exactly one state of the receiver's mapping. Anything else is dropped
+and logged:
+
+| Action | Required state | Result |
+|--------|---------------|--------|
+| `room-mapping-accept` | `PENDING_OUT`, and `map/@local` names the room we asked for | `ACTIVE`, storing the token |
+| `room-mapping-reject` | `PENDING_OUT` | `REJECTED` |
+| `room-mapping-disable` | `ACTIVE` (+ token) | `DISABLED_REMOTE` |
+| `room-mapping-enable` | `DISABLED_REMOTE` (+ token) | `ACTIVE` |
+
+Without these, consent was bypassable: a peer could file a request and then accept it itself, or send
+`room-mapping-enable` against its own pending request (whose stored token is empty, so any token
+passed), and a forged reject could knock any live mapping to `REJECTED`. A peer's disable also no longer
+overwrites `DISABLED_LOCAL`, so its later enable cannot undo our own admin's decision.
 
 The empty-stored fallback exists for mappings created before tokens. If your implementation does not
 mint tokens, send the actions without a `token` attribute; a peer that has a stored token for the

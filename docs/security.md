@@ -15,6 +15,14 @@ violates any of these is **dropped and logged with a `SECURITY:` tag** (grep you
 
 ---
 
+## Federation traffic must come from a server
+
+Every federation IQ must be sent from a peer's **bare domain** JID — no user part, no resource — and
+never from this server's own domain. Openfire hands an IQ addressed to the server to the federation
+handler whoever sent it, so before 1.10.8 any **user account** on an allowlisted server (or a local
+client) could address this server directly and be treated as that server's federation plugin, with all
+of the peer's rights. Anything else is dropped and logged with a `SECURITY:` tag.
+
 ## Rooms are opt-in
 
 A remote peer can only map — or inject presence/messages into — a local room an admin has explicitly toggled
@@ -28,7 +36,10 @@ tag. This stops a peer from siphoning the roster of, or injecting into, a room i
 console) may drive federation; every action from any other server is rejected. A peer is "configured" if you
 added it, so **both ends must add each other** — with the allowlist on, auto-registration of unknown peers is
 suppressed. Set it to `false` (or use the **Security** toggle on the Peer Servers tab) for open federation,
-where any server that can connect is accepted and auto-registered.
+where any server that can connect is accepted and auto-registered — **as an untrusted peer with nothing
+exposed** (since 1.10.8). A stranger therefore links only if it also declares itself untrusted, and sees
+nothing until you expose servers to it or promote it to trusted. Before 1.10.8 auto-registered peers were
+trusted.
 
 ## Untrusted peers (filtered exposure)
 
@@ -39,6 +50,15 @@ from this server itself (its federated local rooms) *and* any server reachable t
 is sent only the federated rooms homed on those servers, plus a route to each, so it learns nothing about the
 rest of your topology. Enforcement is two-way: inbound `room-mapping`/`muc-forward` from an untrusted peer
 aimed at a room homed on a server it was **not** exposed to is dropped and logged with a `SECURITY:` tag.
+The same exposure gate covers every routed action the peer can send: mapping requests and their
+lifecycle messages, unmaps, probes, file transfer, and — since 1.10.8 — 1:1 messages, presence and IQs
+(`direct-forward`, `presence-forward`, `iq-forward`), both when relayed onward and when addressed to
+this server. Those three used to be ungated on the assumption that the filtered routing view already
+bounded them; it only bounds what the peer is *told*, while the envelope's destination is the peer's own
+choice.
+The gate works in both directions: 1:1 traffic is relayed *into* an untrusted peer only when its sender
+is on a server exposed to that peer (since 1.10.9), and room advertisements for an origin it was not
+exposed to are never relayed to it — not even as an empty withdrawal.
 This is the **edge-server** pattern: federate with a partner organisation through one gateway that exposes
 only a curated set of servers.
 
@@ -51,6 +71,20 @@ only a curated set of servers.
   server's (the last two DNS labels, e.g. `example.net`; adjustable via `plugin.federation.trustDomainLabels`),
   the *Untrusted* box is ticked automatically — a stranger shares nothing until you choose what it may see.
   Same-parent peers default trusted.
+- **An untrusted peer speaks only for its own side.** Every `origin` it claims — on a room
+  advertisement, a mapping request or lifecycle message, an unmap, a probe — and the entry server
+  (`src`) on its room traffic must be the peer itself or a server routed through it. Otherwise it could
+  replace or wipe any server's room list across the mesh, or reject and unmap mappings it had no part in.
+- **Its routes cannot out-bid the trusted mesh.** Routes learned across an untrusted edge are tagged
+  (`edge='true'` in routing updates, carried hop to hop). A tagged route never displaces an untagged
+  one, and an untagged one always displaces a tagged one, whatever their hop counts — so an edge cannot
+  attract traffic for your servers by advertising a small, negative or overflowing hop count. It may not
+  advertise any of your trusted configured peers at all. Residual: while a destination has *no* clean
+  route, an edge that advertises it is used until a clean route returns; **Deny** it for that peer if it
+  can never legitimately be behind that edge.
+- **Room traversal is limited to shared rooms.** A user whose server is an untrusted peer, or is
+  reached through one, may only address local rooms that are federated and shared with that side —
+  whatever `plugin.federation.allowRemoteRoomTraversal` says. The toggle governs the trusted mesh only.
 
 ## Deniable route advertisements (per-link inbound filter)
 
@@ -150,6 +184,28 @@ peer shows *"disabled by peer"* and it can be re-enabled later. A per-room **Aut
 room free to join — incoming requests are accepted automatically (still subject to the
 federation/untrusted/visibility gates). **On upgrade, existing mappings drop to pending and must be
 re-accepted** (the lower-domain side auto-re-requests on reconnect; the other side just accepts).
+
+Since 1.10.8 every inbound lifecycle message is valid from exactly one state: an accept or reject only
+for a request **we** sent (and an accept only for the room we asked for), a peer's disable only for an
+active mapping, a peer's enable only to undo its own disable. A new request never overwrites an active or
+disabled mapping. Before that, a peer could file a request and accept it itself, re-open a mapping your
+admin had disabled, knock any live mapping to *rejected*, or reset a mapping's token so later
+disables and unmaps passed unchecked.
+
+Room traffic is also bound to the mapping it arrives through: injected messages and presence must come
+through a server that holds an **active mapping on that specific room**. Before 1.10.8, any active
+mapping on the room sufficed, so a peer could write into a room mapped only to somebody else.
+
+## Presence and PEP privacy
+
+Two server-side answers given on a user's behalf follow that user's own access rules (since 1.10.8):
+
+- A relayed **presence probe** is answered only for a presence subscriber (RFC 6121 §4.3.2). Anyone else
+  learns nothing — not even whether the user is online.
+- A relayed **PEP items** request is served only if the node's access model allows the requester —
+  `open`, `presence` with a subscription, `roster` group membership, `whitelist` membership — the same
+  check Openfire applies to a local request. A refused read gets `forbidden`. Without this, private
+  nodes such as XEP-0402 bookmarks (which can hold room passwords) were readable by any peer.
 
 ## Admin API CSRF
 

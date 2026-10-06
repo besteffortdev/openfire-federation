@@ -317,11 +317,14 @@ ones fall back to a documented default. The consequences that actually bite:
 |---------|---------------------------|---------------------|
 | `untrusted` on `peer-announce` | treated as trusted | Safe. A pre-trust peer federates as trusted with anyone who also considers it trusted. |
 | `visibleto` on `<room/>` | parsed as **empty set** = visible to nobody | **Your rooms reach direct peers and stop.** Always emit it; use `*` if you have no ACL model. |
-| `src` on `muc-forward` | falls back to the sending domain | Degrades safely. Mapping-scoped eviction becomes less precise on multi-hop paths. |
+| `src` on `muc-forward` | falls back to the sending domain | Direct links unaffected. **Across a relay, traffic is dropped** since 1.10.8: injection requires an active mapping with `src`, and the relay is not the mapped server. Always emit it. |
+| `edge` on routing `<entry/>` | treated as clean | A peer that never emits it is fine on a tree. One that **strips** it while re-advertising a route learned across an untrusted edge can make that route look clean, so it can win over the edge route it came from — a routing loop on a cyclic mesh. Propagate it. |
 | `token` on mapping lifecycle | empty stored token accepts anything | A peer that *has* a stored token rejects your untokened disable/enable/unmap. Mint tokens. |
 | `mapping-ping` support | never answers | Never flagged as broken; a domain must have provably answered once to be eligible for the verdict. |
 | `token` on `fed-file` | holder with no stored token serves anyway | **Fail-closed the other way**: a 1.10.6 origin's shares cannot be fetched by a peer that drops the attribute. |
 | Recipient binding (rule 5) | older peers do not check | They will relay a mis-addressed payload onward. Implement it regardless of what your peers do. |
+| Sender identity, claimed origins, lifecycle states, probe/PEP access (1.10.8) | older peers do not check | Each is enforced by the receiver alone. An older peer in the path does not weaken a newer receiver's checks, but it leaves its own users exposed to the attacks these close. |
+| Egress exposure gate on 1:1 traffic and advertisement relay (1.10.9) | older peers do not check | Enforced by the server **in front of** the untrusted edge, so it protects only the topology behind a gateway that implements it. A 1.10.8+ receiver still drops the claimed-origin advertisements an older gateway leaks, and logs them. |
 
 Two upgrades in this implementation's history required coordinated action, worth knowing if you meet a
 mixed mesh:
