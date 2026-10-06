@@ -1636,6 +1636,10 @@ public class FederationManager {
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getDomain().equals(excludeDomain)) continue;
             if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
+            // An untrusted peer hears nothing about an origin it was not exposed to — not even the
+            // empty list below, whose origin attribute alone names a server on our side of the edge.
+            if (isUntrusted(peer.getDomain())
+                    && !peerRegistry.getExposedServers(peer.getDomain()).contains(originDomain)) continue;
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 // Untrusted-peer exposure + per-room visibility: relay only the allowed subset.
                 // Always send the filtered list, EVEN WHEN EMPTY: a peer that was previously on the
@@ -1643,7 +1647,8 @@ public class FederationManager {
                 // ACL) must receive the empty list so it withdraws the origin's rooms. Safe because
                 // updateRemoteRooms REPLACES the origin's room set per receiver and an empty list
                 // clears only THIS origin's rooms, so an off-path peer drops exactly them and relays
-                // the withdrawal onward. (The old "skip empty unless the origin's list is empty"
+                // the withdrawal onward — to trusted peers and to untrusted peers exposed to this
+                // origin only (see above). (The old "skip empty unless the origin's list is empty"
                 // guard never delivered the withdrawal to multi-hop excluded peers — the ACL-removal
                 // bug where unchecking one server left it still seeing the room.)
                 List<FederatedRoom> toSend = filterRoomsForHop(peer.getDomain(), rooms);
@@ -1850,10 +1855,31 @@ public class FederationManager {
     }
 
     /**
+     * Egress counterpart of the inbound untrusted-peer exposure gate, for the three 1:1 actions: a
+     * stanza may cross INTO an untrusted peer only when its sender is on a server exposed to that
+     * peer (or a subdomain of one, e.g. its MUC service). The inbound gate on the far side checks
+     * only the destination, so without this a user on any server behind us could reach the far side
+     * of the edge — revealing a server we never exposed, and to a party that cannot even reply.
+     */
+    public boolean egressExposureOk(String nextHop, JID from, String action) {
+        if (!isUntrusted(nextHop)) return true;
+        String domain = from == null ? null : from.getDomain();
+        if (domain != null) {
+            for (String srv : peerRegistry.getExposedServers(nextHop)) {
+                if (domain.equals(srv) || domain.endsWith("." + srv)) return true;
+            }
+        }
+        Log.warn("SECURITY: dropping {} from {} toward untrusted peer {} — the sender's server is not "
+               + "exposed to it", action, from, nextHop);
+        return false;
+    }
+
+    /**
      * Relays an outbound 1:1 message toward its destination domain over the overlay.  Called by the
      * packet interceptor once it has decided the message targets an overlay-reachable peer user.
-     * Returns true if the message was handed to a next hop (the caller then suppresses native S2S),
-     * false if there is no route (the caller leaves Openfire to handle it normally).
+     * Returns true if the message was handed to a next hop, or deliberately dropped by
+     * {@link #egressExposureOk} (the caller then suppresses native S2S either way), false if there is
+     * no route (the caller leaves Openfire to handle it normally).
      */
     public boolean forwardDirectMessage(Message msg) {
         return forwardDirectMessage(msg, msg.getTo().getDomain());
@@ -1870,6 +1896,7 @@ public class FederationManager {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
         if (nextHop == null) return false;
+        if (!egressExposureOk(nextHop, msg.getFrom(), "direct-forward")) return true;   // consumed: dropped, never native S2S
         try {
             Message copy = new Message(msg.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()
@@ -1901,6 +1928,7 @@ public class FederationManager {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
         if (nextHop == null) return false;
+        if (!egressExposureOk(nextHop, pres.getFrom(), "presence-forward")) return true;   // consumed: dropped, never native S2S
         try {
             Presence copy = new Presence(pres.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()
@@ -1957,6 +1985,7 @@ public class FederationManager {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
         if (nextHop == null) return false;
+        if (!egressExposureOk(nextHop, iq.getFrom(), "iq-forward")) return true;   // consumed: dropped, never native S2S
         try {
             IQ copy = new IQ(iq.getElement().createCopy());
             XMPPServer.getInstance().getPacketRouter()

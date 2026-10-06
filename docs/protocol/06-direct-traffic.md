@@ -58,6 +58,15 @@ untrusted checks.
 
 The `from`-spoofing checks still apply in full.
 
+**The gate also has an egress half** (since 1.10.9). Before relaying any of the three *into* an
+untrusted peer — whether the stanza came from a local user or is passing through — the sender
+checks that the embedded payload's `from` domain is a server exposed to that peer, or a subdomain of
+one (its MUC service). Otherwise the stanza is dropped and logged. The receiving side cannot enforce
+this: its inbound gate checks only `destination`, so without the sender's check a user on any server
+behind the edge could reach the far side, revealing a server that was never exposed, to a party whose
+replies the inbound gate then drops. A dropped stanza is treated as consumed, never handed to native
+S2S.
+
 ## Recipient binding
 
 > **A receiver that is the final destination MUST verify that the embedded stanza's `to` resolves to

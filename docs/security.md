@@ -56,6 +56,9 @@ lifecycle messages, unmaps, probes, file transfer, and — since 1.10.8 — 1:1 
 this server. Those three used to be ungated on the assumption that the filtered routing view already
 bounded them; it only bounds what the peer is *told*, while the envelope's destination is the peer's own
 choice.
+The gate works in both directions: 1:1 traffic is relayed *into* an untrusted peer only when its sender
+is on a server exposed to that peer (since 1.10.9), and room advertisements for an origin it was not
+exposed to are never relayed to it — not even as an empty withdrawal.
 This is the **edge-server** pattern: federate with a partner organisation through one gateway that exposes
 only a curated set of servers.
 

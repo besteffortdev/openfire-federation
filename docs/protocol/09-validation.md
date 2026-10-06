@@ -238,6 +238,11 @@ The gate has a sending half, and both are required for the exposure model to mea
 - `routing-update` — filtered to exposed destinations ([03](03-routing.md#untrusted-peers)).
 - `room-advertisement` — filtered to rooms homed on exposed servers, then by per-room visibility.
 - `user-directory` / `bookmark-push` — never sent at all.
+- Relayed `room-advertisement` for an origin the peer is not exposed to — not sent, not even as an
+  empty withdrawal (since 1.10.9).
+- `direct-forward`, `presence-forward`, `iq-forward` — sent only when the payload's sender is on an
+  exposed server or one of its subdomains (since 1.10.9;
+  [06](06-direct-traffic.md#untrusted-peer-exposure-gate)).
 
 ## 5. Recipient binding
 

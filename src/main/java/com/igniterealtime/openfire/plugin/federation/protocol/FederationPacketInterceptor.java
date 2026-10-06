@@ -106,6 +106,30 @@ public class FederationPacketInterceptor implements PacketInterceptor {
     private static final ThreadLocal<Boolean> IN_CAPTURE_PASS = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     /**
+     * Set while {@link #deliverOverlayReply} hands a genuine overlay IQ reply to the router. Such a
+     * reply matches the same {@code id|from|to} key as the spurious local bounce, so if it arrives
+     * first (sub-millisecond LAN hops can beat the router's own bounce) {@link #consumeSpuriousBounce}
+     * would swallow the REAL error and let the fake not-allowed through — e.g. a PEP item-not-found,
+     * which clients act on, surfacing as not-allowed. Marking the stanza instead would add a second
+     * child element to an IQ, which RFC 6120 forbids, hence a thread flag rather than a marker.
+     */
+    private static final ThreadLocal<Boolean> IN_OVERLAY_REPLY = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    /**
+     * Routes a result/error IQ that arrived over the overlay to its local requester, bypassing this
+     * interceptor exactly as a {@code fed-origin}-marked stanza would. Local delivery invokes the
+     * interceptor chain synchronously on this thread, so the flag covers it.
+     */
+    public static void deliverOverlayReply(IQ reply) {
+        IN_OVERLAY_REPLY.set(Boolean.TRUE);
+        try {
+            XMPPServer.getInstance().getPacketRouter().route(reply);
+        } finally {
+            IN_OVERLAY_REPLY.set(Boolean.FALSE);
+        }
+    }
+
+    /**
      * Re-runs Openfire's post-processing interceptor chain over a 1:1 message that federation
      * delivered or relayed off the normal routing path, so the server-side capture hooks that live
      * in that chain — a message archiver, and through it XEP-0313 MAM — actually see it.
@@ -162,6 +186,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             throws PacketRejectedException {
 
         if (IN_CAPTURE_PASS.get()) return;   // our own synthetic pass — see runArchiveCapturePass
+        if (IN_OVERLAY_REPLY.get()) return;  // genuine overlay reply — see deliverOverlayReply
 
         if (FederationStanzaFactory.isMarkedAsForwarded(packet)) return;
 

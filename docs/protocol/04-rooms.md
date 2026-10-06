@@ -94,7 +94,14 @@ else                    → replace cached rooms for `source`
 
 relay onward to other peers, with via + our own domain,
     filtered per peer by visibility and by untrusted-peer exposure
+    (an untrusted peer not exposed to `source` is skipped outright)
 ```
+
+The filtered list is sent **even when empty**, so a peer that falls out of a room's visibility receives
+the withdrawal. The one exception is an untrusted peer that was never exposed to `source`: it receives
+nothing for that origin at all, because the `origin` attribute of an empty advertisement still names a
+server it was not meant to learn about. (Since 1.10.9; earlier versions sent it the empty list, which a
+1.10.8+ receiver drops and logs as a `SECURITY:` claimed-origin violation.)
 
 The **JID safety check** is normative and covered in
 [09-validation.md](09-validation.md#peer-supplied-jids). Peer-supplied room JIDs get cached, routed on,

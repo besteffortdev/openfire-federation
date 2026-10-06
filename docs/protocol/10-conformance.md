@@ -324,6 +324,7 @@ ones fall back to a documented default. The consequences that actually bite:
 | `token` on `fed-file` | holder with no stored token serves anyway | **Fail-closed the other way**: a 1.10.6 origin's shares cannot be fetched by a peer that drops the attribute. |
 | Recipient binding (rule 5) | older peers do not check | They will relay a mis-addressed payload onward. Implement it regardless of what your peers do. |
 | Sender identity, claimed origins, lifecycle states, probe/PEP access (1.10.8) | older peers do not check | Each is enforced by the receiver alone. An older peer in the path does not weaken a newer receiver's checks, but it leaves its own users exposed to the attacks these close. |
+| Egress exposure gate on 1:1 traffic and advertisement relay (1.10.9) | older peers do not check | Enforced by the server **in front of** the untrusted edge, so it protects only the topology behind a gateway that implements it. A 1.10.8+ receiver still drops the claimed-origin advertisements an older gateway leaks, and logs them. |
 
 Two upgrades in this implementation's history required coordinated action, worth knowing if you meet a
 mixed mesh:

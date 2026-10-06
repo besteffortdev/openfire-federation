@@ -1039,6 +1039,7 @@ public class FederationIQHandler extends IQHandler {
                 nextHop -> {
                     try {
                         Message embedded = new Message(payloadEl.createCopy());
+                        if (!manager.egressExposureOk(nextHop, embedded.getFrom(), "direct-forward")) return;
                         XMPPServer.getInstance().getPacketRouter()
                                   .route(FederationStanzaFactory.directForward(nextHop, finalDest, newVia, embedded));
                     } catch (Exception e) {
@@ -1137,6 +1138,7 @@ public class FederationIQHandler extends IQHandler {
                 nextHop -> {
                     try {
                         Presence embedded = new Presence(payloadEl.createCopy());
+                        if (!manager.egressExposureOk(nextHop, embedded.getFrom(), "presence-forward")) return;
                         XMPPServer.getInstance().getPacketRouter()
                                   .route(FederationStanzaFactory.presenceForward(nextHop, finalDest, newVia, embedded));
                     } catch (Exception e) {
@@ -1207,7 +1209,7 @@ public class FederationIQHandler extends IQHandler {
                 }
             } else {
                 // A REPLY (result/error) reached its final destination — deliver to the local client.
-                XMPPServer.getInstance().getPacketRouter().route(iq);
+                FederationPacketInterceptor.deliverOverlayReply(iq);
                 Log.info("iq-forward: delivered 1:1 reply {} {} -> {} (from {})",
                          type, iq.getFrom(), iq.getTo(), fromDomain);
             }
@@ -1217,6 +1219,7 @@ public class FederationIQHandler extends IQHandler {
                 nextHop -> {
                     try {
                         IQ embedded = new IQ(payloadEl.createCopy());
+                        if (!manager.egressExposureOk(nextHop, embedded.getFrom(), "iq-forward")) return;
                         XMPPServer.getInstance().getPacketRouter()
                                   .route(FederationStanzaFactory.iqForward(nextHop, finalDest, newVia, embedded));
                     } catch (Exception e) {
