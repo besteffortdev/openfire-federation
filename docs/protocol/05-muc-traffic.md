@@ -90,6 +90,8 @@ guards, origin validation, the `jid` attribute in the injected `muc#user` item �
 if via contains our own domain                     → drop (loop)
 if no payload child                                → drop
 if payloadOriginOk fails                           → drop (09-validation)
+if sender is untrusted AND src is neither the sender
+   nor a server routed through it                  → drop (09-validation)
 
 targetServer := destination, or our own domain if destination absent/ours
 if untrusted-peer exposure denies targetServer     → drop
@@ -98,13 +100,15 @@ if destination is absent or ours:
     ── WE ARE THE DESTINATION ──
     if targetRoom is not a federation-enabled local room       → drop, log SECURITY
     if targetRoom has NO ACTIVE mapping                        → drop, log SECURITY
+    if targetRoom has no ACTIVE mapping whose remote domain == src → drop, log SECURITY
     inject into targetRoom
     fan out to every other ACTIVE mapping on that room
 else:
     ── WE ARE A RELAY ──
     newVia := via + our own domain
-    if we have an ACTIVE mapping whose REMOTE room == targetRoom
-       and whose local room is federation-enabled:
+    if we have an ACTIVE mapping whose REMOTE room == targetRoom,
+       whose remote domain == destination, whose local room is federation-enabled,
+       and (sender trusted OR our own domain is exposed to it):
         inject into that local room too          ← see below
     relay toward destination, preserving src, with newVia
 ```
@@ -118,6 +122,10 @@ hole:
   peer could inject messages or spoofed presence into **any** local room it knows the JID of.
 - *Federation-enabled* alone is not consent. A room tagged for federation whose mappings are all
   pending, rejected or disabled must stay closed. Check for at least one **ACTIVE** mapping.
+- And that mapping must be with **the server the traffic enters through** — `src`. Every legitimate
+  sender stamps `src` with its own domain and sends only along its own active mappings (a hub stamps
+  itself on fan-out), so `src` names the far end of exactly one of your mappings. "Some active mapping
+  exists" let any peer write into a room that was mapped only to somebody else. (Since 1.10.8.)
 
 ### Why a relay may also inject
 
@@ -297,6 +305,12 @@ as `muc-forward`, and is delivered to the MUC service normally rather than injec
 This implementation gates it with `plugin.federation.allowRemoteRoomTraversal` (default **on**). When
 turned off, remote-origin stanzas aimed at a local room are rejected unless an explicit mapping
 exists. There is no wire signalling for this: a peer with traversal disabled simply drops the traffic.
+
+Across an **untrusted** edge the toggle does not apply: a sender whose server is an untrusted peer, or
+is reached through one, may only address rooms that are federation-enabled and shared (visibility ACL)
+with its server or with that edge — plus a `disco#info` query on the MUC service itself, which clients
+send before joining. The toggle exists for the trusted mesh; leaving it on must not hand an untrusted
+partner every public room on the server. (Since 1.10.8.)
 
 ---
 

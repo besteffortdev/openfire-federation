@@ -366,18 +366,56 @@ public class FederationPacketInterceptor implements PacketInterceptor {
      */
     private void enforceRoomTraversalPolicy(Packet packet, boolean toLocalConference)
             throws PacketRejectedException {
-        if (FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()) return;  // traversal permitted
-
         if (!toLocalConference) return;
 
         JID from = packet.getFrom();
         if (from == null) return;
         if (!XMPPServer.getInstance().isRemote(from)) return;  // local users are allowed
 
+        // Across an untrusted edge, traversal is limited to rooms shared with that side, whatever the
+        // global toggle says: the toggle exists for the trusted mesh, and leaving it on must not hand an
+        // untrusted partner every public room on this server.
+        String edge = untrustedEdgeFor(from.getDomain());
+        if (edge != null) {
+            if (untrustedTraversalAllowed(packet, from.getDomain(), edge)) return;
+            Log.warn("SECURITY: blocking room access from {} to {} — it comes through untrusted peer {} "
+                   + "and that room is not shared with it", from, packet.getTo(), edge);
+            throw new PacketRejectedException("This room is not shared with your server.");
+        }
+
+        if (FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()) return;  // traversal permitted
+
         Log.info("Blocking direct S2S MUC access from {} to {} — remote-room traversal disabled",
                  from, packet.getTo());
         throw new PacketRejectedException(
                 "Direct cross-server access to this room is disabled; use federation.");
+    }
+
+    /**
+     * The untrusted peer a remote sender reaches us through — the sender's own server when that is an
+     * untrusted peer, or the next hop toward it when that hop is one — or null for the trusted mesh.
+     */
+    private String untrustedEdgeFor(String senderDomain) {
+        var registry = manager.getPeerRegistry();
+        if (registry.isUntrusted(senderDomain)) return senderDomain;
+        String hop = manager.getRoutingTable().findNextHop(senderDomain).orElse(null);
+        return hop != null && registry.isUntrusted(hop) ? hop : null;
+    }
+
+    /**
+     * Whether a stanza from across an untrusted edge may reach a local MUC address: a room that is
+     * federation-enabled and shared (visibility ACL) with the sender's server or with the edge it comes
+     * through, or a disco#info query on the service itself, which clients send before joining.
+     */
+    private boolean untrustedTraversalAllowed(Packet packet, String senderDomain, String edge) {
+        JID to = packet.getTo();
+        if (to.getNode() == null) {
+            return packet instanceof IQ iq && iq.getType() == IQ.Type.get
+                && iq.getChildElement() != null
+                && "http://jabber.org/protocol/disco#info".equals(iq.getChildElement().getNamespaceURI());
+        }
+        String room = to.toBareJID();
+        return manager.roomSharedWith(room, senderDomain) || manager.roomSharedWith(room, edge);
     }
 
     // ── 1:1 private-message relay ──────────────────────────────────────────────

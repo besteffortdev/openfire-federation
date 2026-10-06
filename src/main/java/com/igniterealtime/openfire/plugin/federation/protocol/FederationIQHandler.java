@@ -102,12 +102,27 @@ public class FederationIQHandler extends IQHandler {
             return IQ.createResultIQ(packet);
         }
 
-        String fromDomain = packet.getFrom().getDomain();
         Element fed = packet.getChildElement();
         if (fed == null) return error(packet, "Missing federation element");
 
         Element child = (Element) fed.elements().stream().findFirst().orElse(null);
         if (child == null) return error(packet, "Empty federation element");
+
+        // Sender identity: federation traffic is server-to-server, and every peer's plugin sends it
+        // from its bare domain JID. Openfire dispatches an IQ to this handler on its `to` and namespace
+        // alone, whoever sent it — so without this check any USER on an allowlisted server (or a local
+        // client) could address us directly and be treated as that server's federation plugin, with
+        // all of the peer's rights. Our own domain is refused too: no peer legitimately is us.
+        JID sender = packet.getFrom();
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (sender == null || sender.getNode() != null || sender.getResource() != null
+                || sender.getDomain() == null || sender.getDomain().equals(localDomain)) {
+            Log.warn("SECURITY: dropping federation '{}' from {} — federation traffic must come from a "
+                   + "peer server's bare domain, not a user, resource, or this server",
+                     child.getName(), sender);
+            return IQ.createResultIQ(packet);
+        }
+        String fromDomain = sender.getDomain();
 
         // Opt-in peer allowlist: when enabled, drop every federation action from a peer the
         // admin hasn't approved (default mode is open — any peer accepted). This is the trust
@@ -177,8 +192,14 @@ public class FederationIQHandler extends IQHandler {
         boolean isNew = !manager.getPeerRegistry().contains(fromDomain);
 
         if (isNew) {
+            // Only reachable with the allowlist off (open federation). A server nobody added is a
+            // stranger: register it UNTRUSTED with nothing exposed, so it sees nothing until an admin
+            // decides what it may see — or promotes it. It used to be registered trusted, which made
+            // open federation mean "every server that connects gets full trusted-peer rights".
             manager.getPeerRegistry().addPeer(fromDomain);
-            Log.info("Auto-registered federation peer via incoming connection: {}", fromDomain);
+            manager.getPeerRegistry().setUntrusted(fromDomain, true);
+            Log.info("Auto-registered federation peer via incoming connection: {} (untrusted, nothing "
+                   + "exposed — review it on the Peer Servers tab)", fromDomain);
         }
 
         // A peer-announce is proof the remote's federation plugin has us configured as a peer
@@ -274,6 +295,7 @@ public class FederationIQHandler extends IQHandler {
         // Record the block even if the peer wasn't known yet, so a re-add stays disabled.
         if (!manager.getPeerRegistry().contains(fromDomain)) {
             manager.getPeerRegistry().addPeer(fromDomain);
+            manager.getPeerRegistry().setUntrusted(fromDomain, true);   // a stranger — see handlePeerAnnounce
         }
         // Tear down federation toward this domain (same as a removal).
         for (String localJid : new ArrayList<>(manager.getRoomManager().getLocalMappings().keySet())) {
@@ -292,6 +314,7 @@ public class FederationIQHandler extends IQHandler {
     // ── routing-update ─────────────────────────────────────────────────────────
 
     private void handleRoutingUpdate(String fromDomain, Element el) {
+        boolean untrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
         List<RouteEntry> received = new ArrayList<>();
         for (Element entry : el.elements("entry")) {
             String dest = entry.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
@@ -310,11 +333,22 @@ public class FederationIQHandler extends IQHandler {
                     Log.debug("routing-update from {}: destination {} is denied by admin — skipping", fromDomain, dest);
                     continue;
                 }
-                received.add(new RouteEntry(dest, via, hops));
+                // An untrusted edge advertises what lies BEHIND it, never one of our own trusted
+                // peers. (Other destinations it claims are installed as edge routes, which the routing
+                // table never lets out-bid a clean route through the trusted mesh.)
+                if (untrusted && manager.getPeerRegistry().contains(dest)
+                        && !manager.getPeerRegistry().isUntrusted(dest)) {
+                    Log.warn("SECURITY: ignoring route to {} advertised by untrusted peer {} — that is "
+                           + "one of this server's trusted peers", dest, fromDomain);
+                    continue;
+                }
+                boolean edge = "true".equals(entry.attributeValue(FederationStanzaFactory.ATTR_EDGE));
+                received.add(new RouteEntry(dest, via, hops, edge));
             }
         }
 
-        Set<String> changed = manager.getRoutingTable().updateFromPeer(fromDomain, received);
+        Set<String> changed = manager.getRoutingTable().updateFromPeer(fromDomain, received,
+                manager.getPeerRegistry()::isUntrusted);
         Log.debug("routing-update from {} — {} entries, {} changed", fromDomain, received.size(), changed.size());
 
         if (!changed.isEmpty()) {
@@ -361,6 +395,10 @@ public class FederationIQHandler extends IQHandler {
         }
 
         String sourceDomain = (origin != null) ? origin : fromDomain;
+        // An untrusted peer may only advertise rooms for itself or servers behind it. Otherwise it
+        // could replace — or, with an empty list, wipe — any server's room list here, and we would
+        // relay that across the mesh.
+        if (!claimedOriginOk(fromDomain, sourceDomain, "room-advertisement")) return;
 
         // Ignore advertisements about our own rooms bouncing back from peers.
         if (localDomain.equals(sourceDomain)) {
@@ -418,6 +456,7 @@ public class FederationIQHandler extends IQHandler {
         String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (!claimedOriginOk(fromDomain, originOf(el, fromDomain), "room-mapping")) return;
 
         // Relay if we are not the final destination (multi-hop topology).
         if (destination != null && !localDomain.equals(destination)) {
@@ -475,6 +514,11 @@ public class FederationIQHandler extends IQHandler {
                            + "this server ({}) is not exposed to it", fromDomain, theirRemote, localDomain);
                     continue;
                 }
+                // A request never overwrites an ESTABLISHED mapping. It used to replace whatever was
+                // there with a fresh token-less PENDING_IN record, which both cut the live mapping and
+                // emptied its token — after which tokenOk() accepted ANY disable/unmap for it.
+                RoomMapping existing = manager.getRoomManager().getMappingForLocal(theirRemote, actualOrigin);
+                if (existing != null && !handleRepeatRequest(existing, theirLocal, localDomain)) continue;
                 // Consent: store the request PENDING_IN — it does not forward until we accept.
                 manager.getRoomManager().addMapping(theirRemote, theirLocal, actualOrigin,
                                                     RoomMapping.State.PENDING_IN, "");
@@ -488,10 +532,66 @@ public class FederationIQHandler extends IQHandler {
         }
     }
 
+    /**
+     * Decides what an incoming request does to a mapping we already hold for the same local room and
+     * origin. Returns true when the request should be stored as a fresh PENDING_IN (replacing a record
+     * that holds no consent yet), false when it has been fully handled here.
+     *
+     * <ul>
+     *   <li><b>ACTIVE</b> — never demoted. If the request names the same remote room, the remote has
+     *       probably lost its state and is waiting in PENDING_OUT: re-send our acceptance with the
+     *       existing token so both ends converge.</li>
+     *   <li><b>DISABLED_LOCAL / DISABLED_REMOTE</b> — an explicit decision by one admin; a request does
+     *       not undo it. Recovering takes an enable, or a remove and re-add.</li>
+     *   <li><b>PENDING_OUT, same remote room</b> — both admins asked for this exact pairing, which is
+     *       consent from both sides. The lexicographically lower domain accepts (the same tie-break
+     *       {@code resendPendingRequests} uses); the higher one re-sends its own request so the lower
+     *       one sees it even if the first was lost, then waits for the accept.</li>
+     *   <li>Otherwise (PENDING_IN, REJECTED, or PENDING_OUT for a different room) — no consent is held,
+     *       so the new request replaces it.</li>
+     * </ul>
+     */
+    private boolean handleRepeatRequest(RoomMapping existing, String theirLocal, String localDomain) {
+        String origin = existing.remoteDomain();
+        boolean sameRoom = theirLocal.equalsIgnoreCase(existing.remoteRoomJid());
+        switch (existing.state()) {
+            case ACTIVE -> {
+                if (sameRoom) {
+                    manager.resendAccept(existing);
+                } else {
+                    Log.warn("SECURITY: ignoring room-mapping from {} onto {} — an ACTIVE mapping to {} "
+                           + "exists and a request cannot replace it", origin, existing.localRoomJid(),
+                             existing.remoteRoomJid());
+                }
+                return false;
+            }
+            case DISABLED_LOCAL, DISABLED_REMOTE -> {
+                Log.warn("SECURITY: ignoring room-mapping from {} onto {} — the mapping is {} and a "
+                       + "request cannot re-open it", origin, existing.localRoomJid(), existing.state());
+                return false;
+            }
+            case PENDING_OUT -> {
+                if (!sameRoom) return true;
+                if (localDomain.compareTo(origin) < 0) {
+                    manager.getRoomManager().setMappingState(existing.localRoomJid(), origin,
+                                                             RoomMapping.State.PENDING_IN, "");
+                    manager.acceptMapping(existing.localRoomJid(), origin);
+                } else {
+                    manager.resendMappingRequest(existing);
+                }
+                Log.info("Mutual mapping request {} ↔ {} ({})", existing.localRoomJid(),
+                         existing.remoteRoomJid(), origin);
+                return false;
+            }
+            default -> { return true; }
+        }
+    }
+
     // ── room-mapping lifecycle (accept / reject / disable / enable) ─────────────
 
     private void handleMappingAccept(String fromDomain, Element el) {
-        if (relayMappingControl("room-mapping-accept", el)) return;
+        if (!claimedOriginOk(fromDomain, originOf(el, fromDomain), "room-mapping-accept")) return;
+        if (relayMappingControl("room-mapping-accept", fromDomain, el)) return;
         String actualOrigin = originOf(el, fromDomain);
         String token = el.attributeValue("token", "");
         for (Element map : el.elements("map")) {
@@ -502,7 +602,8 @@ public class FederationIQHandler extends IQHandler {
     }
 
     private void handleMappingReject(String fromDomain, Element el) {
-        if (relayMappingControl("room-mapping-reject", el)) return;
+        if (!claimedOriginOk(fromDomain, originOf(el, fromDomain), "room-mapping-reject")) return;
+        if (relayMappingControl("room-mapping-reject", fromDomain, el)) return;
         String actualOrigin = originOf(el, fromDomain);
         for (Element map : el.elements("map")) {
             String ourLocal = map.attributeValue(FederationStanzaFactory.ATTR_REMOTE);
@@ -511,7 +612,8 @@ public class FederationIQHandler extends IQHandler {
     }
 
     private void handleMappingDisable(String fromDomain, Element el) {
-        if (relayMappingControl("room-mapping-disable", el)) return;
+        if (!claimedOriginOk(fromDomain, originOf(el, fromDomain), "room-mapping-disable")) return;
+        if (relayMappingControl("room-mapping-disable", fromDomain, el)) return;
         String actualOrigin = originOf(el, fromDomain);
         String token = el.attributeValue("token", "");
         for (Element map : el.elements("map")) {
@@ -523,7 +625,8 @@ public class FederationIQHandler extends IQHandler {
     }
 
     private void handleMappingEnable(String fromDomain, Element el) {
-        if (relayMappingControl("room-mapping-enable", el)) return;
+        if (!claimedOriginOk(fromDomain, originOf(el, fromDomain), "room-mapping-enable")) return;
+        if (relayMappingControl("room-mapping-enable", fromDomain, el)) return;
         String actualOrigin = originOf(el, fromDomain);
         String token = el.attributeValue("token", "");
         for (Element map : el.elements("map")) {
@@ -544,10 +647,17 @@ public class FederationIQHandler extends IQHandler {
      * Relays a mapping-lifecycle IQ toward its final destination if we are not it. Returns true when
      * relayed (the caller must stop), false when we are the destination and should apply it locally.
      */
-    private boolean relayMappingControl(String element, Element el) {
+    private boolean relayMappingControl(String element, String fromDomain, Element el) {
         String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         if (destination == null || localDomain.equals(destination)) return false;
+        // Same exposure rule as the room-mapping relay: an untrusted peer may only steer mapping
+        // control toward servers it was exposed to.
+        if (!untrustedAllowsServer(fromDomain, destination)) {
+            Log.warn("SECURITY: dropping {} from untrusted peer {} toward non-exposed server {}",
+                     element, fromDomain, destination);
+            return true;
+        }
         String origin = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String token  = el.attributeValue("token");
         String reason = el.attributeValue("reason");
@@ -578,9 +688,10 @@ public class FederationIQHandler extends IQHandler {
      * the probe cannot be used to sweep for arbitrary reachable domains.
      */
     private void handleMappingPing(String fromDomain, Element el) {
-        if (relayMappingProbe("mapping-ping", fromDomain, el)) return;
         String origin = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         if (origin == null || origin.isEmpty()) return;
+        if (!claimedOriginOk(fromDomain, origin, "mapping-ping")) return;
+        if (relayMappingProbe("mapping-ping", fromDomain, el)) return;
         if (!manager.getRoomManager().hasMappingWith(origin)) {
             Log.debug("mapping-ping from {} — no active mapping with it, not answering", origin);
             return;
@@ -603,9 +714,12 @@ public class FederationIQHandler extends IQHandler {
 
     /** A pong for one of our probes arrived — the round trip to that mapped domain works. */
     private void handleMappingPong(String fromDomain, Element el) {
-        if (relayMappingProbe("mapping-pong", fromDomain, el)) return;
         String origin = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
-        if (origin != null && !origin.isEmpty()) manager.onMappingPong(origin, el.attributeValue(FederationStanzaFactory.ATTR_TS));
+        if (origin == null || origin.isEmpty()) return;
+        // A forged pong would mask a genuinely broken mapping path from the probe meant to catch it.
+        if (!claimedOriginOk(fromDomain, origin, "mapping-pong")) return;
+        if (relayMappingProbe("mapping-pong", fromDomain, el)) return;
+        manager.onMappingPong(origin, el.attributeValue(FederationStanzaFactory.ATTR_TS));
     }
 
     /**
@@ -663,9 +777,15 @@ public class FederationIQHandler extends IQHandler {
         String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        if (!claimedOriginOk(fromDomain, originOf(el, fromDomain), "room-unmap")) return;
 
         // Relay if we are not the final destination (multi-hop topology).
         if (destination != null && !localDomain.equals(destination)) {
+            if (!untrustedAllowsServer(fromDomain, destination)) {
+                Log.warn("SECURITY: dropping room-unmap from untrusted peer {} toward non-exposed server {}",
+                         fromDomain, destination);
+                return;
+            }
             // Carry the consent token across the relay — without it the final destination's
             // tokenOk() check fails (non-empty stored vs empty relayed) and it drops the unmap,
             // leaving hub-relayed cross-spoke occupants behind as ghosts.
@@ -742,6 +862,11 @@ public class FederationIQHandler extends IQHandler {
         // recognize hub fan-out, where the payload origin legitimately arrives off its own route.
         if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "muc-forward", false,
                              el.attributeValue("src"))) return;
+        // The entry-server claim is checked here, ahead of BOTH branches: on the relay branch the next
+        // hop receives this from us, a trusted neighbour, and would take an untrusted peer's src on
+        // trust — naming another server's mapping is exactly how a room it has no mapping on would
+        // otherwise be reached.
+        if (!claimedOriginOk(fromDomain, src, "muc-forward")) return;
 
         // Untrusted-peer exposure gate: an untrusted peer may only move traffic toward a server
         // it has been exposed to, whether we inject the room here or relay it onward. The target
@@ -780,6 +905,12 @@ public class FederationIQHandler extends IQHandler {
                        payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
                 return;
             }
+            // ...and the mapping must be with the server this traffic enters through. "Some active
+            // mapping exists" let any peer write into a room that was mapped only to somebody else,
+            // and never shared with it. Every legitimate sender stamps src with its own domain and
+            // sends only along its own ACTIVE mappings (the hub stamps itself on fan-out), so src
+            // names the far end of exactly one of our mappings for this room.
+            if (!mappedToEntry(targetRoom, src, fromDomain, payloadEl)) return;
             injectLocally(payloadEl, via, targetRoom, fromDomain, src);
             // Hub behavior: fan out to all other mapped spokes.
             fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via);
@@ -795,7 +926,12 @@ public class FederationIQHandler extends IQHandler {
                 // Only an ACTIVE mapping consents to traffic. getMappingForRemote returns a mapping in
                 // ANY state, so without the isActive() check a disabled/pending/rejected mapping would
                 // still admit injected packets into the local room.
+                // The mapping must point at the room's actual home (finalDest), and an untrusted
+                // sender must have been exposed to THIS server too — the gate above only checked the
+                // destination, while this injects into one of our own rooms.
                 if (ownMapping != null && ownMapping.isActive()
+                        && ownMapping.remoteDomain().equals(finalDest)
+                        && untrustedAllowsServer(fromDomain, localDomain)
                         && isFederatedLocalRoom(ownMapping.localRoomJid())) {
                     injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain, src);
                 }
@@ -819,6 +955,22 @@ public class FederationIQHandler extends IQHandler {
         }
     }
 
+    /**
+     * Whether {@code targetRoom} has an ACTIVE mapping whose far end is {@code src}, the mapped server
+     * this muc-forward claims to enter through ({@code src} was already checked against the sending
+     * link by the caller, for untrusted peers).
+     */
+    private boolean mappedToEntry(String targetRoom, String src, String fromDomain, Element payloadEl) {
+        boolean mapped = manager.getRoomManager().getMappingsForLocal(targetRoom).stream()
+                                .anyMatch(m -> m.remoteDomain().equals(src));
+        if (!mapped) {
+            Log.warn("SECURITY: dropping muc-forward from {} into local room {} — it enters through {}, "
+                   + "which has no active mapping on that room (type={}, from={})", fromDomain, targetRoom,
+                     src, payloadEl.attributeValue("type"), payloadEl.attributeValue("from"));
+        }
+        return mapped;
+    }
+
     // ── direct-forward (1:1 private messaging) ─────────────────────────────────
 
     /**
@@ -827,9 +979,9 @@ public class FederationIQHandler extends IQHandler {
      * message is delivered straight to the recipient (online session or offline storage) via
      * {@code directDeliver}; an intermediate hop forwards it on toward the destination.
      *
-     * <p>No untrusted-peer gate here on purpose: 1:1 messaging must be able to cross an untrusted
-     * edge (that is the whole point of the overlay), and reachability is already constrained by the
-     * routing table.  The embedded {@code from} is trusted to the same degree as any S2S sender.
+     * <p>1:1 messaging must be able to cross an untrusted edge — that is the point of the overlay —
+     * but only toward servers that edge was exposed to. See {@link #oneToOneExposureOk}: the routing
+     * view we send an untrusted peer bounds what it is TOLD, not what it may name as a destination.
      */
     private void handleDirectForward(String fromDomain, Element el) {
         String finalDest   = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
@@ -849,6 +1001,7 @@ public class FederationIQHandler extends IQHandler {
 
         // Origin (from-spoofing) gate — see payloadOriginOk. Applied per hop (relay AND deliver).
         if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "direct-forward", true, null)) return;
+        if (!oneToOneExposureOk(fromDomain, finalDest, localDomain, "direct-forward")) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             // We are the destination — deliver to the local recipient (bypasses interceptors, so the
@@ -948,6 +1101,7 @@ public class FederationIQHandler extends IQHandler {
         // Origin (from-spoofing) gate — the critical one: a forged `subscribed`/presence here
         // would flow straight into Openfire's roster engine at the destination.
         if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "presence-forward", true, null)) return;
+        if (!oneToOneExposureOk(fromDomain, finalDest, localDomain, "presence-forward")) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             Presence pres = new Presence(payloadEl.createCopy());
@@ -1032,6 +1186,7 @@ public class FederationIQHandler extends IQHandler {
         // Origin (from-spoofing) gate — a forged `set` IQ delivered to the router could mutate
         // server-side state (roster, vCard) as the claimed user.
         if (!payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "iq-forward", true, null)) return;
+        if (!oneToOneExposureOk(fromDomain, finalDest, localDomain, "iq-forward")) return;
 
         if (finalDest == null || localDomain.equals(finalDest)) {
             IQ iq = new IQ(payloadEl.createCopy());
@@ -1071,6 +1226,27 @@ public class FederationIQHandler extends IQHandler {
                 () -> Log.warn("iq-forward: no route to {}, dropping", finalDest)
             );
         }
+    }
+
+    /**
+     * Untrusted-peer exposure gate for the three 1:1 forwards ({@code direct-forward},
+     * {@code presence-forward}, {@code iq-forward}), applied on BOTH branches: the server the
+     * envelope is headed for — {@code finalDest} when we relay, this server when we deliver — must be
+     * one the peer was exposed to.
+     *
+     * <p>These forwards were once left ungated on the reasoning that the filtered routing view an
+     * untrusted peer receives already bounds where it can reach. It does not: that view bounds what the
+     * peer is told, while the envelope's {@code destination} is the peer's own choice. Ungated, an edge
+     * could name any server we route to; the next hop would see the stanza arrive from US, a trusted
+     * neighbour, and skip its own untrusted checks — reaching users, presence and PEP data on servers
+     * that were never exposed to it.
+     */
+    private boolean oneToOneExposureOk(String fromDomain, String finalDest, String localDomain, String what) {
+        String target = (finalDest == null || localDomain.equals(finalDest)) ? localDomain : finalDest;
+        if (untrustedAllowsServer(fromDomain, target)) return true;
+        Log.warn("SECURITY: dropping {} from untrusted peer {} toward non-exposed server {}",
+                 what, fromDomain, target);
+        return false;
     }
 
     /** True if {@code domain} is one of this server's local MUC service domains. */
@@ -1169,7 +1345,7 @@ public class FederationIQHandler extends IQHandler {
      * presence-hash avatars onto PEP), but the same reply-loss bug applies to every PEP node a client
      * might publish (e.g. OMEMO device-lists/bundles, XEP-0384), and PEP is a personal-*eventing*
      * protocol — a node's contents are, by design, what its owner published for interested parties to
-     * read. No per-node access-model check is performed, same trust tier as the vCard fetch above.
+     * read — subject to the node's access model, checked in {@link #pepAccessAllowed}.
      *
      * The three XEP-0060 outcomes are kept distinct, because a client reads them differently:
      * {@code item-not-found} for a node the contact never created, an empty {@code <items/>} for a
@@ -1213,6 +1389,16 @@ public class FederationIQHandler extends IQHandler {
                     PacketError.Type.cancel), contact, node, fromDomain);
         }
 
+        // Honour the node's access model, exactly as Openfire's own PubSubEngine does for a local fetch.
+        // Without it this path served every node — presence-only ones to strangers, and whitelist
+        // (private) nodes such as XEP-0402 bookmarks, which can hold room passwords — to any requester.
+        if (!pepAccessAllowed(pepNode, contact, request.getFrom())) {
+            Log.info("SECURITY: refusing PEP node '{}' of {} to {} — not allowed by its access model ({})",
+                     node, contact, request.getFrom(), pepNode.getAccessModel().getName());
+            return relayPepReply(pepError(request, PacketError.Condition.forbidden,
+                    PacketError.Type.auth), contact, node, fromDomain);
+        }
+
         IQ result = IQ.createResultIQ(request);
         Element resultItems = result.setChildElement("pubsub", "http://jabber.org/protocol/pubsub")
                                      .addElement("items");
@@ -1236,6 +1422,27 @@ public class FederationIQHandler extends IQHandler {
                     PacketError.Type.wait), contact, node, fromDomain);
         }
         return relayPepReply(result, contact, node, fromDomain);
+    }
+
+    /**
+     * Whether {@code requester} may read items of {@code pepNode}, owned by local user {@code owner}.
+     * Delegates to the node's own {@link org.jivesoftware.openfire.pubsub.models.AccessModel} with the
+     * same arguments {@code PubSubEngine} passes for a local items request (requester bare JID, then
+     * full JID). For a {@code presence} node we additionally accept a subscriber this plugin tracked
+     * from a relayed {@code subscribed} — the same set the push path uses — because the roster row of a
+     * multi-hop contact is the part of Openfire's state federation has historically had to reconcile.
+     */
+    private boolean pepAccessAllowed(Node pepNode, JID owner, JID requester) {
+        if (requester == null) return false;
+        try {
+            var model = pepNode.getAccessModel();
+            if (model.canAccessItems(pepNode, requester.asBareJID(), requester)) return true;
+            return "presence".equals(model.getName()) && manager.isPresenceSubscriber(owner, requester);
+        } catch (Exception e) {
+            Log.warn("iq-forward: access check on PEP node '{}' of {} failed: {}",
+                     pepNode.getUniqueIdentifier().getNodeId(), owner, e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -1985,6 +2192,32 @@ public class FederationIQHandler extends IQHandler {
     private boolean untrustedAllowsServer(String fromDomain, String serverDomain) {
         if (!manager.getPeerRegistry().isUntrusted(fromDomain)) return true;
         return serverDomain != null && manager.getPeerRegistry().getExposedServers(fromDomain).contains(serverDomain);
+    }
+
+    /**
+     * Control-plane counterpart of {@link #payloadOriginOk}: whether an untrusted peer may make a claim
+     * on behalf of {@code origin} — the {@code origin} attribute of a room advertisement, a mapping
+     * request or lifecycle message, an unmap, or a probe. Allowed when the origin is the peer itself, or
+     * a server we route THROUGH that peer. Anything else is the peer speaking for a server on another
+     * side of the mesh, which is how a forged reject, accept or unmap used to reach mappings it had no
+     * part in.
+     *
+     * <p>Stricter than {@code payloadOriginOk} in one respect: an origin we cannot route to at all is
+     * refused rather than allowed. A control-plane action for a server we cannot reach is not one we
+     * could carry out anyway, and there is no need to give the benefit of the doubt. Trusted peers are
+     * not checked, matching the documented asymmetry: diamonds and hub fan-out make legitimate trusted
+     * traffic arrive from the "wrong" direction.
+     */
+    private boolean claimedOriginOk(String fromDomain, String origin, String what) {
+        if (!manager.getPeerRegistry().isUntrusted(fromDomain)) return true;
+        if (origin != null && origin.equals(fromDomain)) return true;
+        if (origin != null && manager.getRoutingTable().findNextHop(origin)
+                                     .map(fromDomain::equals).orElse(false)) {
+            return true;
+        }
+        Log.warn("SECURITY: dropping {} from untrusted peer {} — it claims origin {}, which is not that "
+               + "peer or a server reached through it", what, fromDomain, origin);
+        return false;
     }
 
     /** Peer allowlist toggle (default true = only admin-approved peers may federate). */

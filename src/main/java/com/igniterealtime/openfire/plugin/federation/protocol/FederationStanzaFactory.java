@@ -57,6 +57,8 @@ public final class FederationStanzaFactory {
      * readings — which one applies is decided by the element it sits on.
      */
     public static final String ATTR_VIA = "via";
+    /** routing-update entry flag: the route crosses an untrusted edge (see RouteEntry#edge). */
+    public static final String ATTR_EDGE = "edge";
 
     /** Room mapping: the peer's side of the pairing. */
     public static final String ATTR_REMOTE = "remote";
@@ -158,6 +160,7 @@ public final class FederationStanzaFactory {
             e.addAttribute(ATTR_DESTINATION, entry.destination());
             e.addAttribute("hops", String.valueOf(entry.hops()));
             e.addAttribute(ATTR_VIA, entry.nextHop());
+            if (entry.edge()) e.addAttribute(ATTR_EDGE, "true");
         }
         return iq;
     }

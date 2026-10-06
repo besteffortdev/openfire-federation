@@ -49,8 +49,10 @@ In order:
    peer that removes and re-creates its side still gets re-blocked.
 2. **If we had it marked REMOTE_DISABLED**, clear that. A peer only announces after re-enabling, so
    the announce itself is the signal that the remote lifted its block.
-3. **Auto-register** if unknown. (In allowlist mode — the default — an unknown peer never reaches this
-   point; see [09-validation.md](09-validation.md#the-peer-allowlist).)
+3. **Auto-register** if unknown, as **untrusted with nothing exposed** — a server nobody added is a
+   stranger. (In allowlist mode — the default — an unknown peer never reaches this point; see
+   [09-validation.md](09-validation.md#the-peer-allowlist).) Before 1.10.8 it was registered trusted,
+   so open federation meant every server that connected got full trusted-peer rights.
 4. **Record "remote confirmed"** — proof the other side has us configured. This is what moves a link
    from *pending* to *reachable*.
 5. **Compare trust stances.** If ours and theirs disagree, block the link and stop.
@@ -160,7 +162,9 @@ sit at PENDING, quietly re-announcing at every keepalive, and you will conclude 
 work. Send the announce.
 
 (In open-federation mode — `plugin.federation.peerAllowlist=false` — an inbound announce from an
-unknown server auto-registers it, so confirmation is instant. The default is the allowlist.)
+unknown server auto-registers it — untrusted, so the link comes up only if the stranger also declares
+`untrusted='true'`, and then sees nothing until an admin exposes servers to it. The default is the
+allowlist.)
 
 ## `peer-withdraw`
 

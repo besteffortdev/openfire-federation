@@ -52,15 +52,38 @@ public class FederationRoutingTable {
     /**
      * Merges a routing table received from a peer via gossip.
      * Returns the set of destinations that are new or improved (for further propagation).
+     *
+     * <p>Routes carry a trust class as well as a metric. A route is an EDGE route when it crosses an
+     * untrusted peer anywhere on its path: learned from an untrusted neighbour, or flagged
+     * {@code edge} by the trusted neighbour that advertised it (every hop re-advertises the flag, see
+     * {@link #isEdge}). Hop counts are the advertiser's own word, so they are only compared within a
+     * class:
+     * <ul>
+     *   <li>an edge route never displaces a clean one, however short it claims to be — otherwise an
+     *       untrusted edge could pull traffic for our side of the mesh just by advertising a small
+     *       number;</li>
+     *   <li>a clean route always displaces an edge one — so a claim an edge slipped in while the clean
+     *       route was briefly down is undone as soon as the clean route returns.</li>
+     * </ul>
+     * The flag is what keeps the second rule loop-free. A route through US toward something behind the
+     * edge is derived from our own advertisement, which carries the flag, so it can never come back
+     * to us as a clean route and win over the edge route it was derived from.
+     *
+     * @param untrusted whether a given neighbour is an untrusted peer
      */
-    public Set<String> updateFromPeer(String fromPeer, List<RouteEntry> peerTable) {
+    public Set<String> updateFromPeer(String fromPeer, List<RouteEntry> peerTable,
+                                      java.util.function.Predicate<String> untrusted) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         Set<String> changed = new HashSet<>();
         Set<String> learnedSet = routesLearnedFrom.computeIfAbsent(fromPeer, k -> ConcurrentHashMap.newKeySet());
         Set<String> inUpdate = new HashSet<>();
+        boolean fromUntrusted = untrusted.test(fromPeer);
 
         for (RouteEntry remote : peerTable) {
-            if (remote.hops() >= INFINITY) continue;
+            // The advertised metric is the peer's claim, so bound it before using it: a negative
+            // value (or one that overflows on +1) would otherwise beat every route we have,
+            // including direct links, and pull traffic for the whole mesh toward the advertiser.
+            if (remote.hops() < 0 || remote.hops() >= INFINITY) continue;
 
             int candidate = remote.hops() + 1;
             if (candidate >= INFINITY) continue;
@@ -72,25 +95,33 @@ public class FederationRoutingTable {
             // is owned by addDirectPeer/removePeer.
             if (dest.equals(fromPeer)) continue;
             inUpdate.add(dest);
+            boolean candidateEdge = fromUntrusted || remote.edge();
             RouteEntry current = table.get(dest);
+            RouteEntry offered = new RouteEntry(dest, fromPeer, candidate, candidateEdge);
 
-            if (current == null || candidate < current.hops()) {
-                table.put(dest, new RouteEntry(dest, fromPeer, candidate));
-                everRoutable.add(dest);
-                learnedSet.add(dest);
-                changed.add(dest);
-                Log.debug("Routing: {} via {} in {} hop(s)", dest, fromPeer, candidate);
+            if (current == null) {
+                install(offered, learnedSet, changed);
+            } else if (current.nextHop().equals(dest)) {
+                // A direct link is owned by addDirectPeer/removePeer; gossip never displaces it.
+                continue;
             } else if (current.nextHop().equals(fromPeer)) {
-                // The route's CURRENT next hop is authoritative for its own metric: accept even a
-                // WORSE hop count (the path behind it lengthened). Without this the table keeps the
-                // stale better metric forever, so a genuinely shorter alternate via another peer can
-                // never win the `candidate < current.hops()` comparison. An unchanged metric still
-                // rewrites the entry so updatedAt stays fresh, but is not gossiped as a change.
-                table.put(dest, new RouteEntry(dest, fromPeer, candidate));
+                // The route's CURRENT next hop is authoritative for its own metric and class: accept
+                // even a WORSE hop count (the path behind it lengthened). Without this the table keeps
+                // the stale better metric forever, so a genuinely shorter alternate via another peer
+                // can never win. An unchanged route still rewrites the entry so updatedAt stays fresh,
+                // but is not gossiped as a change.
+                table.put(dest, offered);
                 learnedSet.add(dest);
-                if (candidate != current.hops()) {
+                if (candidate != current.hops() || candidateEdge != current.edge()) {
                     changed.add(dest);
-                    Log.debug("Routing: {} via {} metric {} → {} hop(s)", dest, fromPeer, current.hops(), candidate);
+                    Log.debug("Routing: {} via {} metric {} → {} hop(s){}", dest, fromPeer, current.hops(),
+                              candidate, candidateEdge ? " [edge]" : "");
+                }
+            } else {
+                boolean currentEdge = isEdge(current, untrusted);
+                if (candidateEdge && !currentEdge) continue;   // never out-bid the clean mesh
+                if ((!candidateEdge && currentEdge) || candidate < current.hops()) {
+                    install(offered, learnedSet, changed);
                 }
             }
         }
@@ -172,6 +203,24 @@ public class FederationRoutingTable {
      */
     public boolean wasEverRoutable(String destination) {
         return everRoutable.contains(destination);
+    }
+
+    /**
+     * Whether {@code entry} crosses an untrusted edge: flagged so when learned, or its next hop is an
+     * untrusted peer (which also covers a direct link to an untrusted peer). This is the value we
+     * advertise onward, so every downstream hop knows the path is not clean.
+     */
+    public static boolean isEdge(RouteEntry entry, java.util.function.Predicate<String> untrusted) {
+        return entry.edge() || untrusted.test(entry.nextHop());
+    }
+
+    private void install(RouteEntry route, Set<String> learnedSet, Set<String> changed) {
+        table.put(route.destination(), route);
+        everRoutable.add(route.destination());
+        learnedSet.add(route.destination());
+        changed.add(route.destination());
+        Log.debug("Routing: {} via {} in {} hop(s){}", route.destination(), route.nextHop(), route.hops(),
+                  route.edge() ? " [edge]" : "");
     }
 
     /** Snapshot of the full table for UI display. */

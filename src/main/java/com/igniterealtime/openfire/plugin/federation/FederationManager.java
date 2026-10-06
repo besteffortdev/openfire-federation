@@ -240,8 +240,26 @@ public class FederationManager {
         forwardDirectPresence(directedPresence(localUser, target, cur));
     }
 
-    /** Answer a relayed presence probe for a local user by sending that user's presence to the prober. */
-    public void answerPresenceProbe(JID prober, JID localUser) { pushUserPresenceTo(prober, localUser); }
+    /**
+     * Answers a relayed presence probe for a local user by sending that user's presence to the prober —
+     * but only if the prober is subscribed to it (RFC 6121 §4.3.2: a server answers a probe only for an
+     * entity with a FROM/BOTH subscription; anyone else gets nothing). Without the check, any peer could
+     * read any user's availability and status text across the overlay just by asking.
+     */
+    public void answerPresenceProbe(JID prober, JID localUser) {
+        if (prober == null || localUser == null || !isPresenceSubscriber(localUser, prober)) {
+            Log.info("SECURITY: not answering presence probe from {} for {} — not a presence subscriber",
+                     prober, localUser);
+            return;
+        }
+        pushUserPresenceTo(prober, localUser);
+    }
+
+    /** True when {@code contact}'s bare JID is one of {@code localUser}'s presence subscribers. */
+    public boolean isPresenceSubscriber(JID localUser, JID contact) {
+        if (contact == null || contact.getNode() == null) return false;
+        return remoteSubscriberTargets(localUser).contains(contact.toBareJID());
+    }
 
     /**
      * PEP nodes whose last-published item we proactively push to a newly-approved remote subscriber
@@ -806,6 +824,26 @@ public class FederationManager {
         Log.info("Accepted mapping {} ({})", localJid, remoteDomain);
     }
 
+    /**
+     * Re-sends our acceptance of an already-ACTIVE mapping, carrying its EXISTING token. Used when the
+     * remote asks again for a mapping we already hold as active — typically because it lost its own
+     * state (reinstall, re-add) and is now waiting in PENDING_OUT. Re-accepting with the stored token
+     * converges both ends without demoting our mapping, and is a no-op on a remote that is already
+     * active (it only honours an accept while PENDING_OUT).
+     */
+    public void resendAccept(RoomMapping m) {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
+        route(FederationStanzaFactory.roomMappingAccept(nextHop, m.remoteDomain(), localDomain,
+                m.localRoomJid(), m.remoteRoomJid(), m.token()), m.remoteDomain());
+        Log.info("Re-sent acceptance of active mapping {} ({})", m.localRoomJid(), m.remoteDomain());
+    }
+
+    /** Re-sends our own pending request for {@code m} (see the mutual-request rule in the IQ handler). */
+    public void resendMappingRequest(RoomMapping m) {
+        sendMappingRequest(m.localRoomJid(), m.remoteRoomJid(), m.remoteDomain());
+    }
+
     /** Rejects an incoming mapping request: tells the requester and drops our pending record. */
     public void rejectMapping(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
@@ -846,37 +884,68 @@ public class FederationManager {
     }
 
     // ── Inbound lifecycle transitions (called from FederationIQHandler) ──────────
+    //
+    // Each inbound transition is legal from exactly one state. They used to apply to a mapping in ANY
+    // state, which made the consent model bypassable: a peer could file a request (stored PENDING_IN)
+    // and then accept or enable it itself, or re-activate a mapping our admin had disabled. A message
+    // arriving in the wrong state is dropped and logged.
 
-    /** Requester side: the remote accepted our request → go ACTIVE, store the token, push our roster. */
+    /** True when {@code m} exists and is in {@code expected}; otherwise logs why the transition is refused. */
+    private boolean inState(RoomMapping m, RoomMapping.State expected, String op,
+                            String localJid, String remoteDomain) {
+        if (m != null && m.state() == expected) return true;
+        Log.warn("SECURITY: ignoring room-mapping-{} for {} from {} — mapping is {}, not {}",
+                 op, localJid, remoteDomain, m == null ? "absent" : m.state(), expected);
+        return false;
+    }
+
+    /**
+     * Requester side: the remote accepted our request → go ACTIVE, store the token, push our roster.
+     * Only a mapping WE requested (PENDING_OUT) can be accepted by the remote, and only for the room we
+     * asked for.
+     */
     public void onMappingAccepted(String localJid, String remoteDomain, String remoteJid, String token) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        if (!inState(m, RoomMapping.State.PENDING_OUT, "accept", localJid, remoteDomain)) return;
+        if (remoteJid != null && !remoteJid.equalsIgnoreCase(m.remoteRoomJid())) {
+            Log.warn("SECURITY: ignoring room-mapping-accept for {} from {} — it names room {}, but we "
+                   + "requested {}", localJid, remoteDomain, remoteJid, m.remoteRoomJid());
+            return;
+        }
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, token);
-        pushInitialSyncPresences(localJid, remoteDomain, remoteJid);
-        forwardVirtualOccupants(localJid, remoteDomain, remoteJid);
+        pushInitialSyncPresences(localJid, remoteDomain, m.remoteRoomJid());
+        forwardVirtualOccupants(localJid, remoteDomain, m.remoteRoomJid());
         Log.info("Mapping {} ({}) accepted by remote — now ACTIVE", localJid, remoteDomain);
     }
 
-    /** Requester side: the remote rejected our request. */
+    /** Requester side: the remote rejected our request. Only a pending request of ours can be rejected. */
     public void onMappingRejected(String localJid, String remoteDomain) {
+        RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
+        if (!inState(m, RoomMapping.State.PENDING_OUT, "reject", localJid, remoteDomain)) return;
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.REJECTED, "");
         Log.info("Mapping {} ({}) rejected by remote", localJid, remoteDomain);
     }
 
-    /** Peer disabled the mapping → mark DISABLED_REMOTE and evict its virtual occupants. */
+    /**
+     * Peer disabled the mapping → mark DISABLED_REMOTE and evict its virtual occupants. Only an ACTIVE
+     * mapping can be disabled by the peer: one our admin already disabled stays DISABLED_LOCAL, so the
+     * peer's later enable cannot override our own decision.
+     */
     public void onMappingDisabledByPeer(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
-        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.DISABLED_REMOTE,
-                                    m != null ? m.token() : "");
-        if (m != null) evictForInactiveMapping(localJid, remoteDomain);
+        if (!inState(m, RoomMapping.State.ACTIVE, "disable", localJid, remoteDomain)) return;
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.DISABLED_REMOTE, m.token());
+        evictForInactiveMapping(localJid, remoteDomain);
         Log.info("Mapping {} ({}) disabled by peer", localJid, remoteDomain);
     }
 
-    /** Peer re-enabled the mapping → mark ACTIVE and re-sync. */
+    /** Peer re-enabled the mapping → mark ACTIVE and re-sync. Only undoes the peer's OWN disable. */
     public void onMappingEnabledByPeer(String localJid, String remoteDomain, String remoteJid) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
-        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE,
-                                    m != null ? m.token() : "");
-        pushInitialSyncPresences(localJid, remoteDomain, remoteJid);
-        forwardVirtualOccupants(localJid, remoteDomain, remoteJid);
+        if (!inState(m, RoomMapping.State.DISABLED_REMOTE, "enable", localJid, remoteDomain)) return;
+        roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, m.token());
+        pushInitialSyncPresences(localJid, remoteDomain, m.remoteRoomJid());
+        forwardVirtualOccupants(localJid, remoteDomain, m.remoteRoomJid());
         Log.info("Mapping {} ({}) re-enabled by peer", localJid, remoteDomain);
     }
 
@@ -2486,7 +2555,13 @@ public class FederationManager {
 
     public void sendRoutingUpdate(String toDomain) {
         try {
-            Collection<RouteEntry> table = routingTable.getRoutesExcludingNextHop(toDomain);
+            // Advertise each route's trust class (see FederationRoutingTable.updateFromPeer): a path
+            // that crosses an untrusted edge is flagged, so no downstream hop can mistake it — or a
+            // route derived from it through us — for a clean route through the trusted mesh.
+            Collection<RouteEntry> table = routingTable.getRoutesExcludingNextHop(toDomain).stream()
+                    .map(e -> new RouteEntry(e.destination(), e.nextHop(), e.hops(), e.updatedAt(),
+                                             FederationRoutingTable.isEdge(e, this::isUntrusted)))
+                    .collect(Collectors.toList());
             if (isUntrusted(toDomain)) {
                 // Untrusted peer: reveal only routes to the servers the admin has exposed to it.
                 Set<String> allowed = peerRegistry.getExposedServers(toDomain);

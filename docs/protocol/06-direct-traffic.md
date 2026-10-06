@@ -44,12 +44,17 @@ Identical for all three: check `via` for your own domain, drop on loop; validate
 ([09](09-validation.md)); if you are not the destination, append yourself to `via` and re-emit toward
 the next hop; if there is no route, drop and log.
 
-### No untrusted-peer exposure gate
+### Untrusted-peer exposure gate
 
-Unlike `muc-forward` and the mapping actions, these three are **not** gated on the untrusted-peer
-exposure list. That is deliberate: 1:1 messaging crossing an untrusted edge is the entire point of
-having one, and reachability is already bounded by the routing table, which an untrusted peer only
-sees a filtered view of.
+From an untrusted link, all three are gated on the exposure list — on the relay branch against
+`destination`, and at the final hop against your own domain. 1:1 messaging crossing an untrusted edge
+is the point of having one, but only toward servers that edge was exposed to.
+
+Before 1.10.8 these three were left ungated, on the reasoning that the filtered routing view an
+untrusted peer receives already bounds where it can reach. It does not: that view bounds what the peer
+is **told**, while `destination` is the peer's own choice. Ungated, an edge could name any server you
+route to; the next hop sees the stanza arrive from **you**, a trusted neighbour, and skips its own
+untrusted checks.
 
 The `from`-spoofing checks still apply in full.
 
@@ -121,6 +126,7 @@ At the destination:
 recipient-binding check                                    → drop on failure
 
 if payload type == 'probe':
+    if the prober is not a presence subscriber (FROM/BOTH) of the target → ignore
     answer explicitly with the target user's current presence, relayed back
     over the overlay; do NOT hand the probe to the local presence engine
     → return
@@ -145,7 +151,9 @@ state.
 handed to native S2S — which for a multi-hop peer does not exist, so the answer is lost. Build the
 response yourself and send it back as a `presence-forward`. The recipient-binding check runs
 **before** this branch: answering a probe addressed to another server's user would disclose local
-presence to a peer that had no standing to ask.
+presence to a peer that had no standing to ask. And, as RFC 6121 §4.3.2 requires, a probe is
+answered only for a **subscriber**; before 1.10.8 any peer could read any user's availability and
+status text by asking.
 
 **Avatar hashes must survive.** `<x xmlns='vcard-temp:x:update'/>` is the trigger that makes a client
 fetch a contact's photo. Rebuild presence lossily and avatars silently never appear.
@@ -213,6 +221,11 @@ If your server's IQ handlers reply through a path your federation module can obs
 any of this — just route the payload and let the reply relay back like any other outbound stanza.
 
 ### PEP replies
+
+Before serving items, apply the node's **access model** exactly as a local items request would be
+checked (Openfire: `AccessModel.canAccessItems(node, requesterBare, requester)`). A refused read is
+`forbidden` (type `auth`). Without this, presence-only nodes leak to strangers and whitelist nodes —
+XEP-0223 private storage, XEP-0402 bookmarks, which can hold room passwords — to anyone. (Since 1.10.8.)
 
 Keep the three XEP-0060 outcomes distinct; clients read them differently.
 

@@ -44,6 +44,7 @@ but the *knowledge*, re-originated by each receiver as its own update.
 | `destination` | The server domain this route reaches. Required. |
 | `hops` | The **sender's** distance to it. Required; unparseable is treated as 99, i.e. unreachable. |
 | `via` | The **sender's** next hop for it. Required — an entry missing `destination` or `via` is skipped entirely. |
+| `edge` | `"true"` when the sender's path to this destination crosses an **untrusted** peer anywhere along it — its next hop is untrusted, or it learned the route already flagged. Absent → clean. Since **1.10.8**. |
 
 > **`via` here is a single next-hop domain, not an accumulated trail.** This is the one attribute in
 > the protocol whose meaning depends on the element it sits on ([01-transport.md](01-transport.md#the-one-overloaded-attribute)).
@@ -58,24 +59,35 @@ bookkeeping. Emit it truthfully; do not depend on the far side reading it.
 For each `<entry/>`, in this order:
 
 ```
-if hops >= 16                       → skip (already unreachable)
+if hops < 0 OR hops >= 16           → skip (negative is a forgery; >= 16 already unreachable)
 candidate := hops + 1
 if candidate >= 16                  → skip (would become unreachable here)
 if destination == our own domain    → skip
 if destination == the sending peer  → skip     ← see below
 if this peer's advertisement of this destination is admin-denied → skip
+if sender is untrusted AND destination is one of our TRUSTED configured peers → skip
 
 record destination as "seen in this update"
 
+edge := sender is untrusted OR entry/@edge == 'true'
 current := our table entry for destination
-if current is absent OR candidate < current.hops:
-    install (destination → sender, candidate); mark CHANGED
+if current is absent:
+    install (destination → sender, candidate, edge); mark CHANGED
+else if current is a direct link:
+    ignore                                             ← gossip never displaces a link
 else if current.nextHop == sender:
-    install (destination → sender, candidate)          ← even if WORSE
-    mark CHANGED only if the metric actually differs
+    install (destination → sender, candidate, edge)    ← even if WORSE
+    mark CHANGED only if the metric or edge flag actually differs
+else if edge AND current is clean:
+    ignore                                             ← an edge route never out-bids a clean one
+else if (NOT edge AND current is edge) OR candidate < current.hops:
+    install (destination → sender, candidate, edge); mark CHANGED
 else:
     ignore (we have an equal or better route via someone else)
 ```
+
+"Current is edge" means its stored flag is set **or** its next hop is an untrusted peer. When
+advertising, emit `edge='true'` on exactly those entries.
 
 Two subtleties that are easy to get wrong and both matter:
 
@@ -83,6 +95,22 @@ Two subtleties that are easy to get wrong and both matter:
 split horizon guarantees it will not, because its own route to itself is direct. Accepting one would
 let a peer overwrite the direct entry that the link layer owns, which is how a misbehaving peer could
 make itself look further away or reachable via someone else.
+
+**Trust classes, not just metrics.** Hop counts are the advertiser's own word. Without the class rule
+an untrusted peer could advertise `hops='0'` for any server on your side of the mesh — or a negative
+number, which beats even a direct link — and pull that server's traffic into itself. So a route that
+crosses an untrusted edge competes on metric only with other such routes: it never displaces a clean
+route, and a clean route always displaces it, which undoes any claim slipped in while the clean route
+was briefly down.
+
+The `edge` flag is what keeps that second rule loop-free. A route through *you* toward something
+behind the edge is derived from your own advertisement, which carries the flag, so it can never come
+back to you as a clean route and win over the edge route it was derived from. A peer that strips the
+flag when re-advertising breaks this guarantee; implementations MUST propagate it.
+
+Residual, stated plainly: while a destination has **no** clean route at all, an untrusted edge that
+advertises it is installed like any other route, until a clean route returns. An operator who knows a
+destination can never legitimately be behind a particular edge can **Deny** it for that peer.
 
 **Accepting a worse metric from the current next hop.** If a route currently goes via beta and beta
 now says the path got longer, you must take the new, worse number. The current next hop is
