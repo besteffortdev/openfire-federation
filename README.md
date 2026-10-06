@@ -11,25 +11,32 @@ that have no direct link. End users do nothing special — they just join their 
 
 ```mermaid
 flowchart LR
-    alice(["👤 alice"]) --- S1
-    S1[Server 1] === S2
-    S3[Server 3] === S2
+    R1(["💬 room A"]) --- S1
+    R4(["💬 room A"]) --- S4
+    R3(["💬 room B"]) --- S3
+    S1[Server 1] === S2[Server 2<br/>hub]
     S4[Server 4] === S2
-    S2[Server 2<br/>hub] === S5[Server 5]
-    S5 === S6[Server 6]
+    S3[Server 3] === S2
+    S2 === S5["Server 5<br/>⚠️ untrusted<br/>allows: Server 3"]
+    S5 === S6["Server 6<br/>⚠️ untrusted<br/>allows: Server 7"]
     S6 === S7[Server 7]
-    S7 --- carol(["👤 carol"])
+    S7 --- R7(["💬 room B"])
 
     classDef server fill:#eef4ff,stroke:#3b6fd8,color:#0b1f44
-    classDef user fill:#ffffff,stroke:#8a94a6,color:#0b1f44
-    class S1,S2,S3,S4,S5,S6,S7 server
-    class alice,carol user
-    linkStyle 1,4,5,6 stroke:#3b6fd8,stroke-width:3px
+    classDef untrusted fill:#fff4e5,stroke:#d9822b,stroke-dasharray:5 3,color:#4a2a00
+    classDef roomA fill:#ffffff,stroke:#2e9e44,stroke-width:2px,color:#0b1f44
+    classDef roomB fill:#ffffff,stroke:#e0a800,stroke-width:2px,color:#0b1f44
+    class S1,S2,S3,S4,S7 server
+    class S5,S6 untrusted
+    class R1,R4 roomA
+    class R3,R7 roomB
+    linkStyle 0,1,3,4 stroke:#2e9e44,stroke-width:3px
+    linkStyle 2,5,6,7,8,9 stroke:#e0a800,stroke-width:3px
 ```
 
-*Seven servers, each linked over S2S only to its neighbour. alice on Server 1 and carol on Server 7 share one
-mapped room: the plugin relays their traffic along the highlighted path, four hops, through servers that
-have no copy of the room.*
+*Room A on Servers 1 and 4 is one mapped room, relayed through the hub (green). Room B links Server 3 to
+Server 7 across four hops (yellow), passing through two untrusted peers: each one is only allowed to reach
+the server on its list, which is exactly what room B needs and nothing more.*
 
 ## Contents
 
