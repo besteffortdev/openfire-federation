@@ -9,6 +9,42 @@ goes further: it builds a **federation overlay** on top of S2S so that a single 
 **mapped across several servers at once**, with messages and presence relayed **multi‑hop** between servers
 that have no direct link. End users do nothing special — they just join their local room.
 
+```mermaid
+flowchart LR
+    alice(["👤 alice"]) --- opsA
+
+    subgraph A["alpha.example"]
+        opsA["💬 ops room"]
+    end
+
+    subgraph B["bravo.example"]
+        relay["⇄ relays traffic<br/>(no copy of the room)"]
+    end
+
+    subgraph C["charlie.example"]
+        opsC["💬 ops room"]
+    end
+
+    opsC --- carol(["👤 carol"])
+
+    partner["🛡️ partner.example<br/>untrusted edge"]
+
+    A ===|"S2S"| B
+    B ===|"S2S"| C
+    B -.-|"sees only the servers<br/>you expose to it"| partner
+    opsA -.-|"mapped: one logical room,<br/>relayed multi-hop"| opsC
+
+    classDef server fill:#eef4ff,stroke:#3b6fd8,color:#0b1f44
+    classDef room fill:#ffffff,stroke:#3b6fd8,color:#0b1f44
+    classDef untrusted fill:#fff4e5,stroke:#d9822b,stroke-dasharray:5 3,color:#4a2a00
+    class A,B,C server
+    class opsA,opsC,relay room
+    class partner untrusted
+```
+
+*alice and carol talk in one room even though alpha and charlie never connect directly: bravo forwards the
+traffic hop by hop over the federation overlay, and the untrusted partner only ever reaches what you expose.*
+
 ## Contents
 
 - [Features](#features)
