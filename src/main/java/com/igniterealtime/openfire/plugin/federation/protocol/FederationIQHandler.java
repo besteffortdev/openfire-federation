@@ -7,6 +7,7 @@ import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
 import org.dom4j.Element;
+import org.dom4j.QName;
 import org.jivesoftware.openfire.IQHandlerInfo;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.auth.UnauthorizedException;
@@ -36,8 +37,10 @@ import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -57,6 +60,11 @@ import java.util.stream.Collectors;
 public class FederationIQHandler extends IQHandler {
 
     private static final Logger Log = LoggerFactory.getLogger(FederationIQHandler.class);
+
+    private static final String NS_STANZA_ID   = "urn:xmpp:sid:0";
+    private static final String NS_OCCUPANT_ID = "urn:xmpp:occupant-id:0";
+    /** A peer-supplied stanza-id we reuse verbatim: Openfire's own UUIDs and similar opaque tokens. */
+    private static final Pattern REUSABLE_STANZA_ID = Pattern.compile("[A-Za-z0-9._:-]{1,128}");
 
     private final IQHandlerInfo   info;
     private final FederationManager manager;
@@ -1702,6 +1710,9 @@ public class FederationIQHandler extends IQHandler {
                 if (rewritten != null) deliverEl = rewritten;
             }
         }
+        // msgEl itself continues to fan-out with the origin's stanza-id intact, so stamp a copy.
+        if (deliverEl == msgEl) deliverEl = msgEl.createCopy();
+        stampRoomIdentity(deliverEl, room, senderNick);
 
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;
 
@@ -1718,6 +1729,60 @@ public class FederationIQHandler extends IQHandler {
         }
         deliverToOccupants(deliverEl, virtualFrom, occupants);
         Log.debug("injectMessage: delivered to {} occupant(s) in {}", occupants.size(), targetRoom);
+    }
+
+    /**
+     * Gives a relayed groupchat message the room-scoped identity Openfire gives a local occupant's
+     * message: a {@code <stanza-id by=thisRoom>} (XEP-0359) and an {@code <occupant-id>} (XEP-0421).
+     * Clients address a groupchat message by that stanza-id when they react (XEP-0444), reply
+     * (XEP-0461), retract or moderate it, and Conversations refuses to react without one ("Could not
+     * add reaction"). It also drops any incoming reaction that has no occupant-id.
+     *
+     * <p>The origin room's stanza-id arrives on the forwarded copy (Openfire stamps the original packet
+     * before our post-processing forwarder sees it) and every hop relays it unchanged. Reusing its
+     * {@code id} with {@code by} set to this room gives a message the same ID in every copy of the
+     * room. A reaction made on any server then names a message every other server knows, with no ID
+     * translation table. Every incoming stanza-id/occupant-id is dropped first: a peer must not be
+     * able to assert one in this room's name.
+     */
+    private void stampRoomIdentity(Element msgEl, MUCRoom room, String senderNick) {
+        String roomJid = room.getJID().toBareJID();
+        String id = null;
+        for (Element sid : msgEl.elements(QName.get("stanza-id", NS_STANZA_ID))) {
+            String candidate = sid.attributeValue("id");
+            if (id == null && !roomJid.equals(sid.attributeValue("by"))
+                    && candidate != null && REUSABLE_STANZA_ID.matcher(candidate).matches()) {
+                id = candidate;
+            }
+            msgEl.remove(sid);
+        }
+        if (id == null) id = UUID.randomUUID().toString();
+        msgEl.addElement(QName.get("stanza-id", NS_STANZA_ID))
+             .addAttribute("id", id)
+             .addAttribute("by", roomJid);
+
+        for (Element oid : msgEl.elements(QName.get("occupant-id", NS_OCCUPANT_ID))) {
+            msgEl.remove(oid);
+        }
+        String occupantId = occupantIdFor(room, senderNick);
+        if (occupantId != null) {
+            msgEl.addElement(QName.get("occupant-id", NS_OCCUPANT_ID)).addAttribute("id", occupantId);
+        }
+    }
+
+    /**
+     * The XEP-0421 occupant-id of a virtual occupant ("user@home" nick): what Openfire computes for a
+     * real occupant with that bare JID (an HMAC over room and user), so it stays the same across
+     * messages, presences and reconnects. Null if Openfire cannot compute one; the stanza then goes out
+     * without it, as it did before.
+     */
+    private String occupantIdFor(MUCRoom room, String senderNick) {
+        try {
+            return room.generateOccupantId(new JID(senderNick));
+        } catch (Exception e) {
+            Log.debug("Could not compute an occupant-id for {} in {}: {}", senderNick, room.getJID(), e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -1872,6 +1937,7 @@ public class FederationIQHandler extends IQHandler {
                     statusEl0 != null ? statusEl0.getText() : "");
         }
 
+        String occupantId = occupantIdFor(room, senderNick);
         for (MUCOccupant occupant : occupants) {
             Presence delivery = new Presence();
             delivery.setFrom(virtualFromJID);
@@ -1900,6 +1966,11 @@ public class FederationIQHandler extends IQHandler {
             item.addAttribute("affiliation", "none");
             item.addAttribute("role", leaving ? "none" : "participant");
             if (originalFrom != null) item.addAttribute("jid", originalFrom);
+            // XEP-0421: the room advertises occupant-id, so its occupants' presence must carry it;
+            // the same value as on this occupant's messages (see stampRoomIdentity).
+            if (occupantId != null) {
+                delivery.getElement().addElement("occupant-id", NS_OCCUPANT_ID).addAttribute("id", occupantId);
+            }
 
             FederationStanzaFactory.markAsForwarded(delivery);
             FederationStanzaFactory.directDeliver(delivery);
