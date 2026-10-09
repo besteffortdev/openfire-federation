@@ -106,6 +106,7 @@ Ordered by how expensive the mistake is to find later.
 - [ ] On injection, stamp `<stanza-id by='this room'/>` (reusing the origin's id) and a local `<occupant-id/>`,
       and archive the stamped copy
 - [ ] Add the same `<occupant-id/>` to injected presence
+- [ ] Handle an injected `<retract><moderated/></retract>` as a moderation, never as an ordinary message
 
 **Security** — every rule in [09-validation.md](09-validation.md), especially:
 - [ ] Payload `from` validation at **every** hop, relay included
@@ -113,6 +114,7 @@ Ordered by how expensive the mistake is to find later.
 - [ ] Federation-enabled **and** active-mapping checks before injecting
 - [ ] Forward a groupchat message or join only if your own room accepted it
 - [ ] Reuse a stanza-id only when `by` is the origin room and the id is new to the room; never copy an occupant-id
+- [ ] Forward and apply a moderation only for a message written by a user of the moderating room's server
 - [ ] Constant-time comparison for the file share capability
 
 **Files**
@@ -337,6 +339,7 @@ ones fall back to a documented default. The consequences that actually bite:
 | Recipient binding (rule 5) | older peers do not check | They will relay a mis-addressed payload onward. Implement it regardless of what your peers do. |
 | Sender identity, claimed origins, lifecycle states, probe/PEP access (1.10.8) | older peers do not check | Each is enforced by the receiver alone. An older peer in the path does not weaken a newer receiver's checks, but it leaves its own users exposed to the attacks these close. |
 | Room stanza-id / occupant-id on injected messages (1.10.10) | older receivers deliver the origin's stanza-id unchanged | Reactions, replies and retractions fail on an older receiver's side only: its clients see no stanza-id for their own room. Nothing breaks for anyone else. |
+| Moderation relay (1.10.12) | older receivers inject the announcement as an ordinary message | A body-less groupchat from a room nick. Clients ignore it as a moderation, so the message stays visible on that receiver only. Older senders never relay moderations. |
 | Sender-side acceptance gate on room traffic (1.10.11) | older peers forward refused traffic | Only the sender can enforce it, so a refused message or join from behind an older peer still reaches you. Nothing on the receiving side detects it. |
 | Egress exposure gate on 1:1 traffic and advertisement relay (1.10.9) | older peers do not check | Enforced by the server **in front of** the untrusted edge, so it protects only the topology behind a gateway that implements it. A 1.10.8+ receiver still drops the claimed-origin advertisements an older gateway leaks, and logs them. |
 

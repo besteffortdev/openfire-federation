@@ -62,7 +62,7 @@ public class FederationIQHandler extends IQHandler {
     private static final Logger Log = LoggerFactory.getLogger(FederationIQHandler.class);
 
     private static final String NS_STANZA_ID   = "urn:xmpp:sid:0";
-    private static final String NS_OCCUPANT_ID = "urn:xmpp:occupant-id:0";
+    static final String NS_OCCUPANT_ID = "urn:xmpp:occupant-id:0";
     /**
      * A peer-supplied stanza-id we reuse verbatim: Openfire's UUIDs and similar opaque tokens. At least
      * 16 characters, so it cannot equal the small numeric id Monitoring's MAM falls back to for an
@@ -90,6 +90,14 @@ public class FederationIQHandler extends IQHandler {
     private static final long PENDING_DELIVERY_TTL_MS = 60_000;
     private static final int  PENDING_DELIVERY_MAX_PER_ROOM = 20;
     private final ConcurrentHashMap<String, Deque<PendingDelivery>> pendingRoomDeliveries = new ConcurrentHashMap<>();
+
+    /**
+     * Moderations relayed from other servers and applied here, per room, newest last, for
+     * {@link #replayModerations}. In memory only: after a restart a late joiner sees those messages again.
+     */
+    private record StoredModeration(String targetId, Element announcement, long at) { }
+    private static final int MODERATIONS_KEPT_PER_ROOM = 200;
+    private final ConcurrentHashMap<String, Deque<StoredModeration>> federatedModerations = new ConcurrentHashMap<>();
 
     public FederationIQHandler(FederationManager manager) {
         super("Federation IQ Handler");
@@ -1682,6 +1690,12 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
 
+        Element moderatedRetract = RoomModeration.moderatedRetract(msgEl);
+        if (moderatedRetract != null) {
+            injectModeration(msgEl, moderatedRetract, room);
+            return;
+        }
+
         JID targetJID      = new JID(targetRoom);
         String senderNick  = virtualNick(msgEl.attributeValue("from"));
 
@@ -1716,6 +1730,7 @@ public class FederationIQHandler extends IQHandler {
         }
         // msgEl itself continues to fan-out with the origin's stanza-id intact, so stamp a copy.
         if (deliverEl == msgEl) deliverEl = msgEl.createCopy();
+        RoomModeration.stripModeration(deliverEl);
         stampRoomIdentity(deliverEl, room, senderNick);
 
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;
@@ -1768,14 +1783,16 @@ public class FederationIQHandler extends IQHandler {
             }
             msgEl.remove(sid);
         }
-        if (id != null && !manager.getRoomMessageIds().claim(roomJid, id)) {
+        // Remembered with its origin so a moderation from that room can find it (see injectModeration).
+        var origin = new RoomMessageIds.Origin(originRoom, id, senderNick);
+        if (id != null && !manager.getRoomMessageIds().claim(roomJid, id, origin)) {
             Log.warn("SECURITY: relayed message from {} into {} reuses stanza-id {} already used in the room; "
                    + "giving it a fresh one", senderNick, roomJid, id);
             id = null;
         }
         if (id == null) {
             id = UUID.randomUUID().toString();
-            manager.getRoomMessageIds().claim(roomJid, id);
+            manager.getRoomMessageIds().claim(roomJid, id, origin);
         }
         msgEl.addElement(QName.get("stanza-id", NS_STANZA_ID))
              .addAttribute("id", id)
@@ -1788,6 +1805,111 @@ public class FederationIQHandler extends IQHandler {
         if (occupantId != null) {
             msgEl.addElement(QName.get("occupant-id", NS_OCCUPANT_ID)).addAttribute("id", occupantId);
         }
+    }
+
+    /**
+     * Applies a moderation (XEP-0425) relayed from the room {@code msgEl} names in {@code from}/{@code to}.
+     * It is applied only to a message that came from that same room and whose author belongs to that
+     * room's server: the author's own server may remove its users' messages everywhere, and nobody else
+     * may (see {@link RoomModeration}). The message is found by the origin's stanza-id in this room's
+     * bookkeeping; one too old to be remembered, or from before a restart, is not moderated here.
+     *
+     * <p>The room's occupants get the announcement from this room's bare JID with the id this room gave
+     * the message, as from a local moderator, and it is kept for {@link #replayModerations}.
+     */
+    private void injectModeration(Element msgEl, Element retract, MUCRoom room) {
+        String roomJid    = room.getJID().toBareJID();
+        String originRoom = bareJidOf(msgEl.attributeValue("to"));
+        String targetId   = retract.attributeValue("id");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        if (originRoom == null || originRoom.equals(roomJid)
+                || !originRoom.equals(msgEl.attributeValue("from"))) {
+            Log.warn("SECURITY: dropping a moderation for {} that does not come from its origin room "
+                   + "(from={}, to={})", roomJid, msgEl.attributeValue("from"), msgEl.attributeValue("to"));
+            return;
+        }
+        if (RoomModeration.belongsToRoomServer(localDomain, originRoom)) {
+            Log.debug("injectModeration: dropping an echo of our own room {}'s moderation", originRoom);
+            return;
+        }
+        var ids = manager.getRoomMessageIds();
+        String localId = ids.localIdOf(roomJid, originRoom, targetId);
+        if (localId == null) {
+            Log.info("Not applying a moderation from {} in {}: message {} is not one this room received "
+                   + "from there, or is too old to be remembered", originRoom, roomJid, targetId);
+            return;
+        }
+        String author = ids.originOf(roomJid, localId).author();
+        if (!RoomModeration.belongsToRoomServer(author, originRoom)) {
+            Log.warn("SECURITY: refusing a moderation from {} in {}: message {} was written by {}, who is "
+                   + "not a user of that room's server", originRoom, roomJid, targetId, author);
+            return;
+        }
+        if (!ids.markModerated(roomJid, localId)) {
+            Log.debug("injectModeration: {} in {} already moderated", localId, roomJid);
+            return;
+        }
+
+        // by names the moderator's virtual occupant here, the same "user@home" nick their messages use.
+        // Only the origin's own users can moderate there, so anyone else is dropped from the claim.
+        Element moderated = retract.element(QName.get("moderated", RoomModeration.NS_MODERATE));
+        String moderator = null;
+        try {
+            String claimed = new JID(moderated.attributeValue("by")).getResource();
+            if (claimed != null && RoomModeration.belongsToRoomServer(claimed, originRoom)) moderator = claimed;
+        } catch (Exception ignored) {
+            // no or unparseable by: announce without one
+        }
+        Element announcement = RoomModeration.announcement(roomJid, msgEl.attributeValue("id"), localId,
+                moderator == null ? null : roomJid + "/" + moderator,
+                moderator == null ? null : occupantIdFor(room, moderator),
+                RoomModeration.reasonOf(retract));
+        announcement.remove(announcement.attribute("to"));
+
+        Deque<StoredModeration> kept = federatedModerations.computeIfAbsent(roomJid, k -> new ConcurrentLinkedDeque<>());
+        kept.addLast(new StoredModeration(localId, announcement.createCopy(), System.currentTimeMillis()));
+        while (kept.size() > MODERATIONS_KEPT_PER_ROOM) kept.pollFirst();
+
+        Log.info("Applying a moderation from {} in {}: message {} by {}", originRoom, roomJid, localId, author);
+        // An empty room needs no buffering: whoever joins next gets it from replayModerations.
+        deliverToOccupants(announcement, roomJid, room.getOccupants());
+    }
+
+    /**
+     * Re-sends the federated moderations this room applied to a local occupant who just joined, for
+     * messages still in the room's history, so the history replay on join does not bring them back. A
+     * moderation made on this server is replayed by the moderation plugin itself, never here. Each
+     * goes out with a XEP-0203 delay, which also keeps the forwarder from relaying it again.
+     */
+    public void replayModerations(String roomJid, JID joiner) {
+        Deque<StoredModeration> kept = federatedModerations.get(roomJid);
+        if (kept == null || kept.isEmpty() || joiner == null) return;
+        MUCRoom room = findLocalRoom(roomJid);
+        if (room == null) return;
+
+        Set<String> inHistory = new HashSet<>();
+        for (var it = room.getRoomHistory().getMessageHistory(); it.hasNext(); ) {
+            Message m = it.next();
+            for (Element sid : m.getElement().elements(QName.get("stanza-id", NS_STANZA_ID))) {
+                if (roomJid.equals(bareJidOf(sid.attributeValue("by")))) inHistory.add(sid.attributeValue("id"));
+            }
+        }
+        int sent = 0;
+        for (StoredModeration sm : kept) {
+            if (!inHistory.contains(sm.targetId())) continue;
+            Element copy = sm.announcement().createCopy();
+            copy.addElement(QName.get("delay", RoomModeration.NS_DELAY))
+                .addAttribute("from", roomJid)
+                .addAttribute("stamp", org.jivesoftware.util.XMPPDateTimeFormat.format(new java.util.Date(sm.at())));
+            copy.addAttribute("from", roomJid);
+            copy.addAttribute("to", joiner.toString());
+            Message delivery = new Message(copy);
+            FederationStanzaFactory.markAsForwarded(delivery);
+            FederationStanzaFactory.directDeliver(delivery);
+            sent++;
+        }
+        if (sent > 0) Log.debug("replayModerations: sent {} to {} joining {}", sent, joiner, roomJid);
     }
 
     /** Normalized bare JID of {@code jid}, or null if absent or unparseable. */

@@ -215,6 +215,16 @@ the room, or is banned, kicked or muted, and a join the room refused, used to be
 appeared in every federated copy of the room. Such stanzas are now logged ("Not forwarding …: the room
 did not accept it") and stay local.
 
+**Moderation (XEP-0425) crosses the federation only for the author's own server** (since 1.10.12).
+Clients remove a message when the room announces a moderation from its bare JID, without checking who
+wrote it, so relaying every moderation would let a moderator on any mapped server delete anyone's
+messages everywhere. A moderation is relayed only when the removed message was written by one of the
+moderating server's own users, and every receiver checks the same thing again before applying it
+(`SECURITY:` logged on refusal). A moderator removing a remote user's message removes it from their own
+server's copy of the room only. A client cannot fake a moderation by sending the element in a plain
+message: it arrives from a room nick, not the room, and is dropped. See
+[09](protocol/09-validation.md#room-moderation--only-the-authors-server).
+
 ## Presence and PEP privacy
 
 Two server-side answers given on a user's behalf follow that user's own access rules (since 1.10.8):

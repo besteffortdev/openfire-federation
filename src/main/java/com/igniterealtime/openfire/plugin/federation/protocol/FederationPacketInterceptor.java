@@ -205,6 +205,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         if (packet.getTo() == null) return;
 
+        // A room's moderation announcement (XEP-0425) on its way to a local occupant: relay it when it
+        // removes one of our own users' messages. Checked in either phase; markModerated keeps it to
+        // one relay however many occupants get a copy.
+        if (!incoming && packet instanceof Message out) relayModeration(out);
+
         if (processed) {
             // Post-processing only feeds the mapped-room forwarders. The relay/policy checks
             // below run pre-processing ONLY: a rejection is only honored before processing,
@@ -370,12 +375,79 @@ public class FederationPacketInterceptor implements PacketInterceptor {
             accepted = ids.consumeAccepted(roomJid, RoomMessageIds.keyOf(sid, msg.getID(), msg.getFrom().toString()));
             // The id now travels to every peer and comes back in their copies of the room: remember it
             // here so a peer cannot hand it back on a different message (see FederationIQHandler.stampRoomIdentity).
-            if (accepted && sid != null) ids.claim(roomJid, sid);
+            if (accepted && sid != null) {
+                ids.claim(roomJid, sid, new RoomMessageIds.Origin(roomJid, sid, msg.getFrom().toBareJID()));
+            }
         }
         if (!accepted) {
             Log.info("Not forwarding a groupchat from {} to {}: the room did not accept it", msg.getFrom(), roomJid);
         }
         return accepted;
+    }
+
+    // ── Moderation forwarding (XEP-0425) ──────────────────────────────────────
+
+    /**
+     * Relays a mapped room's moderation announcement to its peers when the removed message was written
+     * by one of this server's users and forwarded from this room. A moderation of a message from another
+     * server applies here only: its author's server alone may remove it everywhere (see
+     * {@link RoomModeration}). A replay to a late joiner carries a delay and is not relayed again.
+     */
+    private void relayModeration(Message out) {
+        if (out.getType() != Message.Type.groupchat) return;
+        JID from = out.getFrom();
+        if (from == null || from.getNode() == null || from.getResource() != null) return;
+        org.dom4j.Element retract = RoomModeration.moderatedRetract(out.getElement());
+        if (retract == null || RoomModeration.isDelayed(out.getElement())) return;
+        if (!isConferenceDomain(from.getDomain())) return;
+
+        String roomJid = from.toBareJID();
+        List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
+        if (mappings.isEmpty()) return;
+
+        String targetId = retract.attributeValue("id");
+        var ids = manager.getRoomMessageIds();
+        if (!ids.markModerated(roomJid, targetId)) return;   // another occupant's copy of the same one
+        RoomMessageIds.Origin origin = ids.originOf(roomJid, targetId);
+        if (origin == null || !roomJid.equals(origin.room())) {
+            Log.info("Moderation of {} in {} applies on this server only: {}", targetId, roomJid,
+                     origin == null ? "not a message this room forwarded (or too old to be remembered)"
+                                    : "written by " + origin.author() + " on another server");
+            return;
+        }
+
+        String moderator = moderatorOf(manager.findLocalMucRoom(roomJid), retract);
+        Message payload = new Message(RoomModeration.announcement(roomJid, out.getID(), targetId,
+                moderator == null ? null : roomJid + "/" + moderator, null, RoomModeration.reasonOf(retract)));
+        for (RoomMapping mapping : mappings) {
+            forwardToMapped(payload, mapping, null);
+        }
+        Log.info("Relayed the moderation of {}'s message {} in {} to {} mapped room(s)",
+                 origin.author(), targetId, roomJid, mappings.size());
+    }
+
+    /**
+     * The bare JID of the local user named by a moderation's {@code by} (the moderator's room address,
+     * or their real JID), so peers can show them as the same "user@home" occupant their messages use.
+     */
+    private String moderatorOf(MUCRoom room, org.dom4j.Element retract) {
+        org.dom4j.Element moderated = retract.element(
+                org.dom4j.QName.get("moderated", RoomModeration.NS_MODERATE));
+        String by = moderated == null ? null : moderated.attributeValue("by");
+        if (by == null || room == null) return null;
+        try {
+            JID byJid = new JID(by);
+            if (byJid.toBareJID().equals(room.getJID().toBareJID())) {
+                if (byJid.getResource() == null) return null;
+                var occupants = room.getOccupantsByNickname(byJid.getResource());
+                if (occupants.isEmpty()) return null;
+                JID real = occupants.get(0).getUserAddress();
+                return XMPPServer.getInstance().isLocal(real) ? real.toBareJID() : null;
+            }
+            return XMPPServer.getInstance().isLocal(byJid) ? byJid.toBareJID() : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     // ── Presence forwarding (join / leave) ────────────────────────────────────

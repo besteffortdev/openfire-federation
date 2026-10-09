@@ -255,7 +255,89 @@ sees the same stanza-id it would have seen live. (Since 1.10.10.)
 ```
 
 A reaction is an ordinary groupchat message (`<reactions xmlns='urn:xmpp:reactions:0' id='…'/>`, no
-body) and takes the same path as any other, so it needs no special handling once the ids line up.
+body) and takes the same path as any other, so it needs no special handling once the ids line up. So
+is a user retracting their own message (XEP-0424): clients accept it only when its occupant-id matches
+the original's, and the receiver computes both.
+
+### Moderation (XEP-0425)
+
+A moderator's retraction of someone else's message is different. The room announces it from its
+**bare JID**, and clients obey that envelope without checking who wrote the message. Relayed as is, a
+moderator on any mapped server could remove anyone's message from every copy of the room. So:
+
+> **Only the author's own server may moderate a message across the federation.** A moderation of a
+> message written by another server's user applies on the moderating server only.
+
+Both ends enforce this. The sender filters, and every receiver checks again, because a modified peer
+would not filter.
+
+**Sending side.** When a mapped room announces a moderation (a groupchat from the room's bare JID
+carrying `<retract xmlns='urn:xmpp:message-retract:1'><moderated xmlns='urn:xmpp:message-moderate:1'/>`),
+forward it only if the retracted stanza-id belongs to a message **one of this server's users posted in
+this room** and that was forwarded from it. Skip one carrying a `<delay/>`, which is a replay to a late
+joiner, and forward each moderation once however many occupants receive a copy. The payload is a fresh
+announcement addressed from and to the origin room's bare JID:
+
+```xml
+<muc-forward destination='alpha.example' targetRoom='ops@conference.alpha.example'
+             via='gamma.example' src='gamma.example'>
+  <message xmlns='jabber:client' type='groupchat' id='…'
+           from='ops@conference.gamma.example' to='ops@conference.gamma.example'>
+    <retract xmlns='urn:xmpp:message-retract:1' id='5f1c9a2e-0b7d-4c1e-9f3a-6d2b8e4a7c10'>
+      <moderated xmlns='urn:xmpp:message-moderate:1'
+                 by='ops@conference.gamma.example/mod@gamma.example'/>
+      <reason>off topic</reason>
+    </retract>
+  </message>
+</muc-forward>
+```
+
+`id` on `<retract/>` is the origin room's stanza-id for the message. The resource of `by` is the
+moderator's bare JID, the same `user@home` form their own messages' virtual nick takes. `<reason/>` is
+optional and capped at 1,024 characters. No occupant-id: the receiver computes its own.
+
+**Receiving side.** An injected payload that carries `<retract><moderated/></retract>` is handled as a
+moderation, never delivered as an ordinary message:
+
+```
+originRoom := bare JID of the payload's `to`
+require payload `from` == originRoom, and originRoom is not this room        → else drop, SECURITY
+drop if originRoom is one of our own rooms (an echo)
+target     := the message this room received from originRoom with that stanza-id
+require target is known (this room remembers the last 2,000)                → else drop
+require target's author belongs to originRoom's server                       → else drop, SECURITY
+  (author's domain == originRoom's domain or its parent: conference.gamma → gamma)
+drop if target was already moderated (a second path through a diamond)
+announce to this room's occupants, from this room's bare JID:
+  <retract id='<this room's id for target>'>
+    <moderated by='<this room>/<moderator user@home>'>  ← only if that user belongs to originRoom's server
+      <occupant-id id='<computed locally for the moderator>'/>
+    </moderated>
+    <reason/>                                          ← if present
+  </retract>
+keep it, and replay it (with <delay/>) to each local occupant who joins while the
+  target is still in the room's history
+```
+
+The payload `from` is validated like any other (rule 3, [09](09-validation.md#3-payload-origin--the-from-spoofing-gate)),
+so `originRoom` is a room behind the sending path. A hub fans the payload out unchanged and each spoke
+checks it again, so a hub cannot moderate a spoke's users either.
+
+An ordinary relayed message has any `<moderated/>` removed before delivery. Clients already ignore
+one that does not come from the room's bare JID, which a relayed message never does; this keeps it so.
+
+What this implementation does not cover:
+
+- The moderation itself. Openfire has no XEP-0425 handler, so a moderation plugin is needed on the
+  moderating server. Receiving servers need none: they deliver the standard announcement.
+- An admin clearing a room's history. Openfire's bulk retraction has no `<moderated/>` and stays local.
+- Moderations of messages older than the last 2,000 in the room, or received before a restart: the
+  bookkeeping is in memory, so both ends refuse them. For the same reason a receiving server forgets
+  its replays on restart, and a late joiner then sees those messages again in the join history.
+- Archives. The announcement has no body, so Openfire's history and Monitoring's MAM do not store it.
+  The original stays in the receiving server's archive.
+
+(Since 1.10.12.)
 
 ### Presence
 

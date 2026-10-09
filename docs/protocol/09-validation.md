@@ -369,6 +369,43 @@ Why each condition:
 None of this lets a peer speak for users it could not already speak for: the nick, and so the
 occupant-id, still derives from the payload `from`, which rule 3 has already validated.
 
+### Room moderation — only the author's server
+
+Applies to a moderation (XEP-0425) in either direction (see
+[05](05-muc-traffic.md#moderation-xep-0425)). Clients obey a moderation from the room's bare JID
+without checking who wrote the message, so a relayed one would let any mapped server remove anyone's
+messages:
+
+```
+sending side:   forward a moderation only for a message one of our users posted in this room
+receiving side: apply one only if ALL hold:
+    payload `from` == payload `to` == originRoom, and that is not this room   → else SECURITY
+    this room received the target message from originRoom                     → else drop
+    the target's author belongs to originRoom's server                         → else SECURITY
+    it was not already applied                                                 → else drop
+strip <moderated/> from every ordinary relayed message
+```
+
+Why each condition:
+
+- **Both sides.** The sender knows who wrote its messages; the receiver cannot trust a sender to
+  filter. Checking at the receiver means a modified peer gains nothing by skipping its own filter.
+- **From the origin room.** A client can put `<retract><moderated/>` in a plain groupchat, and its server
+  relays that like any message, with the client's own JID as `from`. Only a moderation addressed from
+  the room counts.
+- **Received from that room.** The target is found by the origin room's own stanza-id in the bookkeeping
+  [room identity elements](#room-identity-elements) already keeps, so a moderation can only name a
+  message that came from the room it claims to speak for.
+- **Author belongs to that room's server.** A room may hold messages relayed from other servers; its
+  server may not remove those. The test is exact (the room's domain or its immediate parent), never a
+  suffix match: `x@example` does not belong to `conference.gamma.example`.
+- **Once.** Diamond topologies deliver the same payload twice.
+- **Strip elsewhere.** A relayed message is delivered from a room nick, which clients do not obey as a
+  moderator; removing the element keeps a lax client from doing so.
+
+This rests on rule 3 like everything else: a trusted peer that can already forge its own users'
+messages can forge moderations of them. It cannot reach another server's users. (Since 1.10.12.)
+
 ### Room traffic — forward only what the room accepted (sending side)
 
 ```
@@ -505,6 +542,7 @@ Prevents a write outside the region the geometry accounted for.
 | Mapping is with `src` | `muc-forward` injection | drop |
 | Room identity elements | `muc-forward` message injection | strip; fresh stanza-id |
 | Room accepted it (sender side) | outbound groupchat and join | do not forward |
+| Author's server only | moderation, outbound and `muc-forward` injection | do not forward / drop |
 | Lifecycle state | mapping accept/reject/disable/enable | drop |
 | Subscription | presence probe answering | do not answer |
 | PEP access model | `iq-forward` PEP items GET | `forbidden` |

@@ -20,7 +20,8 @@ import org.xmpp.packet.Message;
  *   <li>{@link #occupantJoined} flushes {@code FederationIQHandler}'s buffered deliveries for that
  *       room — messages (and any file share riding with one) that arrived while the room had zero
  *       local occupants, most often a brief client reconnect blip. See
- *       {@code FederationIQHandler.PendingDelivery}.</li>
+ *       {@code FederationIQHandler.PendingDelivery}. It also replays to the joiner the moderations
+ *       (XEP-0425) relayed from other servers for messages still in the room's history.</li>
  *   <li>{@link #messageReceived} marks a local occupant's message as accepted by a mapped room, so the
  *       forwarder relays only what the room actually broadcast. See {@link RoomMessageIds}.</li>
  * </ul>
@@ -55,6 +56,13 @@ public class RoomCreationListener implements MUCEventListener {
             if (manager.getIQHandler() != null) manager.getIQHandler().flushPendingDeliveries(roomJid);
         } catch (Exception e) {
             Log.warn("Failed to flush pending deliveries for {}: {}", roomJid, e.getMessage());
+        }
+        try {
+            if (manager.getIQHandler() != null && user != null && XMPPServer.getInstance().isLocal(user)) {
+                manager.getIQHandler().replayModerations(roomJid, user);
+            }
+        } catch (Exception e) {
+            Log.warn("Failed to replay federated moderations in {}: {}", roomJid, e.getMessage());
         }
     }
 
