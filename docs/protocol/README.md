@@ -16,7 +16,7 @@ and uses only `<iq/>` stanzas in one namespace.
 | [02-peering.md](02-peering.md) | `peer-announce`, `peer-withdraw`, `peer-disable`. Bringing a link up, trust negotiation, keepalives, the link state machine. |
 | [03-routing.md](03-routing.md) | `routing-update`, `routing-solicit`. Distance-vector reachability: metrics, split horizon, withdrawal, convergence. |
 | [04-rooms.md](04-rooms.md) | `room-advertisement` and the mapping lifecycle (`room-mapping`, `-accept`, `-reject`, `-disable`, `-enable`, `room-unmap`), plus the `mapping-ping`/`mapping-pong` path probe. |
-| [05-muc-traffic.md](05-muc-traffic.md) | `muc-forward`: how a message or presence in a mapped room reaches the other side, the virtual-occupant model, hub fan-out. |
+| [05-muc-traffic.md](05-muc-traffic.md) | `muc-forward`: how a message or presence in a mapped room reaches the other side, the virtual-occupant model, room stanza-id/occupant-id (reactions, replies), hub fan-out. |
 | [06-direct-traffic.md](06-direct-traffic.md) | `direct-forward`, `presence-forward`, `iq-forward`: 1:1 chat, subscriptions and presence, vCard/PEP/disco across the overlay. |
 | [07-file-relay.md](07-file-relay.md) | The `fed-file` annotation and `file-request`/`file-offer`/`file-chunk`/`file-error`: federating XEP-0363 uploads. |
 | [08-directory.md](08-directory.md) | `user-directory` and `bookmark-push`: optional online-user gossip. |

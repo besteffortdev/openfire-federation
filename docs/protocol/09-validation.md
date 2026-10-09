@@ -332,6 +332,58 @@ if targetRoom has no ACTIVE mapping whose remote domain == src       → DROP
 The "has an active mapping" check above is necessary but not sufficient: the mapping must be with the
 server the traffic enters through.
 
+### Room identity elements
+
+Applies when injecting a groupchat message (see [05](05-muc-traffic.md#room-identity-stanza-id-and-occupant-id)).
+Clients treat a room's `<stanza-id/>` and `<occupant-id/>` as the room's own word, so a peer must not be
+able to choose them:
+
+```
+remove every <stanza-id/> and <occupant-id/> from the payload copy
+reuse a peer-supplied stanza-id only if ALL hold:
+    its `by` == bare JID of the payload's `to` (the origin room), and that is not this room
+    its id matches [A-Za-z0-9._:-]{16,128}
+    this room has not used that id before          → else: fresh random id, log SECURITY
+compute occupant-id locally; never take it from the payload
+```
+
+Why each condition:
+
+- **`by` must be the origin room.** The origin MUC service strips any client-supplied stanza-id whose
+  `by` is its own room before stamping its own, as XEP-0359 requires, so that one element is the only one a
+  *user* cannot forge. A stanza-id with any other `by` is whatever the client wrote. Taking "the first
+  foreign stanza-id" let any user on any mapped server pick the id their message gets everywhere else,
+  including the id of an existing message. Reactions and replies aimed at that message could then
+  resolve to the attacker's message. (Found and closed in 1.10.11, before 1.10.10 left the lab.)
+- **Not already used in this room.** A peer server controls its own room's stamp, so it can still
+  replay an id it has seen. Remember the ids each mapped room has used, both the ids of local messages
+  as they are forwarded and the ids of injected ones, and replace a repeat. This implementation keeps
+  the last 2,000 per room. Older ids can still be replayed, which only risks a reaction or reply to a
+  very old message showing against the wrong one. It is never a delivery or identity failure.
+- **At least 16 characters.** An archive may hand out short numeric ids for messages stored without
+  a stanza-id of their own (Openfire's Monitoring plugin does, for federated messages archived before
+  1.10.10). A peer must not be able to claim one of those.
+- **occupant-id local only.** A client uses occupant-id to tell occupants apart and to recognise its
+  own account. A peer-supplied one could claim to be a local user, or the client itself.
+
+None of this lets a peer speak for users it could not already speak for: the nick, and so the
+occupant-id, still derives from the payload `from`, which rule 3 has already validated.
+
+### Room traffic — forward only what the room accepted (sending side)
+
+```
+groupchat message:    forward only if the local room broadcast it
+subject change:       forward only if the sender is an occupant and the subject now matches
+available presence:   forward only if the sender is an occupant after processing
+unavailable presence: forward as is
+```
+
+The one rule here that the **sender** enforces, because only the sender's room knows its own
+membership, bans and voice. An injected copy bypasses the receiving room's checks by design (rule 6,
+room injection), so whatever the sender forwards is shown. Forwarding refused traffic lets a banned,
+kicked, muted or never-joined user post into, or appear present in, every federated copy of the room.
+(Since 1.10.11.)
+
 ### Presence probes and PEP reads
 
 ```
@@ -451,6 +503,8 @@ Prevents a write outside the region the geometry accounted for.
 | Room federation-enabled | `muc-forward` injection | drop |
 | Active mapping exists | `muc-forward` injection | drop |
 | Mapping is with `src` | `muc-forward` injection | drop |
+| Room identity elements | `muc-forward` message injection | strip; fresh stanza-id |
+| Room accepted it (sender side) | outbound groupchat and join | do not forward |
 | Lifecycle state | mapping accept/reject/disable/enable | drop |
 | Subscription | presence probe answering | do not answer |
 | PEP access model | `iq-forward` PEP items GET | `forbidden` |

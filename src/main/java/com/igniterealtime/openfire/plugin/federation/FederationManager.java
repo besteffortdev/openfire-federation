@@ -6,6 +6,7 @@ import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationIQHandler;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomMessageIds;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationPacketInterceptor;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
 import org.jivesoftware.openfire.SessionManager;
@@ -73,6 +74,7 @@ public class FederationManager {
     private final UserDirectory          userDirectory   = new UserDirectory();
     private final BookmarkInjector       bookmarkInjector = new BookmarkInjector();
     private final FederationFileConfig   fileConfig      = new FederationFileConfig();
+    private final RoomMessageIds         roomMessageIds  = new RoomMessageIds();
     private       com.igniterealtime.openfire.plugin.federation.files.FileRelayManager fileRelay;
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
@@ -2634,4 +2636,5 @@ public class FederationManager {
     public BookmarkInjector       getBookmarkInjector() { return bookmarkInjector; }
     public com.igniterealtime.openfire.plugin.federation.files.FileRelayManager getFileRelay() { return fileRelay; }
     public FederationIQHandler    getIQHandler()     { return iqHandler;      }
+    public RoomMessageIds         getRoomMessageIds() { return roomMessageIds; }
 }

@@ -8,7 +8,9 @@ import org.xmpp.packet.JID;
 import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.interceptor.PacketInterceptor;
 import org.jivesoftware.openfire.interceptor.PacketRejectedException;
+import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.stanzaid.StanzaIDUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.IQ;
@@ -17,6 +19,7 @@ import org.xmpp.packet.Packet;
 import org.xmpp.packet.Presence;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Intercepts MUC packets and forwards them to all mapped federation peers.
@@ -317,6 +320,8 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
         if (mappings.isEmpty()) return;
 
+        if (!acceptedByRoom(msg, roomJid)) return;
+
         var relay = manager.getFileRelay();
         boolean filesOn = manager.getRoomManager().isFilesEnabled(roomJid);
 
@@ -341,6 +346,38 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         }
     }
 
+    /**
+     * Whether the local room accepted {@code msg}. This interceptor sees every groupchat a local client
+     * sent to the room, including ones the room refused: a sender who never joined, was banned or
+     * kicked, or has no voice. Before this check those were forwarded anyway, and appeared in every
+     * federated copy of the room.
+     *
+     * <p>A public message counts as accepted when Openfire fired its message-received event for it,
+     * which it does only after broadcasting (recorded by {@code RoomCreationListener}). A subject
+     * change has no such event that names the message: it counts as accepted when the sender is an
+     * occupant and the room's subject is now the one requested.
+     */
+    private boolean acceptedByRoom(Message msg, String roomJid) {
+        MUCRoom room = manager.findLocalMucRoom(roomJid);
+        if (room == null || msg.getFrom() == null) return false;
+        boolean accepted;
+        if (room.getRoomHistory().isSubjectChangeRequest(msg)) {
+            accepted = room.getOccupantByFullJID(msg.getFrom()) != null
+                    && Objects.equals(room.getSubject(), msg.getSubject());
+        } else {
+            var ids = manager.getRoomMessageIds();
+            String sid = StanzaIDUtil.findFirstUniqueAndStableStanzaID(msg, roomJid);
+            accepted = ids.consumeAccepted(roomJid, RoomMessageIds.keyOf(sid, msg.getID(), msg.getFrom().toString()));
+            // The id now travels to every peer and comes back in their copies of the room: remember it
+            // here so a peer cannot hand it back on a different message (see FederationIQHandler.stampRoomIdentity).
+            if (accepted && sid != null) ids.claim(roomJid, sid);
+        }
+        if (!accepted) {
+            Log.info("Not forwarding a groupchat from {} to {}: the room did not accept it", msg.getFrom(), roomJid);
+        }
+        return accepted;
+    }
+
     // ── Presence forwarding (join / leave) ────────────────────────────────────
 
     private void handlePresence(Presence pres) {
@@ -354,6 +391,18 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (roomJid == null) return;
 
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
+        if (mappings.isEmpty()) return;
+
+        // A join or status change counts only if the room let the sender in: a refused join (banned,
+        // members-only, wrong password, room full) was forwarded too, and showed the user as present in
+        // every federated copy. A leave is forwarded as is: it only ever removes the sender's own nick.
+        if (pres.getType() == null) {
+            MUCRoom room = manager.findLocalMucRoom(roomJid);
+            if (room == null || room.getOccupantByFullJID(pres.getFrom()) == null) {
+                Log.info("Not forwarding presence from {} to {}: the room did not admit it", pres.getFrom(), roomJid);
+                return;
+            }
+        }
         for (RoomMapping mapping : mappings) {
             forwardToMapped(pres, mapping, null);
         }

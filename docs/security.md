@@ -196,6 +196,25 @@ Room traffic is also bound to the mapping it arrives through: injected messages 
 through a server that holds an **active mapping on that specific room**. Before 1.10.8, any active
 mapping on the room sufficed, so a peer could write into a room mapped only to somebody else.
 
+## Room message identity and acceptance
+
+Clients react to, reply to and retract group-chat messages by the room's stanza-id (XEP-0359) and tell
+occupants apart by occupant-id (XEP-0421). Since 1.10.10 an injected message carries both. Its stanza-id
+is the origin room's id, re-stamped for the local room, so a message has the same id in every copy of
+the room. Three rules keep that from being abused (since 1.10.11):
+
+- Only the stanza-id stamped by the **origin room** is reused. The origin server strips a forged one
+  claiming that room, so a user cannot choose it. Any other stanza-id in the payload is ignored.
+- An id the local room has already used (last 2,000 per room) gets a fresh one instead, logged as
+  `SECURITY:`, so a peer server cannot make two messages share an id.
+- Peer-supplied stanza-id and occupant-id elements are always removed. The occupant-id is computed
+  locally.
+
+The forwarder also sends on **only what the local room accepted**. A message from a user who is not in
+the room, or is banned, kicked or muted, and a join the room refused, used to be forwarded anyway and
+appeared in every federated copy of the room. Such stanzas are now logged ("Not forwarding …: the room
+did not accept it") and stay local.
+
 ## Presence and PEP privacy
 
 Two server-side answers given on a user's behalf follow that user's own access rules (since 1.10.8):

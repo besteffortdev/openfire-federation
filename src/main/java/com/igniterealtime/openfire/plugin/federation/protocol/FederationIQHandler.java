@@ -63,8 +63,12 @@ public class FederationIQHandler extends IQHandler {
 
     private static final String NS_STANZA_ID   = "urn:xmpp:sid:0";
     private static final String NS_OCCUPANT_ID = "urn:xmpp:occupant-id:0";
-    /** A peer-supplied stanza-id we reuse verbatim: Openfire's own UUIDs and similar opaque tokens. */
-    private static final Pattern REUSABLE_STANZA_ID = Pattern.compile("[A-Za-z0-9._:-]{1,128}");
+    /**
+     * A peer-supplied stanza-id we reuse verbatim: Openfire's UUIDs and similar opaque tokens. At least
+     * 16 characters, so it cannot equal the small numeric id Monitoring's MAM falls back to for an
+     * archived message that has no stanza-id of its own (federated messages archived before 1.10.10).
+     */
+    private static final Pattern REUSABLE_STANZA_ID = Pattern.compile("[A-Za-z0-9._:-]{16,128}");
 
     private final IQHandlerInfo   info;
     private final FederationManager manager;
@@ -1742,21 +1746,37 @@ public class FederationIQHandler extends IQHandler {
      * before our post-processing forwarder sees it) and every hop relays it unchanged. Reusing its
      * {@code id} with {@code by} set to this room gives a message the same ID in every copy of the
      * room. A reaction made on any server then names a message every other server knows, with no ID
-     * translation table. Every incoming stanza-id/occupant-id is dropped first: a peer must not be
-     * able to assert one in this room's name.
+     * translation table.
+     *
+     * <p>Only the stanza-id stamped by the origin room is reused: {@code by} must equal the payload's
+     * {@code to}, the room it was sent to. The origin server strips any client-supplied stanza-id that
+     * claims its own room, so a user cannot choose that one, while one with any other {@code by} is
+     * whatever the client wrote. An id this room has already used gets a fresh one instead, so a peer
+     * cannot make two messages share an id. Every incoming stanza-id/occupant-id is dropped: a peer
+     * must not assert one in this room's name.
      */
     private void stampRoomIdentity(Element msgEl, MUCRoom room, String senderNick) {
         String roomJid = room.getJID().toBareJID();
+        String originRoom = bareJidOf(msgEl.attributeValue("to"));
         String id = null;
         for (Element sid : msgEl.elements(QName.get("stanza-id", NS_STANZA_ID))) {
             String candidate = sid.attributeValue("id");
-            if (id == null && !roomJid.equals(sid.attributeValue("by"))
+            if (id == null && originRoom != null && !originRoom.equals(roomJid)
+                    && originRoom.equals(bareJidOf(sid.attributeValue("by")))
                     && candidate != null && REUSABLE_STANZA_ID.matcher(candidate).matches()) {
                 id = candidate;
             }
             msgEl.remove(sid);
         }
-        if (id == null) id = UUID.randomUUID().toString();
+        if (id != null && !manager.getRoomMessageIds().claim(roomJid, id)) {
+            Log.warn("SECURITY: relayed message from {} into {} reuses stanza-id {} already used in the room; "
+                   + "giving it a fresh one", senderNick, roomJid, id);
+            id = null;
+        }
+        if (id == null) {
+            id = UUID.randomUUID().toString();
+            manager.getRoomMessageIds().claim(roomJid, id);
+        }
         msgEl.addElement(QName.get("stanza-id", NS_STANZA_ID))
              .addAttribute("id", id)
              .addAttribute("by", roomJid);
@@ -1767,6 +1787,16 @@ public class FederationIQHandler extends IQHandler {
         String occupantId = occupantIdFor(room, senderNick);
         if (occupantId != null) {
             msgEl.addElement(QName.get("occupant-id", NS_OCCUPANT_ID)).addAttribute("id", occupantId);
+        }
+    }
+
+    /** Normalized bare JID of {@code jid}, or null if absent or unparseable. */
+    private static String bareJidOf(String jid) {
+        if (jid == null) return null;
+        try {
+            return new JID(jid).toBareJID();
+        } catch (Exception e) {
+            return null;
         }
     }
 
