@@ -120,10 +120,10 @@
     Works like Openfire's own Contact List (Roster) Sharing, across servers. On <em>Contact Sharing</em>,
     expand a local group (▸) and tick the servers to share it with. Only groups are shared, never single
     users. Each server receives one list: the members of every group shared with it, kept in step with
-    group membership. A list crosses an untrusted link only where that link allows it: tick
-    <em>Allow shared contact lists across this link</em> in the untrusted peer's settings panel (Peer
-    Servers tab). It then follows the link's exposed servers: the sharing server must be exposed on the
-    way out, the destination on the way in. The admins on both ends of the link must allow it.
+    group membership. A list crosses an untrusted link only where the server sending across it allows
+    it: tick <em>Send shared contact lists</em> in the untrusted peer's settings panel (Peer Servers
+    tab). Nothing is needed on the receiving side of the link. The list still follows the link's exposed
+    servers: the sharing server must be exposed on the way out, the destination on the way in.
 </p>
 <p>
     Below that, each server that shares contacts with you appears as a card with its list.

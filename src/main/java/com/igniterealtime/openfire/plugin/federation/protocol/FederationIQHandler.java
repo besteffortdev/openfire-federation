@@ -1540,12 +1540,9 @@ public class FederationIQHandler extends IQHandler {
                      element, fromDomain, origin, destination);
             return;
         }
+        // Arriving over an untrusted link needs no per-link flag: that flag gates sending, and the
+        // receiving admin still decides what a list does by mapping it. The exposure model applies.
         if (manager.getPeerRegistry().isUntrusted(fromDomain)) {
-            if (!manager.getPeerRegistry().isContactListsAllowed(fromDomain)) {
-                Log.warn("SECURITY: dropping {} from untrusted peer {} — contact lists are not allowed on that "
-                       + "link here", element, fromDomain);
-                return;
-            }
             if (!claimedOriginOk(fromDomain, origin, element)) return;
             if (!oneToOneExposureOk(fromDomain, destination, localDomain, element)) return;
         }
@@ -1561,11 +1558,13 @@ public class FederationIQHandler extends IQHandler {
                 return;
             }
             if (manager.getPeerRegistry().isUntrusted(nextHop)) {
-                boolean allowed = manager.getPeerRegistry().isContactListsAllowed(nextHop);
+                // Only a list leaving over the link needs the link's flag; a request carries no contacts.
+                boolean allowed = "contact-list-request".equals(element)
+                               || manager.getPeerRegistry().isContactListsAllowed(nextHop);
                 if (!allowed || !manager.getPeerRegistry().getExposedServers(nextHop).contains(origin)) {
                     Log.warn("SECURITY: not relaying {} from {} toward {} — the next hop {} is untrusted and {}",
                              element, origin, destination, nextHop,
-                             allowed ? origin + " is not exposed to it" : "contact lists are not allowed on that link here");
+                             allowed ? origin + " is not exposed to it" : "sending contact lists is not allowed on that link here");
                     return;
                 }
             }

@@ -503,7 +503,7 @@ public class FederationApiServlet extends HttpServlet {
             ContactListManager.ReceivedList list = received.get(o);
             ContactListManager.ListMapping m = mappings.get(o);
             b.append("{\"origin\":\"").append(esc(o))
-             .append("\",\"reachable\":").append(cl.canExchangeWith(o))
+             .append("\",\"reachable\":").append(cl.canRequestFrom(o))
              .append(",\"receivedAt\":").append(list == null ? "null" : String.valueOf(list.receivedAt()))
              .append(",\"count\":").append(list == null ? 0 : list.contacts().size())
              .append(",\"groupName\":\"").append(esc(ContactListManager.groupNameFor(o)))

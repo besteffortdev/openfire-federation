@@ -310,13 +310,13 @@ function renderPeerDetailRow(p) {
         outbound = '<p class="empty" style="margin:4px 0">Trusted — this peer sees the full topology and all federated rooms.</p>';
     }
 
-    // ── Per-link permission for shared contact lists (untrusted links only; trusted ones always carry them). ──
+    // ── Per-link permission to send shared contact lists (untrusted links only; trusted ones always carry them). ──
     const contactLists = p.untrusted ? `
                         <label class="exposed-room" style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px;align-items:flex-start">
                             <input type="checkbox" ${p.contactListsAllowed ? 'checked' : ''}
                                    onchange="setPeerContactLists('${dom}', this.checked)">
-                            <span><strong>Allow shared contact lists across this link</strong><br>
-                                <small>Only for the exposed servers. The admin of ${dom} must allow it on their side too.</small></span>
+                            <span><strong>Send shared contact lists to ${dom}</strong><br>
+                                <small>Lists from this server and the exposed servers can cross this link. Nothing is needed on ${dom}'s side to receive them.</small></span>
                         </label>` : '';
 
     // ── Inbound: what this peer advertises through to us, each deniable per-link. ──

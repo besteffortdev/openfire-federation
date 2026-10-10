@@ -327,7 +327,7 @@ public class ContactListManager {
         origins.addAll(received.keySet());
         Set<String> originsUp = new HashSet<>();
         for (String origin : origins) {
-            if (!canExchangeWith(origin)) continue;
+            if (!canRequestFrom(origin)) continue;
             originsUp.add(origin);
             if (!originsUpLastTick.contains(origin)) sendRequest(origin);
         }
@@ -703,20 +703,33 @@ public class ContactListManager {
     // ── Helpers ─────────────────────────────────────────────────────────────────
 
     /**
-     * Whether contact lists may travel to/from {@code domain}: it has a route, and if our own next hop
-     * on it is an untrusted peer, that link allows contact lists and this server is exposed to it. An
-     * untrusted link further along is checked by the servers on either side of it (see
-     * {@code FederationIQHandler}); this server cannot see their settings, so such a route qualifies
-     * here and is flagged by {@link #crossesUntrusted}.
+     * Whether this server may send its contact list to {@code domain}: it has a route, and if our own
+     * next hop on it is an untrusted peer, that link allows sending contact lists and this server is
+     * exposed to it. An untrusted link further along is checked by the server sending across it (see
+     * {@code FederationIQHandler}); this server cannot see its settings, so such a route qualifies here
+     * and is flagged by {@link #crossesUntrusted}.
      */
     public boolean canExchangeWith(String domain) {
+        return reachable(domain, true);
+    }
+
+    /**
+     * Whether this server may ask {@code domain} for its list. A request carries no contacts, so the
+     * per-link flag does not apply, only the exposure model.
+     */
+    public boolean canRequestFrom(String domain) {
+        return reachable(domain, false);
+    }
+
+    private boolean reachable(String domain, boolean sendingList) {
         if (domain == null || domain.equals(localDomain())) return false;
         Optional<RouteEntry> route = manager.getRoutingTable().getRoute(domain);
         if (route.isEmpty()) return false;
         String nextHop = route.get().nextHop();
         PeerRegistry peers = manager.getPeerRegistry();
-        return !peers.isUntrusted(nextHop)
-            || (peers.isContactListsAllowed(nextHop) && peers.getExposedServers(nextHop).contains(localDomain()));
+        if (!peers.isUntrusted(nextHop)) return true;
+        return (!sendingList || peers.isContactListsAllowed(nextHop))
+            && peers.getExposedServers(nextHop).contains(localDomain());
     }
 
     /** True when the route to {@code domain} crosses an untrusted link (for the admin page). */

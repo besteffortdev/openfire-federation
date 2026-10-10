@@ -62,15 +62,14 @@ still holds the old list.
 ```
 if destination or origin is missing, or origin == our own domain → drop
 if the sending link is UNTRUSTED:
-    if contact lists are not allowed on this link here → drop, log SECURITY
     if origin is not the sender or a server routed through it → drop, log SECURITY
     if (destination, or our own domain when we are it) is not exposed to the sender → drop, log SECURITY
 if via contains our own domain                  → drop (loop)
 if destination != our own domain:
     next := next hop toward destination; none   → drop
     if next is an UNTRUSTED peer:
-        if contact lists are not allowed on that link here, or origin is not exposed to next
-                                                → drop, log SECURITY
+        if origin is not exposed to next, or (contact-list and sending contact lists is not
+           allowed on that link here)           → drop, log SECURITY
     relay to next with via + our own domain
     stop
 contact-list-request → send our list for `origin` (empty if nothing is shared with it)
@@ -84,19 +83,22 @@ Sending, relaying and accepting all refuse one, and a sender only targets server
 trusted end to end (no *edge* flag, [03](03-routing.md#untrusted-peers)).
 
 A server MAY let contact lists cross its untrusted links. This implementation decides per link: an
-untrusted peer's settings carry an *allow shared contact lists* flag, off by default. On a link
-where it is set, the link's exposure model applies, the same rule as the 1:1 forwards
-([09](09-validation.md)):
+untrusted peer's settings carry a *send shared contact lists* flag, off by default. The flag gates
+only a `contact-list` **leaving** over that link. Receiving needs no flag: sharing is one-way, and the
+receiving admin still decides what a list does by mapping it. A `contact-list-request` carries no
+contacts, so it needs no flag either. The link's exposure model applies in both directions, the same
+rule as the 1:1 forwards ([09](09-validation.md)):
 
-- **Leaving over an untrusted link:** the `origin` must be a server exposed to that peer. A sender
-  whose own next hop is untrusted checks this before sending. A relay checks it before re-emitting.
+- **Leaving over an untrusted link:** the `origin` must be a server exposed to that peer, and for a
+  `contact-list` the link's flag must be set. A sender whose own next hop is untrusted checks this
+  before sending. A relay checks it before re-emitting.
 - **Arriving over an untrusted link:** the `origin` must be the peer, or a server routed through it.
   The destination must be one exposed to that peer: this server when it is the destination, or the
   server being relayed to.
 
-Each side applies only its own flag and its own exposed set, so a list crosses only when both
-admins of the link allow it. A sender whose route crosses an untrusted link further away cannot see
-those checks. Its list is dropped (and logged) there if they fail.
+So a list crosses an untrusted link when the admin on the sending side of that link allows it. A
+sender whose route crosses an untrusted link further away cannot see those checks. Its list is
+dropped (and logged) there if they fail.
 
 **A server may only share its own users.** A `contact` whose domain is not `origin` is dropped, so a
 server cannot insert another server's users into your rosters.
