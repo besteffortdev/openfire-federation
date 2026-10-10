@@ -305,17 +305,19 @@ function renderPeerDetailRow(p) {
             <div style="margin-top:8px">
                 <button class="btn-small btn-primary" onclick="saveExposedServers('${dom}')">Save</button>
                 <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
-            </div>
-            <label class="exposed-room" style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
-                <input type="checkbox" ${p.contactListsAllowed ? 'checked' : ''}
-                       onchange="setPeerContactLists('${dom}', this.checked)">
-                <span><strong>Allow shared contact lists across this link</strong><br>
-                    <small>Lists from checked servers may go out to ${dom}; lists from ${dom} may come in for checked
-                    servers. The admin of ${dom} must allow it on their side too.</small></span>
-            </label>`;
+            </div>`;
     } else {
         outbound = '<p class="empty" style="margin:4px 0">Trusted — this peer sees the full topology and all federated rooms.</p>';
     }
+
+    // ── Per-link permission for shared contact lists (untrusted links only; trusted ones always carry them). ──
+    const contactLists = p.untrusted ? `
+                        <label class="exposed-room" style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px;align-items:flex-start">
+                            <input type="checkbox" ${p.contactListsAllowed ? 'checked' : ''}
+                                   onchange="setPeerContactLists('${dom}', this.checked)">
+                            <span><strong>Allow shared contact lists across this link</strong><br>
+                                <small>Only for the exposed servers. The admin of ${dom} must allow it on their side too.</small></span>
+                        </label>` : '';
 
     // ── Inbound: what this peer advertises through to us, each deniable per-link. ──
     const denied = (p.deniedRoutes || []).slice().sort();
@@ -350,6 +352,7 @@ function renderPeerDetailRow(p) {
                             ${actionBtns}
                             <button class="btn-small btn-danger" onclick="removePeer('${dom}')">Remove peer</button>
                         </div>
+                        ${contactLists}
                     </div>
                     <div class="exposed-col">
                         <div class="exposed-col-h">↑ Exposed to ${dom}
