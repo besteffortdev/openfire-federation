@@ -63,7 +63,7 @@ Add the `fed-file` annotation and `file-request`/`-offer`/`-chunk`/`-error`.
 
 - `mapping-ping` / `mapping-pong` — never answering simply means peers never flag your mappings as
   broken. Costs you diagnostics, breaks nothing.
-- `user-directory` / `bookmark-push` — ignore the actions and no peer notices.
+- `contact-list` / `contact-list-request` — ignore the actions and no peer notices.
 - `peer-disable` — treat an inbound one as a withdrawal you refuse to re-establish automatically.
 - Untrusted-peer mode — if you have no exposure model, omit the `untrusted` attribute and treat all
   peers as trusted. You will be blocked by a peer that considers you untrusted, which is the correct
@@ -102,11 +102,19 @@ Ordered by how expensive the mistake is to find later.
 - [ ] Set `muc#user` `<item/>`'s `jid` to the payload's original full `from`
 - [ ] Mark roster-sync presences with `<fed-origin/>` and never reciprocate one
 - [ ] Preserve `src` across relay hops; overwrite it only when fanning out
+- [ ] Leave the payload's `to` and its origin `<stanza-id/>` untouched when forwarding or relaying
+- [ ] On injection, stamp `<stanza-id by='this room'/>` (reusing the origin's id) and a local `<occupant-id/>`,
+      and archive the stamped copy
+- [ ] Add the same `<occupant-id/>` to injected presence
+- [ ] Handle an injected `<retract><moderated/></retract>` as a moderation, never as an ordinary message
 
 **Security** — every rule in [09-validation.md](09-validation.md), especially:
 - [ ] Payload `from` validation at **every** hop, relay included
 - [ ] Payload `to` binding at the final hop
 - [ ] Federation-enabled **and** active-mapping checks before injecting
+- [ ] Forward a groupchat message or join only if your own room accepted it
+- [ ] Reuse a stanza-id only when `by` is the origin room and the id is new to the room; never copy an occupant-id
+- [ ] Forward and apply a moderation only for a message written by a user of the moderating room's server
 - [ ] Constant-time comparison for the file share capability
 
 **Files**
@@ -288,6 +296,8 @@ zed types in gamma's room. gamma forwards toward alpha:
       <message type='groupchat' from='zed@gamma.example/desktop'
                to='ops@conference.gamma.example'>
         <body>deploy is green</body>
+        <stanza-id xmlns='urn:xmpp:sid:0' by='ops@conference.gamma.example'
+                   id='5f1c9a2e-0b7d-4c1e-9f3a-6d2b8e4a7c10'/>
       </message>
     </muc-forward>
   </federation>
@@ -301,12 +311,16 @@ alpha injects it to amy as:
          from='ops@conference.alpha.example/zed@gamma.example'
          to='amy@alpha.example/phone'>
   <body>deploy is green</body>
+  <stanza-id xmlns='urn:xmpp:sid:0' by='ops@conference.alpha.example'
+             id='5f1c9a2e-0b7d-4c1e-9f3a-6d2b8e4a7c10'/>
+  <occupant-id xmlns='urn:xmpp:occupant-id:0' id='d756fbaca69a80d24314d370fa790da46bc7440f'/>
   <fed-origin xmlns='urn:xmpp:federation:1'/>
 </message>
 ```
 
 amy sees an ordinary groupchat message from a participant nicknamed `zed@gamma.example`. Her client
-knows nothing about the overlay, and neither does zed's.
+knows nothing about the overlay, and neither does zed's. The stanza-id is gamma's id with alpha's room
+as `by`, so if amy reacts, gamma and every other copy of the room know which message she means.
 
 ## Version compatibility
 
@@ -324,6 +338,9 @@ ones fall back to a documented default. The consequences that actually bite:
 | `token` on `fed-file` | holder with no stored token serves anyway | **Fail-closed the other way**: a 1.10.6 origin's shares cannot be fetched by a peer that drops the attribute. |
 | Recipient binding (rule 5) | older peers do not check | They will relay a mis-addressed payload onward. Implement it regardless of what your peers do. |
 | Sender identity, claimed origins, lifecycle states, probe/PEP access (1.10.8) | older peers do not check | Each is enforced by the receiver alone. An older peer in the path does not weaken a newer receiver's checks, but it leaves its own users exposed to the attacks these close. |
+| Room stanza-id / occupant-id on injected messages (1.10.10) | older receivers deliver the origin's stanza-id unchanged | Reactions, replies and retractions fail on an older receiver's side only: its clients see no stanza-id for their own room. Nothing breaks for anyone else. |
+| Moderation relay (1.10.12) | older receivers inject the announcement as an ordinary message | A body-less groupchat from a room nick. Clients ignore it as a moderation, so the message stays visible on that receiver only. Older senders never relay moderations. |
+| Sender-side acceptance gate on room traffic (1.10.11) | older peers forward refused traffic | Only the sender can enforce it, so a refused message or join from behind an older peer still reaches you. Nothing on the receiving side detects it. |
 | Egress exposure gate on 1:1 traffic and advertisement relay (1.10.9) | older peers do not check | Enforced by the server **in front of** the untrusted edge, so it protects only the topology behind a gateway that implements it. A 1.10.8+ receiver still drops the claimed-origin advertisements an older gateway leaks, and logs them. |
 
 Two upgrades in this implementation's history required coordinated action, worth knowing if you meet a

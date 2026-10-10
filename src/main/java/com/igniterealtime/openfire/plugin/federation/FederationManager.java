@@ -6,6 +6,7 @@ import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationIQHandler;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomMessageIds;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationPacketInterceptor;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
 import org.jivesoftware.openfire.SessionManager;
@@ -70,9 +71,9 @@ public class FederationManager {
     private final FederationRoutingTable routingTable    = new FederationRoutingTable();
     private final FederatedRoomManager   roomManager     = new FederatedRoomManager();
     private final RoomDefaultsManager    roomDefaults    = new RoomDefaultsManager();
-    private final UserDirectory          userDirectory   = new UserDirectory();
-    private final BookmarkInjector       bookmarkInjector = new BookmarkInjector();
+    private final ContactListManager     contactLists    = new ContactListManager(this);
     private final FederationFileConfig   fileConfig      = new FederationFileConfig();
+    private final RoomMessageIds         roomMessageIds  = new RoomMessageIds();
     private       com.igniterealtime.openfire.plugin.federation.files.FileRelayManager fileRelay;
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
@@ -87,6 +88,8 @@ public class FederationManager {
         peerRegistry.load();
         roomManager.load();
         roomDefaults.load();
+        contactLists.load();
+        LegacyBookmarkCleanup.runOnceInBackground();
 
         // Transparent HTTP-upload federation: staging store, overlay pull protocol, download servlet.
         fileRelay = new com.igniterealtime.openfire.plugin.federation.files.FileRelayManager(this);
@@ -101,8 +104,7 @@ public class FederationManager {
         s2sMonitor = new S2SMonitor(peerRegistry, routingTable, roomManager, this);
         s2sMonitor.start();
 
-        // Republish our directory live as local users come/go/change presence (only when publishing
-        // is enabled; the S2S poll tick remains a backstop).
+        // Relay local users' presence changes to federated rooms and contacts as they happen.
         presenceListener = new PresenceEventListener() {
             @Override public void availableSession(ClientSession s, Presence p) {
                 onLocalPresenceEvent(s, p);
@@ -143,13 +145,11 @@ public class FederationManager {
     public FederationFileConfig getFileConfig() { return fileConfig; }
 
     /**
-     * A local user's presence changed. Two effects: (1) refresh the published directory if publishing
-     * is on; (2) forward the user's new presence to mapped peers for any federated room they occupy so
-     * an in-room status change propagates live (a broadcast presence never reaches the interceptor).
+     * A local user's presence changed: forward it to mapped peers for any federated room they occupy,
+     * and to their federated contacts, so a status change propagates live (a broadcast presence never
+     * reaches the interceptor).
      */
     private void onLocalPresenceEvent(ClientSession session, Presence presence) {
-        if (FederationProperties.DIRECTORY_PUBLISH.getValue()) publishDirectory();
-        if (FederationProperties.BOOKMARK_PUSH.getValue())     pushBookmarks();
         try {
             if (session != null && session.getAddress() != null) {
                 forwardLocalOccupantPresence(session.getAddress(), presence);        // MUC occupants
@@ -166,17 +166,26 @@ public class FederationManager {
      * server-generated directed copies to remote subscribers (and probe answers) bypass the packet
      * interceptor, so without this a federated contact never sees the user go online/away/offline.
      * Mirrors the MUC fix in {@link #forwardLocalOccupantPresence}. Direct peers are left to native
-     * S2S, which delivers subscriber presence correctly on its own.
+     * S2S, which delivers subscriber presence correctly on its own — except for contacts who see the
+     * user through a shared contact list: the user's roster has no entry for them, so Openfire sends
+     * them nothing natively, and they are relayed to whatever the hop count.
      */
     public void forwardPresenceToRemoteSubscribers(JID user, Presence presence) {
-        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
         if (user == null || user.getNode() == null) return;
         if (!XMPPServer.getInstance().isLocal(user)) return;
 
-        for (String bare : remoteSubscriberTargets(user)) {
-            JID contact = new JID(bare);
-            if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
-            forwardDirectPresence(directedPresence(user, contact, presence));
+        Set<String> done = new java.util.HashSet<>();
+        if (FederationProperties.DIRECT_MSG_RELAY.getValue()) {
+            for (String bare : remoteSubscriberTargets(user)) {
+                JID contact = new JID(bare);
+                if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
+                forwardDirectPresence(directedPresence(user, contact, presence));
+                done.add(bare);
+            }
+        }
+        for (String bare : contactLists.subscribersOf(user)) {
+            if (done.contains(bare)) continue;
+            forwardDirectPresence(directedPresence(user, new JID(bare), presence));
         }
     }
 
@@ -258,7 +267,40 @@ public class FederationManager {
     /** True when {@code contact}'s bare JID is one of {@code localUser}'s presence subscribers. */
     public boolean isPresenceSubscriber(JID localUser, JID contact) {
         if (contact == null || contact.getNode() == null) return false;
-        return remoteSubscriberTargets(localUser).contains(contact.toBareJID());
+        return remoteSubscriberTargets(localUser).contains(contact.toBareJID())
+            || contactLists.isAuthorizedContact(localUser, contact);
+    }
+
+    /**
+     * Sends a shared local user's current presence (unavailable when offline) to a contact on a server
+     * the user is shared with. Relayed over the overlay whatever the hop count: the user's roster has
+     * no entry for the contact, so Openfire would not send it natively even to a direct peer.
+     */
+    public void pushContactPresenceTo(JID contact, JID localUser) {
+        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
+        if (contact == null || contact.getNode() == null) return;
+        Presence cur = currentPresenceOf(localUser);
+        Presence p;
+        if (cur != null) {
+            p = directedPresence(localUser, contact, cur);
+        } else {
+            p = new Presence(Presence.Type.unavailable);
+            p.setFrom(localUser.asBareJID());
+            p.setTo(contact);
+        }
+        forwardDirectPresence(p);
+    }
+
+    /** {@link #pushLocalPepItemsTo} for a contact who sees the user through a shared contact list, on any hop count. */
+    public void pushContactPepItemsTo(JID contact, JID localUser) {
+        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
+        if (contact == null || contact.getNode() == null) return;
+        pushPepItems(contact, localUser);
+    }
+
+    /** True when {@code domain} is reached over the overlay through at least one intermediate server. */
+    public boolean isMultiHopDomain(String domain) {
+        return isMultiHopPeer(domain);
     }
 
     /**
@@ -304,7 +346,10 @@ public class FederationManager {
         if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
         if (subscriber == null || subscriber.getNode() == null) return;
         if (!isMultiHopPeer(subscriber.getDomain())) return;
+        pushPepItems(subscriber, localUser);
+    }
 
+    private void pushPepItems(JID subscriber, JID localUser) {
         PEPService pep;
         try {
             PEPServiceManager mgr = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();
@@ -387,9 +432,13 @@ public class FederationManager {
         if (!XMPPServer.getInstance().isLocal(publisher)) return;
         if (!isPushPepNode(nodeId)) return;
 
+        Set<String> targets = new LinkedHashSet<>();
         for (String bare : remoteSubscriberTargets(publisher)) {
+            if (isMultiHopPeer(new JID(bare).getDomain())) targets.add(bare);   // direct peers: native S2S
+        }
+        targets.addAll(contactLists.subscribersOf(publisher));   // shared-list contacts: any hop count
+        for (String bare : targets) {
             JID subscriber = new JID(bare);
-            if (!isMultiHopPeer(subscriber.getDomain())) continue;      // direct peers: native S2S
             Message event = buildPepEventMessage(publisher.asBareJID(), subscriber, nodeId, itemId, payload);
             if (forwardDirectMessage(event)) {
                 Log.info("re-pushed PEP node '{}' (item {}) of {} to subscriber {} on publish",
@@ -567,7 +616,7 @@ public class FederationManager {
         if (interceptor != null)
             InterceptorManager.getInstance().removeInterceptor(interceptor);
 
-        bookmarkInjector.shutdown();
+        contactLists.stop();
 
         if (fileRelay != null) fileRelay.stop();
 
@@ -1302,8 +1351,8 @@ public class FederationManager {
             evictAllVirtualOccupantsFromDomain(dest);       // by ORIGIN home domain
             evictOccupantsForLostHub(dest);                 // by mapped hub (catches un-routed origins)
             roomManager.clearRemoteRooms(dest);
-            userDirectory.clearUsersForOrigin(dest);        // drop the gone server's published users
-            bookmarkInjector.applyForOrigin(dest, java.util.Collections.emptyList());  // withdraw its injected bookmarks
+            // Contact lists from `dest` are deliberately kept: dropping them would empty every user's
+            // contact list on each link flap. They go when the origin withdraws them or is unmapped.
         }
     }
 
@@ -1389,6 +1438,7 @@ public class FederationManager {
     // plugin (re)starts would otherwise never be flagged and its ghost occupants never evicted.
     private static final String PROBE_CAPABLE_KEY = "plugin.federation.probeCapableDomains";
     private final Set<String> probeCapable = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final int MAX_PROBE_CAPABLE = 1024;
     private volatile boolean probeCapableLoaded = false;
 
     private Set<String> probeCapable() {
@@ -1409,6 +1459,10 @@ public class FederationManager {
     /** Records (persistently) that this domain answers mapping probes, enabling break detection toward it. */
     public void markProbeCapable(String domain) {
         if (domain == null || domain.isEmpty()) return;
+        // Persisted, so only for a server we actually route to, and bounded: a peer can claim any
+        // origin on a mapping-ping.
+        if (routingTable.findNextHop(domain).isEmpty()) return;
+        if (probeCapable().size() >= MAX_PROBE_CAPABLE && !probeCapable().contains(domain)) return;
         if (probeCapable().add(domain)) {
             JiveGlobals.setProperty(PROBE_CAPABLE_KEY, String.join(",", probeCapable));
         }
@@ -1471,7 +1525,9 @@ public class FederationManager {
      * older peers — the newest ping's send time is used for the RTT instead).
      */
     public void onMappingPong(String remoteDomain, String echoedTs) {
-        MappingPingState st = mappingPingStates.computeIfAbsent(remoteDomain, k -> new MappingPingState());
+        // State exists only for domains we map to and probe; a pong for any other is unsolicited.
+        MappingPingState st = mappingPingStates.get(remoteDomain);
+        if (st == null) return;
         boolean wasBroken = st.broken;
         st.everPonged = true;
         markProbeCapable(remoteDomain);
@@ -1663,196 +1719,7 @@ public class FederationManager {
         }
     }
 
-    // ── User directory + 1:1 message relay ─────────────────────────────────────
-
-    /**
-     * Snapshot of the last directory broadcast to ALL peers (sorted by JID for stable equality),
-     * so presence events and the S2S poll tick don't re-gossip an unchanged directory — each
-     * broadcast is relayed onward by every receiving hop, so redundant sends amplify across the
-     * mesh. Null = nothing broadcast yet (always send once). A peer that (re)connects is caught
-     * up via {@link #publishDirectoryTo}, which bypasses this guard.
-     */
-    private volatile List<UserDirectory.UserPresence> lastPublishedDirectory = null;
-    /** Same guard for {@link #pushBookmarks} broadcasts. */
-    private volatile List<UserDirectory.UserPresence> lastPushedBookmarks = null;
-
-    /** The current directory payload: online users when {@code enabled}, else an empty (withdrawal) list. */
-    private List<UserDirectory.UserPresence> directorySnapshot(boolean enabled) {
-        if (!enabled) return Collections.emptyList();
-        List<UserDirectory.UserPresence> users = new ArrayList<>(userDirectory.localOnlineUsers());
-        users.sort(java.util.Comparator.comparing(UserDirectory.UserPresence::jid));
-        return users;
-    }
-
-    /**
-     * Publishes our online-user directory to every trusted, reachable peer when publishing is
-     * enabled (default OFF). When publishing is disabled we send an EMPTY list once so peers that
-     * previously cached our users withdraw them. Untrusted peers never receive the directory.
-     * Skips the broadcast entirely when nothing changed since the last one, so it is safe (and
-     * cheap) to call from every presence event and the S2S poll tick.
-     */
-    public void publishDirectory() {
-        List<UserDirectory.UserPresence> users =
-                directorySnapshot(FederationProperties.DIRECTORY_PUBLISH.getValue());
-        if (users.equals(lastPublishedDirectory)) return;   // unchanged since last broadcast
-        lastPublishedDirectory = users;
-        for (PeerServer peer : peerRegistry.getPeers()) {
-            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
-            sendDirectoryTo(peer.getDomain(), users);
-        }
-    }
-
-    /**
-     * Sends the current directory to ONE peer regardless of the change guard — used on peer-up,
-     * where the peer's cache is empty even though our directory hasn't changed. No-op unless
-     * publishing is enabled (a fresh peer has nothing to withdraw).
-     */
-    public void publishDirectoryTo(String toDomain) {
-        if (!FederationProperties.DIRECTORY_PUBLISH.getValue()) return;
-        sendDirectoryTo(toDomain, directorySnapshot(true));
-    }
-
-    private void sendDirectoryTo(String toDomain, Collection<UserDirectory.UserPresence> users) {
-        if (isUntrusted(toDomain)) return;   // never expose our user list to an untrusted edge
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.userDirectory(toDomain, users, localDomain, null));
-        } catch (Exception e) {
-            Log.warn("Failed to send user-directory to {}: {}", toDomain, e.getMessage());
-        }
-    }
-
-    /**
-     * Records an inbound user-directory for {@code originDomain} and gossips it onward to other
-     * trusted peers not already on the {@code via} trail (multi-hop, loop-guarded — mirrors
-     * {@link #relayRoomAdvertisement}). An empty list clears the origin's cached users.
-     */
-    public void handleUserDirectory(String fromDomain, String originDomain,
-                                    Collection<UserDirectory.UserPresence> users, String via) {
-        // Trust gate (receive side): we never expose our own directory across an untrusted edge,
-        // and legitimate directory data never crosses one, so anything arriving over an untrusted
-        // link is a misbehaving/malicious peer trying to poison our view — drop it.
-        if (isUntrusted(fromDomain)) {
-            Log.warn("SECURITY: dropping user-directory from untrusted peer {} — refusing to cache its user list", fromDomain);
-            return;
-        }
-        userDirectory.setUsersForOrigin(originDomain, users);
-        for (PeerServer peer : peerRegistry.getPeers()) {
-            if (peer.getDomain().equals(fromDomain)) continue;
-            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
-            if (isUntrusted(peer.getDomain())) continue;
-            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.userDirectory(
-                              peer.getDomain(), users, originDomain, via));
-            } catch (Exception e) {
-                Log.warn("Failed to relay user-directory to {}: {}", peer.getDomain(), e.getMessage());
-            }
-        }
-    }
-
-    // ── Bookmark push (XEP-0048 connected-client advertisement) ────────────────
-
-    /**
-     * Pushes this server's connected clients to every trusted, reachable peer as a {@code
-     * bookmark-push} when {@link FederationProperties#BOOKMARK_PUSH} is enabled. When disabled we
-     * send an EMPTY list once so peers withdraw the bookmarks they previously injected for us.
-     * Untrusted peers never receive it. Skips the broadcast when nothing changed since the last
-     * one (same guard as {@link #publishDirectory}), so it is safe from every presence event and
-     * the S2S poll tick.
-     */
-    public void pushBookmarks() {
-        List<UserDirectory.UserPresence> users =
-                bookmarkSnapshot(FederationProperties.BOOKMARK_PUSH.getValue());
-        if (users.equals(lastPushedBookmarks)) return;   // unchanged since last broadcast
-        lastPushedBookmarks = users;
-        sendBookmarks(users);
-    }
-
-    /**
-     * Bookmark payloads are consumed by JID only (receivers inject one bookmark per JID and ignore
-     * presence), so strip show/status before comparing/sending — otherwise every status change of
-     * any local user would re-broadcast the whole bookmark set across the mesh.
-     */
-    private List<UserDirectory.UserPresence> bookmarkSnapshot(boolean enabled) {
-        return directorySnapshot(enabled).stream()
-                .map(u -> new UserDirectory.UserPresence(u.jid(), "", ""))
-                .collect(Collectors.toList());
-    }
-
-    /**
-     * One-shot advertisement of our current connected clients regardless of the auto-push toggle —
-     * backs the admin "Push now" button. Peers inject the bookmarks; nothing is withdrawn.
-     * Bypasses the change guard (that is the point of a manual push) but refreshes its snapshot so
-     * the next automatic push compares against what peers actually hold.
-     */
-    public void pushBookmarksNow() {
-        List<UserDirectory.UserPresence> users = bookmarkSnapshot(true);
-        lastPushedBookmarks = users;
-        sendBookmarks(users);
-    }
-
-    /**
-     * Sends the current bookmark set to ONE peer regardless of the change guard — used on peer-up,
-     * where the peer holds nothing for us even though our client list hasn't changed. No-op unless
-     * auto-push is enabled (a fresh peer has nothing to withdraw).
-     */
-    public void pushBookmarksTo(String toDomain) {
-        if (!FederationProperties.BOOKMARK_PUSH.getValue()) return;
-        sendBookmarksTo(toDomain, bookmarkSnapshot(true));
-    }
-
-    /** Sends a bookmark-push (the given user set; empty = withdrawal) to every trusted, reachable peer. */
-    private void sendBookmarks(Collection<UserDirectory.UserPresence> users) {
-        for (PeerServer peer : peerRegistry.getPeers()) {
-            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
-            sendBookmarksTo(peer.getDomain(), users);
-        }
-    }
-
-    private void sendBookmarksTo(String toDomain, Collection<UserDirectory.UserPresence> users) {
-        if (isUntrusted(toDomain)) return;   // never advertise our clients to an untrusted edge
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.bookmarkPush(toDomain, users, localDomain, null));
-        } catch (Exception e) {
-            Log.warn("Failed to send bookmark-push to {}: {}", toDomain, e.getMessage());
-        }
-    }
-
-    /**
-     * Injects an inbound {@code bookmark-push} into local users' bookmark storage and gossips it
-     * onward to other trusted peers not already on the {@code via} trail (multi-hop, loop-guarded —
-     * mirrors {@link #handleUserDirectory}). An empty list withdraws the origin's bookmarks.
-     */
-    public void handleBookmarkPush(String fromDomain, String originDomain,
-                                   Collection<UserDirectory.UserPresence> users, String via) {
-        // Trust gate (receive side): bookmark-push writes into EVERY local user's private storage.
-        // We never send it across an untrusted edge and legitimate pushes never traverse one, so a
-        // push arriving over an untrusted link can only be a hostile peer trying to inject bookmarks
-        // into our users' clients — drop it before it touches storage.
-        if (isUntrusted(fromDomain)) {
-            Log.warn("SECURITY: dropping bookmark-push from untrusted peer {} — refusing to inject into local users", fromDomain);
-            return;
-        }
-        bookmarkInjector.applyForOrigin(originDomain, users);
-        for (PeerServer peer : peerRegistry.getPeers()) {
-            if (peer.getDomain().equals(fromDomain)) continue;
-            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
-            if (isUntrusted(peer.getDomain())) continue;
-            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.bookmarkPush(
-                              peer.getDomain(), users, originDomain, via));
-            } catch (Exception e) {
-                Log.warn("Failed to relay bookmark-push to {}: {}", peer.getDomain(), e.getMessage());
-            }
-        }
-    }
+    // ── 1:1 message relay ──────────────────────────────────────────────────────
 
     /**
      * Egress counterpart of the inbound untrusted-peer exposure gate, for the three 1:1 actions: a
@@ -2630,8 +2497,8 @@ public class FederationManager {
     public FederationRoutingTable getRoutingTable()  { return routingTable;  }
     public FederatedRoomManager   getRoomManager()   { return roomManager;   }
     public RoomDefaultsManager    getRoomDefaults()  { return roomDefaults;  }
-    public UserDirectory          getUserDirectory() { return userDirectory; }
-    public BookmarkInjector       getBookmarkInjector() { return bookmarkInjector; }
+    public ContactListManager     getContactLists()  { return contactLists;  }
     public com.igniterealtime.openfire.plugin.federation.files.FileRelayManager getFileRelay() { return fileRelay; }
     public FederationIQHandler    getIQHandler()     { return iqHandler;      }
+    public RoomMessageIds         getRoomMessageIds() { return roomMessageIds; }
 }

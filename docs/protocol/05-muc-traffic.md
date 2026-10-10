@@ -43,6 +43,9 @@ Consequences you must design around:
                from='amy@alpha.example/phone'
                to='chat@conference.alpha.example'>
         <body>morning</body>
+        <stanza-id xmlns='urn:xmpp:sid:0'
+                   by='chat@conference.alpha.example'
+                   id='5f1c9a2e-0b7d-4c1e-9f3a-6d2b8e4a7c10'/>
       </message>
     </muc-forward>
   </federation>
@@ -83,6 +86,36 @@ uses `targetRoom` instead, then rewrites `from` during injection.
 
 Do not rewrite the payload's `from` before sending. Everything downstream — nick derivation, self-echo
 guards, origin validation, the `jid` attribute in the injected `muc#user` item — reads it.
+
+Do not rewrite the payload's `to` either, and **do not strip the origin room's `<stanza-id/>`**
+(XEP-0359) from a message payload. A groupchat message SHOULD carry exactly the stanza-id its origin
+room assigned, with `by` equal to the payload's `to`. Receivers reuse that id so the message has the
+same id in every copy of the room (see [Room identity](#room-identity-stanza-id-and-occupant-id)). A
+relay or hub forwards the payload unchanged, so the id survives any number of hops.
+
+### Forward only what the room accepted
+
+The sending server MUST forward a groupchat message or a join only after its **own room accepted it**.
+
+- **Message**: forward it only if the room broadcast it to its own occupants. A message from a sender
+  who is not an occupant, or who was banned or kicked, or who has no voice, is refused by the room and
+  MUST NOT be forwarded.
+- **Subject change**: forward it only if the sender is an occupant and the room's subject now equals
+  the requested one.
+- **Join or status change** (presence with no `type`): forward it only if the sender is an occupant of
+  the room after processing. A refused join (banned, members-only, wrong password, room full) MUST NOT
+  be forwarded.
+- **Leave** (`type='unavailable'`): forwarded as is. It only ever removes the sender's own nick.
+
+The receiver cannot enforce this: the sender's room rules are not visible across the overlay, and the
+injected copy bypasses the receiving room's own checks by design. An implementation that forwards
+whatever its clients send lets a banned or never-joined user post into, or appear in, every federated
+copy of the room.
+
+This implementation forwards from a post-processing packet interceptor, so it sees refused stanzas
+too. It gates public messages on Openfire's message-received event, which fires only after the room
+broadcast the message, and joins on occupancy after processing. (Since 1.10.11; earlier versions
+forwarded refused messages and joins.)
 
 ## Receiver algorithm
 
@@ -146,13 +179,18 @@ nick   := bare JID from payload/@from                 ("amy@alpha.example/phone"
 
 if nick's domain == our own domain                    → drop (self-echo, see below)
 
+deliverable := copy of the payload
+stamp deliverable with this room's stanza-id and the nick's occupant-id   (see below)
+
 for each real occupant of room:
-    copy the payload
+    copy deliverable
     set from = "<room node>@<room domain>/<nick>"
     set to   = that occupant's real full JID
     mark as forwarded (fed-origin)
     deliver directly to the session
 ```
+
+Stamp a copy. The payload itself continues to fan out with the origin's stanza-id intact.
 
 This implementation additionally writes the message into the room's history and fires its MUC
 message-received event so archiving works — local concerns, invisible on the wire, but worth knowing
@@ -161,6 +199,145 @@ if you wonder why injected messages appear in MAM.
 If the room currently has **zero** occupants, this implementation buffers the delivery briefly (60 s,
 20 per room) and flushes it when someone joins, so a client reconnecting from a network blip still
 receives it live. Optional; the archive path covers longer gaps.
+
+### Room identity: stanza-id and occupant-id
+
+A MUC service gives every message it broadcasts a `<stanza-id by='room'/>` (XEP-0359) and, if it
+advertises `urn:xmpp:occupant-id:0`, an `<occupant-id/>` (XEP-0421). Clients depend on both:
+
+- In a group chat, a client addresses an existing message by the **room-assigned stanza-id**, and only
+  trusts one whose `by` is the room it is in. That covers reactions (XEP-0444), replies (XEP-0461),
+  retraction (XEP-0424) and moderation (XEP-0425). Without it, Conversations refuses to react ("Could
+  not add reaction").
+- Conversations ignores a reaction in a channel that carries no `<occupant-id/>`.
+
+An injected message bypasses the room's own broadcast, so the injecting server MUST add both itself.
+
+**stanza-id.** Reuse the origin room's id so one message has the same id in every copy of the room. A
+reaction made on any server then names a message every other server knows, with no id translation
+table:
+
+```
+originRoom := bare JID of the payload's `to`
+id         := the id of the payload's <stanza-id/> whose `by` == originRoom,
+              if originRoom is not this room
+              and the id matches [A-Za-z0-9._:-]{16,128}
+              and this room has not used that id yet
+              otherwise a fresh random id
+remove every <stanza-id/> from the copy
+add <stanza-id xmlns='urn:xmpp:sid:0' by='<this room>' id='<id>'/>
+```
+
+Each condition closes a specific abuse; see [09-validation.md](09-validation.md#room-identity-elements).
+In short: only the origin room's own stamp is unforgeable by users, an id the room already holds would
+let two messages share one, and a short numeric id could collide with an archive's fallback ids.
+
+**occupant-id.** Remove every `<occupant-id/>` from the copy and add one computed locally for the
+virtual occupant. It MUST be stable for that remote user in that room, across messages, presence and
+reconnects, and MUST NOT collide with a real occupant's. This implementation uses Openfire's own
+derivation for a real occupant (an HMAC over the room and the user's bare JID, taken from the nick).
+The value is local to each room; servers do not need to agree on it.
+
+Write the **stamped** copy into history and archives, so a client catching up via join history or MAM
+sees the same stanza-id it would have seen live. (Since 1.10.10.)
+
+```xml
+<!-- what amy receives on alpha, for a message zed sent in gamma's room -->
+<message type='groupchat'
+         from='ops@conference.alpha.example/zed@gamma.example'
+         to='amy@alpha.example/phone'>
+  <body>deploy is green</body>
+  <stanza-id xmlns='urn:xmpp:sid:0' by='ops@conference.alpha.example'
+             id='5f1c9a2e-0b7d-4c1e-9f3a-6d2b8e4a7c10'/>
+  <occupant-id xmlns='urn:xmpp:occupant-id:0' id='d756fbaca69a80d24314d370fa790da46bc7440f'/>
+  <fed-origin xmlns='urn:xmpp:federation:1'/>
+</message>
+```
+
+A reaction is an ordinary groupchat message (`<reactions xmlns='urn:xmpp:reactions:0' id='…'/>`, no
+body) and takes the same path as any other, so it needs no special handling once the ids line up. So
+is a user retracting their own message (XEP-0424): clients accept it only when its occupant-id matches
+the original's, and the receiver computes both.
+
+### Moderation (XEP-0425)
+
+A moderator's retraction of someone else's message is different. The room announces it from its
+**bare JID**, and clients obey that envelope without checking who wrote the message. Relayed as is, a
+moderator on any mapped server could remove anyone's message from every copy of the room. So:
+
+> **Only the author's own server may moderate a message across the federation.** A moderation of a
+> message written by another server's user applies on the moderating server only.
+
+Both ends enforce this. The sender filters, and every receiver checks again, because a modified peer
+would not filter.
+
+**Sending side.** When a mapped room announces a moderation (a groupchat from the room's bare JID
+carrying `<retract xmlns='urn:xmpp:message-retract:1'><moderated xmlns='urn:xmpp:message-moderate:1'/>`),
+forward it only if the retracted stanza-id belongs to a message **one of this server's users posted in
+this room** and that was forwarded from it. Skip one carrying a `<delay/>`, which is a replay to a late
+joiner, and forward each moderation once however many occupants receive a copy. The payload is a fresh
+announcement addressed from and to the origin room's bare JID:
+
+```xml
+<muc-forward destination='alpha.example' targetRoom='ops@conference.alpha.example'
+             via='gamma.example' src='gamma.example'>
+  <message xmlns='jabber:client' type='groupchat' id='…'
+           from='ops@conference.gamma.example' to='ops@conference.gamma.example'>
+    <retract xmlns='urn:xmpp:message-retract:1' id='5f1c9a2e-0b7d-4c1e-9f3a-6d2b8e4a7c10'>
+      <moderated xmlns='urn:xmpp:message-moderate:1'
+                 by='ops@conference.gamma.example/mod@gamma.example'/>
+      <reason>off topic</reason>
+    </retract>
+  </message>
+</muc-forward>
+```
+
+`id` on `<retract/>` is the origin room's stanza-id for the message. The resource of `by` is the
+moderator's bare JID, the same `user@home` form their own messages' virtual nick takes. `<reason/>` is
+optional and capped at 1,024 characters. No occupant-id: the receiver computes its own.
+
+**Receiving side.** An injected payload that carries `<retract><moderated/></retract>` is handled as a
+moderation, never delivered as an ordinary message:
+
+```
+originRoom := bare JID of the payload's `to`
+require payload `from` == originRoom, and originRoom is not this room        → else drop, SECURITY
+drop if originRoom is one of our own rooms (an echo)
+target     := the message this room received from originRoom with that stanza-id
+require target is known (this room remembers the last 2,000)                → else drop
+require target's author belongs to originRoom's server                       → else drop, SECURITY
+  (author's domain == originRoom's domain or its parent: conference.gamma → gamma)
+drop if target was already moderated (a second path through a diamond)
+announce to this room's occupants, from this room's bare JID:
+  <retract id='<this room's id for target>'>
+    <moderated by='<this room>/<moderator user@home>'>  ← only if that user belongs to originRoom's server
+      <occupant-id id='<computed locally for the moderator>'/>
+    </moderated>
+    <reason/>                                          ← if present
+  </retract>
+keep it, and replay it (with <delay/>) to each local occupant who joins while the
+  target is still in the room's history
+```
+
+The payload `from` is validated like any other (rule 3, [09](09-validation.md#3-payload-origin--the-from-spoofing-gate)),
+so `originRoom` is a room behind the sending path. A hub fans the payload out unchanged and each spoke
+checks it again, so a hub cannot moderate a spoke's users either.
+
+An ordinary relayed message has any `<moderated/>` removed before delivery. Clients already ignore
+one that does not come from the room's bare JID, which a relayed message never does; this keeps it so.
+
+What this implementation does not cover:
+
+- The moderation itself. Openfire has no XEP-0425 handler, so a moderation plugin is needed on the
+  moderating server. Receiving servers need none: they deliver the standard announcement.
+- An admin clearing a room's history. Openfire's bulk retraction has no `<moderated/>` and stays local.
+- Moderations of messages older than the last 2,000 in the room, or received before a restart: the
+  bookkeeping is in memory, so both ends refuse them. For the same reason a receiving server forgets
+  its replays on restart, and a late joiner then sees those messages again in the join history.
+- Archives. The announcement has no body, so Openfire's history and Monitoring's MAM do not store it.
+  The original stays in the receiving server's archive.
+
+(Since 1.10.12.)
 
 ### Presence
 
@@ -183,6 +360,7 @@ Presence is **rebuilt**, not copied, because the MUC semantics have to be constr
   <x xmlns='http://jabber.org/protocol/muc#user'>
     <item affiliation='none' role='participant' jid='zed@beta.example/desktop'/>
   </x>
+  <occupant-id xmlns='urn:xmpp:occupant-id:0' id='d756fbaca69a80d24314d370fa790da46bc7440f'/>
   <fed-origin xmlns='urn:xmpp:federation:1'/>
 </presence>
 ```
@@ -197,6 +375,9 @@ Rules:
 - The `muc#user` `<item/>` carries `affiliation='none'`, `role='participant'` (or `none`), and
   `jid` set to the payload's **original full `from`** — that is how a local client learns the real JID
   behind the nick.
+- Add the virtual occupant's `<occupant-id/>`, the same value as on its messages (see
+  [Room identity](#room-identity-stanza-id-and-occupant-id)). XEP-0421 requires it on presence when
+  the room advertises the feature. Never copy one from the payload.
 
 ### The self-echo guard
 

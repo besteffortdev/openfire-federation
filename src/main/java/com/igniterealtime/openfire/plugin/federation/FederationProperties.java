@@ -107,24 +107,6 @@ public final class FederationProperties {
         boolProp("plugin.federation.directMessageRelay", true, true);
 
     /**
-     * Publish this server's online-user directory to federation peers (OFF by default — privacy).
-     * When true, the set of currently-logged-in users is gossiped across the overlay so peers can
-     * show who is reachable here in their Routing Table view. Untrusted peers never receive it.
-     * Servers that leave this off can still send and receive 1:1 federated messages by typed JID.
-     */
-    public static final SystemProperty<Boolean> DIRECTORY_PUBLISH =
-        boolProp("plugin.federation.directoryPublish", false, true);
-
-    /**
-     * Advertise this server's connected clients to peers as XEP-0048 bookmarks (OFF by default).
-     * When true, the set of currently-logged-in users is pushed across the overlay and injected into
-     * each peer user's bookmark storage (as {@code <url>} bookmarks), so they appear in a normal chat
-     * client. Untrusted peers never receive it. Independent of the user-directory gossip.
-     */
-    public static final SystemProperty<Boolean> BOOKMARK_PUSH =
-        boolProp("plugin.federation.bookmarkPush", false, true);
-
-    /**
      * Probe a multi-hop contact's presence over the overlay when a local user subscribes to them
      * mid-session (ON by default). Openfire auto-probes a freshly-approved contact via native S2S,
      * which leaks past the federation interceptor and fails for a multi-hop peer (no direct link),

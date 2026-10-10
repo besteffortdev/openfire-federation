@@ -46,6 +46,18 @@ public final class PeerServer {
     private final Set<String> exposedServers = ConcurrentHashMap.newKeySet();
 
     /**
+     * Whether shared contact lists may cross the link to this (untrusted) peer, under the link's
+     * exposure rules. Default false: a contact list never crosses an untrusted link.
+     */
+    private volatile boolean contactListsAllowed = false;
+
+    /**
+     * Whether contact lists arriving over the link from this (untrusted) peer are refused, whatever
+     * their destination. Default false: receiving needs no opt-in, sharing is one-way.
+     */
+    private volatile boolean contactListsRefused = false;
+
+    /**
      * True once we've received a peer-announce from this peer — proof the remote's federation
      * plugin knows us as a peer (mutual add). Until then a live S2S link shows PENDING, not
      * REACHABLE. In-memory only: after a restart the first keepalive/announce re-confirms.
@@ -95,6 +107,14 @@ public final class PeerServer {
     public void setUntrusted(boolean untrusted) { this.untrusted = untrusted; }
 
     public Set<String> getExposedServers() { return exposedServers; }
+
+    public boolean isContactListsAllowed() { return contactListsAllowed; }
+
+    public void setContactListsAllowed(boolean allowed) { this.contactListsAllowed = allowed; }
+
+    public boolean isContactListsRefused() { return contactListsRefused; }
+
+    public void setContactListsRefused(boolean refused) { this.contactListsRefused = refused; }
 
     public void setExposedServers(Collection<String> servers) {
         exposedServers.clear();

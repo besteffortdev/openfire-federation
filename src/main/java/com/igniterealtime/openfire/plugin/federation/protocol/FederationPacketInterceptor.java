@@ -8,7 +8,9 @@ import org.xmpp.packet.JID;
 import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.interceptor.PacketInterceptor;
 import org.jivesoftware.openfire.interceptor.PacketRejectedException;
+import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.session.Session;
+import org.jivesoftware.openfire.stanzaid.StanzaIDUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.IQ;
@@ -17,6 +19,7 @@ import org.xmpp.packet.Packet;
 import org.xmpp.packet.Presence;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Intercepts MUC packets and forwards them to all mapped federation peers.
@@ -202,6 +205,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         if (packet.getTo() == null) return;
 
+        // A room's moderation announcement (XEP-0425) on its way to a local occupant: relay it when it
+        // removes one of our own users' messages. Checked in either phase; markModerated keeps it to
+        // one relay however many occupants get a copy.
+        if (!incoming && packet instanceof Message out) relayModeration(out);
+
         if (processed) {
             // Post-processing only feeds the mapped-room forwarders. The relay/policy checks
             // below run pre-processing ONLY: a rejection is only honored before processing,
@@ -228,6 +236,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // from Openfire's internal presence fan-out (which bypasses this interceptor) and would
         // only show the client a fake error from a perfectly reachable contact.
         handleOverlayBounce(packet);
+
+        // Contact-list sharing: a remote user's probe, subscription request or PEP fetch for a local
+        // user the admin shared with that user's server. Answered by the plugin and never shown to
+        // the local user (the admin already approved the contact by sharing it).
+        if (incoming) answerSharedContact(packet);
 
         // A message annotated with a fed-file share by ANOTHER server, about to be delivered to a
         // local user (native S2S from a direct peer, or a local room's re-broadcast of an overlay
@@ -317,6 +330,8 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
         if (mappings.isEmpty()) return;
 
+        if (!acceptedByRoom(msg, roomJid)) return;
+
         var relay = manager.getFileRelay();
         boolean filesOn = manager.getRoomManager().isFilesEnabled(roomJid);
 
@@ -341,6 +356,105 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         }
     }
 
+    /**
+     * Whether the local room accepted {@code msg}. This interceptor sees every groupchat a local client
+     * sent to the room, including ones the room refused: a sender who never joined, was banned or
+     * kicked, or has no voice. Before this check those were forwarded anyway, and appeared in every
+     * federated copy of the room.
+     *
+     * <p>A public message counts as accepted when Openfire fired its message-received event for it,
+     * which it does only after broadcasting (recorded by {@code RoomCreationListener}). A subject
+     * change has no such event that names the message: it counts as accepted when the sender is an
+     * occupant and the room's subject is now the one requested.
+     */
+    private boolean acceptedByRoom(Message msg, String roomJid) {
+        MUCRoom room = manager.findLocalMucRoom(roomJid);
+        if (room == null || msg.getFrom() == null) return false;
+        boolean accepted;
+        if (room.getRoomHistory().isSubjectChangeRequest(msg)) {
+            accepted = room.getOccupantByFullJID(msg.getFrom()) != null
+                    && Objects.equals(room.getSubject(), msg.getSubject());
+        } else {
+            var ids = manager.getRoomMessageIds();
+            String sid = StanzaIDUtil.findFirstUniqueAndStableStanzaID(msg, roomJid);
+            accepted = ids.consumeAccepted(roomJid, RoomMessageIds.keyOf(sid, msg.getID(), msg.getFrom().toString()));
+            // The id now travels to every peer and comes back in their copies of the room: remember it
+            // here so a peer cannot hand it back on a different message (see FederationIQHandler.stampRoomIdentity).
+            if (accepted && sid != null) {
+                ids.claim(roomJid, sid, new RoomMessageIds.Origin(roomJid, sid, msg.getFrom().toBareJID()));
+            }
+        }
+        if (!accepted) {
+            Log.info("Not forwarding a groupchat from {} to {}: the room did not accept it", msg.getFrom(), roomJid);
+        }
+        return accepted;
+    }
+
+    // ── Moderation forwarding (XEP-0425) ──────────────────────────────────────
+
+    /**
+     * Relays a mapped room's moderation announcement to its peers when the removed message was written
+     * by one of this server's users and forwarded from this room. A moderation of a message from another
+     * server applies here only: its author's server alone may remove it everywhere (see
+     * {@link RoomModeration}). A replay to a late joiner carries a delay and is not relayed again.
+     */
+    private void relayModeration(Message out) {
+        if (out.getType() != Message.Type.groupchat) return;
+        JID from = out.getFrom();
+        if (from == null || from.getNode() == null || from.getResource() != null) return;
+        org.dom4j.Element retract = RoomModeration.moderatedRetract(out.getElement());
+        if (retract == null || RoomModeration.isDelayed(out.getElement())) return;
+        if (!isConferenceDomain(from.getDomain())) return;
+
+        String roomJid = from.toBareJID();
+        List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
+        if (mappings.isEmpty()) return;
+
+        String targetId = retract.attributeValue("id");
+        var ids = manager.getRoomMessageIds();
+        if (!ids.markModerated(roomJid, targetId)) return;   // another occupant's copy of the same one
+        RoomMessageIds.Origin origin = ids.originOf(roomJid, targetId);
+        if (origin == null || !roomJid.equals(origin.room())) {
+            Log.info("Moderation of {} in {} applies on this server only: {}", targetId, roomJid,
+                     origin == null ? "not a message this room forwarded (or too old to be remembered)"
+                                    : "written by " + origin.author() + " on another server");
+            return;
+        }
+
+        String moderator = moderatorOf(manager.findLocalMucRoom(roomJid), retract);
+        Message payload = new Message(RoomModeration.announcement(roomJid, out.getID(), targetId,
+                moderator == null ? null : roomJid + "/" + moderator, null, RoomModeration.reasonOf(retract)));
+        for (RoomMapping mapping : mappings) {
+            forwardToMapped(payload, mapping, null);
+        }
+        Log.info("Relayed the moderation of {}'s message {} in {} to {} mapped room(s)",
+                 origin.author(), targetId, roomJid, mappings.size());
+    }
+
+    /**
+     * The bare JID of the local user named by a moderation's {@code by} (the moderator's room address,
+     * or their real JID), so peers can show them as the same "user@home" occupant their messages use.
+     */
+    private String moderatorOf(MUCRoom room, org.dom4j.Element retract) {
+        org.dom4j.Element moderated = retract.element(
+                org.dom4j.QName.get("moderated", RoomModeration.NS_MODERATE));
+        String by = moderated == null ? null : moderated.attributeValue("by");
+        if (by == null || room == null) return null;
+        try {
+            JID byJid = new JID(by);
+            if (byJid.toBareJID().equals(room.getJID().toBareJID())) {
+                if (byJid.getResource() == null) return null;
+                var occupants = room.getOccupantsByNickname(byJid.getResource());
+                if (occupants.isEmpty()) return null;
+                JID real = occupants.get(0).getUserAddress();
+                return XMPPServer.getInstance().isLocal(real) ? real.toBareJID() : null;
+            }
+            return XMPPServer.getInstance().isLocal(byJid) ? byJid.toBareJID() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     // ── Presence forwarding (join / leave) ────────────────────────────────────
 
     private void handlePresence(Presence pres) {
@@ -354,6 +468,18 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (roomJid == null) return;
 
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(roomJid);
+        if (mappings.isEmpty()) return;
+
+        // A join or status change counts only if the room let the sender in: a refused join (banned,
+        // members-only, wrong password, room full) was forwarded too, and showed the user as present in
+        // every federated copy. A leave is forwarded as is: it only ever removes the sender's own nick.
+        if (pres.getType() == null) {
+            MUCRoom room = manager.findLocalMucRoom(roomJid);
+            if (room == null || room.getOccupantByFullJID(pres.getFrom()) == null) {
+                Log.info("Not forwarding presence from {} to {}: the room did not admit it", pres.getFrom(), roomJid);
+                return;
+            }
+        }
         for (RoomMapping mapping : mappings) {
             forwardToMapped(pres, mapping, null);
         }
@@ -545,6 +671,29 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // rewriteInPlace strips the annotation in every case and leaves the URL untouched when the
         // annotating origin is ourselves (our own share echoed back — the original URL is correct).
         manager.getFileRelay().rewriteInPlace(msg, fromDomain);
+    }
+
+    /**
+     * Answers, on a shared local user's behalf, what a contact on a server it is shared with sends
+     * over native S2S: a probe or subscription request (see
+     * {@link com.igniterealtime.openfire.plugin.federation.ContactListManager#handleInboundSubscription})
+     * or a PEP items fetch, which Openfire itself would refuse because the contact is not on the
+     * user's roster. The same requests over the overlay are handled in {@code FederationIQHandler}.
+     */
+    private void answerSharedContact(Packet packet) throws PacketRejectedException {
+        JID from = packet.getFrom();
+        if (from == null || from.getNode() == null || XMPPServer.getInstance().isLocal(from)) return;
+        if (packet instanceof Presence pres) {
+            if (manager.getContactLists().handleInboundSubscription(pres)) {
+                rememberRelayedForBounce(pres);
+                throw new PacketRejectedException("Answered " + pres.getType() + " from shared contact "
+                        + from + " for " + pres.getTo());
+            }
+        } else if (packet instanceof IQ iq && iq.getType() == IQ.Type.get
+                && manager.getIQHandler().answerSharedContactPepFetch(iq)) {
+            rememberRelayedForBounce(iq);
+            throw new PacketRejectedException("Answered PEP fetch from shared contact " + from + " for " + iq.getTo());
+        }
     }
 
     /**

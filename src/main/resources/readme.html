@@ -115,18 +115,33 @@
     relayed</strong>; they need a separate media path and are out of scope.
 </div>
 
-<h2>Users tab &amp; bookmark advertising</h2>
+<h2>Users tab &amp; contact‑list sharing</h2>
 <p>
-    The <strong>Users</strong> tab lists this server's currently‑connected clients and, grouped by peer,
-    the online users other servers have published through the directory gossip. As of
-    <strong>1.7.0</strong> it can also <strong>advertise your connected clients to peers as
-    <a href="https://xmpp.org/extensions/xep-0048.html">XEP‑0048</a> bookmarks</strong>: each connected
-    client is pushed across the overlay and injected into each peer user's bookmark storage as a
-    <code>&lt;url&gt;</code> bookmark (<code>xmpp:user@server?message</code>), so it shows up in a normal
-    chat client. Use <em>Push bookmarks to peers</em> for a one‑shot, or enable <em>Auto‑push</em> to
-    re‑advertise automatically as users come and go. Only trusted peers receive it; the injected entries
-    are tagged so they merge with — never overwrite — a user's own bookmarks, and turning auto‑push off
-    withdraws them. Bookmarks are read by clients at login, so changes appear on a peer user's next sign‑in.
+    Works like Openfire's own Contact List (Roster) Sharing, across servers. On <em>Contact Sharing</em>,
+    expand a local group (▸) and tick the servers to share it with. Only groups are shared, never single
+    users. Each server receives one list: the members of every group shared with it, kept in step with
+    group membership. A list crosses an untrusted link only where the server sending across it allows
+    it: tick <em>Send shared contact lists</em> in the untrusted peer's settings panel (Peer Servers
+    tab). Nothing is needed on the receiving side of the link. The list still follows the link's exposed
+    servers: the sharing server must be exposed on the way out, the destination on the way in.
+    To block lists from an untrusted neighbour, tick <em>Refuse contact lists</em> in its settings
+    panel. A received list that crossed an untrusted link is marked <em>via untrusted link</em>: the
+    untrusted server could have altered it, so check it before mapping.
+</p>
+<p>
+    Below that, each server that shares contacts with you appears as a card with its list.
+    Map it to one or more local groups (or all users) and choose the roster group name. The plugin then
+    keeps an Openfire shared group, <code>federation-contacts-&lt;server&gt;</code>, whose members are
+    those contacts, and Openfire puts them in each chosen user's roster. Presence, avatars and nicknames
+    follow without anyone approving a subscription. Presence is one‑way: your users see the shared
+    contacts, and those contacts see your users only if you share them back. If the other server stops
+    sharing someone, they're removed. Removing the mapping deletes the group and its contacts from
+    every roster.
+</p>
+<p>
+    This replaces the online‑user directory and the XEP‑0048 bookmark push from 1.10.12 and earlier.
+    Bookmarks injected by that feature are removed from users' storage once, on the first start of
+    1.10.13.
 </p>
 
 <h2>Declarative config (openfire.xml)</h2>

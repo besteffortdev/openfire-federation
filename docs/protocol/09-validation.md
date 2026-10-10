@@ -217,7 +217,7 @@ Where it applies, and against what:
 | `file-*`, addressed to us | **our own domain** |
 | `direct-forward`, `presence-forward`, `iq-forward` | the `destination`, or our own domain when we are it |
 | stanzas to a local MUC address, from a sender behind an untrusted edge | the room must be federated and shared with the sender's server or the edge ([05](05-muc-traffic.md#direct-room-access-without-a-mapping)) |
-| `user-directory`, `bookmark-push` | refused outright from an untrusted link ([08](08-directory.md)) |
+| `contact-list`, `contact-list-request` | from an untrusted link: the origin must be the peer or behind it, and the destination (or our own domain when we are it) must be exposed ([08](08-contact-lists.md)) |
 
 Two notes:
 
@@ -237,7 +237,7 @@ The gate has a sending half, and both are required for the exposure model to mea
 
 - `routing-update` — filtered to exposed destinations ([03](03-routing.md#untrusted-peers)).
 - `room-advertisement` — filtered to rooms homed on exposed servers, then by per-room visibility.
-- `user-directory` / `bookmark-push` — never sent at all.
+- `contact-list` / `contact-list-request` — sent or relayed into an untrusted peer only when the `origin` is a server exposed to it, and for a `contact-list` only when sending contact lists is allowed on that link ([08](08-contact-lists.md)).
 - Relayed `room-advertisement` for an origin the peer is not exposed to — not sent, not even as an
   empty withdrawal (since 1.10.9).
 - `direct-forward`, `presence-forward`, `iq-forward` — sent only when the payload's sender is on an
@@ -332,6 +332,95 @@ if targetRoom has no ACTIVE mapping whose remote domain == src       → DROP
 The "has an active mapping" check above is necessary but not sufficient: the mapping must be with the
 server the traffic enters through.
 
+### Room identity elements
+
+Applies when injecting a groupchat message (see [05](05-muc-traffic.md#room-identity-stanza-id-and-occupant-id)).
+Clients treat a room's `<stanza-id/>` and `<occupant-id/>` as the room's own word, so a peer must not be
+able to choose them:
+
+```
+remove every <stanza-id/> and <occupant-id/> from the payload copy
+reuse a peer-supplied stanza-id only if ALL hold:
+    its `by` == bare JID of the payload's `to` (the origin room), and that is not this room
+    its id matches [A-Za-z0-9._:-]{16,128}
+    this room has not used that id before          → else: fresh random id, log SECURITY
+compute occupant-id locally; never take it from the payload
+```
+
+Why each condition:
+
+- **`by` must be the origin room.** The origin MUC service strips any client-supplied stanza-id whose
+  `by` is its own room before stamping its own, as XEP-0359 requires, so that one element is the only one a
+  *user* cannot forge. A stanza-id with any other `by` is whatever the client wrote. Taking "the first
+  foreign stanza-id" let any user on any mapped server pick the id their message gets everywhere else,
+  including the id of an existing message. Reactions and replies aimed at that message could then
+  resolve to the attacker's message. (Found and closed in 1.10.11, before 1.10.10 left the lab.)
+- **Not already used in this room.** A peer server controls its own room's stamp, so it can still
+  replay an id it has seen. Remember the ids each mapped room has used, both the ids of local messages
+  as they are forwarded and the ids of injected ones, and replace a repeat. This implementation keeps
+  the last 2,000 per room. Older ids can still be replayed, which only risks a reaction or reply to a
+  very old message showing against the wrong one. It is never a delivery or identity failure.
+- **At least 16 characters.** An archive may hand out short numeric ids for messages stored without
+  a stanza-id of their own (Openfire's Monitoring plugin does, for federated messages archived before
+  1.10.10). A peer must not be able to claim one of those.
+- **occupant-id local only.** A client uses occupant-id to tell occupants apart and to recognise its
+  own account. A peer-supplied one could claim to be a local user, or the client itself.
+
+None of this lets a peer speak for users it could not already speak for: the nick, and so the
+occupant-id, still derives from the payload `from`, which rule 3 has already validated.
+
+### Room moderation — only the author's server
+
+Applies to a moderation (XEP-0425) in either direction (see
+[05](05-muc-traffic.md#moderation-xep-0425)). Clients obey a moderation from the room's bare JID
+without checking who wrote the message, so a relayed one would let any mapped server remove anyone's
+messages:
+
+```
+sending side:   forward a moderation only for a message one of our users posted in this room
+receiving side: apply one only if ALL hold:
+    payload `from` == payload `to` == originRoom, and that is not this room   → else SECURITY
+    this room received the target message from originRoom                     → else drop
+    the target's author belongs to originRoom's server                         → else SECURITY
+    it was not already applied                                                 → else drop
+strip <moderated/> from every ordinary relayed message
+```
+
+Why each condition:
+
+- **Both sides.** The sender knows who wrote its messages; the receiver cannot trust a sender to
+  filter. Checking at the receiver means a modified peer gains nothing by skipping its own filter.
+- **From the origin room.** A client can put `<retract><moderated/>` in a plain groupchat, and its server
+  relays that like any message, with the client's own JID as `from`. Only a moderation addressed from
+  the room counts.
+- **Received from that room.** The target is found by the origin room's own stanza-id in the bookkeeping
+  [room identity elements](#room-identity-elements) already keeps, so a moderation can only name a
+  message that came from the room it claims to speak for.
+- **Author belongs to that room's server.** A room may hold messages relayed from other servers; its
+  server may not remove those. The test is exact (the room's domain or its immediate parent), never a
+  suffix match: `x@example` does not belong to `conference.gamma.example`.
+- **Once.** Diamond topologies deliver the same payload twice.
+- **Strip elsewhere.** A relayed message is delivered from a room nick, which clients do not obey as a
+  moderator; removing the element keeps a lax client from doing so.
+
+This rests on rule 3 like everything else: a trusted peer that can already forge its own users'
+messages can forge moderations of them. It cannot reach another server's users. (Since 1.10.12.)
+
+### Room traffic — forward only what the room accepted (sending side)
+
+```
+groupchat message:    forward only if the local room broadcast it
+subject change:       forward only if the sender is an occupant and the subject now matches
+available presence:   forward only if the sender is an occupant after processing
+unavailable presence: forward as is
+```
+
+The one rule here that the **sender** enforces, because only the sender's room knows its own
+membership, bans and voice. An injected copy bypasses the receiving room's checks by design (rule 6,
+room injection), so whatever the sender forwards is shown. Forwarding refused traffic lets a banned,
+kicked, muted or never-joined user post into, or appear present in, every federated copy of the room.
+(Since 1.10.11.)
+
 ### Presence probes and PEP reads
 
 ```
@@ -418,9 +507,12 @@ Stops an unrelated peer from injecting content into a transfer you started with 
 
 ```
 size >= 0 and size <= configured maximum
-chunkSize in [1, 1 MiB]
+chunkSize in [1, 1 MiB], and at least 16 KiB unless totalChunks <= 1
 totalChunks >= 0  and  totalChunks == ceil(size / chunkSize)      exactly
 ```
+
+The chunk floor matters because the receiver keeps one bit per chunk: 1-byte chunks would size that
+bitmap, and the number of IQs, by the file's byte count.
 
 This is the allocation bound. An offer claiming an implausible size or an inconsistent chunk count
 must fail before anything is sized from it.
@@ -433,6 +525,26 @@ if decoded length != expected → FAIL the transfer
 ```
 
 Prevents a write outside the region the geometry accounted for.
+
+## 9. Resource bounds
+
+Every check above can pass while a peer still sends far more than any real deployment would. Each
+per-peer cache therefore has a bound, and anything past it is dropped and logged at most once a
+minute. This implementation's values:
+
+| What | Bound |
+|------|-------|
+| Destinations from one `routing-update` | 128 from an untrusted peer, 2048 from a trusted one; each a plausible domain (no `@`, `/`, quotes, `<>&\,`, whitespace; at most 253 characters) |
+| Routing table | 4096 destinations |
+| Rooms in one `room-advertisement` | 250, name clipped to 128 characters, description to 512, `visibleto` to 64 entries |
+| Contact lists from servers not mapped here | 32 servers, 50 000 contacts in all; forgotten when the origin loses its route |
+| Remote contacts tracked per shared local user | 1000 |
+| `contact-list-request` answers | one per 30 s per requesting server |
+| File transfers tracked at once | 512 |
+| Domains remembered as answering mapping probes | 1024, only ones we route to; pongs for an unprobed domain are ignored |
+
+The untrusted route bound is what keeps the rest small: most caches are keyed by origin server, and
+an untrusted peer can only claim origins it has a route for.
 
 ---
 
@@ -451,6 +563,9 @@ Prevents a write outside the region the geometry accounted for.
 | Room federation-enabled | `muc-forward` injection | drop |
 | Active mapping exists | `muc-forward` injection | drop |
 | Mapping is with `src` | `muc-forward` injection | drop |
+| Room identity elements | `muc-forward` message injection | strip; fresh stanza-id |
+| Room accepted it (sender side) | outbound groupchat and join | do not forward |
+| Author's server only | moderation, outbound and `muc-forward` injection | do not forward / drop |
 | Lifecycle state | mapping accept/reject/disable/enable | drop |
 | Subscription | presence probe answering | do not answer |
 | PEP access model | `iq-forward` PEP items GET | `forbidden` |
@@ -466,4 +581,4 @@ Prevents a write outside the region the geometry accounted for.
 
 ---
 
-Previous: [08-directory.md](08-directory.md) · Next: [10-conformance.md](10-conformance.md)
+Previous: [08-contact-lists.md](08-contact-lists.md) · Next: [10-conformance.md](10-conformance.md)

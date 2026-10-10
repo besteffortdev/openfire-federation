@@ -25,6 +25,20 @@ public class FederationRoutingTable {
     private static final Logger Log = LoggerFactory.getLogger(FederationRoutingTable.class);
     static final int INFINITY = 16;   // anything >= 16 is considered unreachable
 
+    /**
+     * Most destinations one routing-update may install from an untrusted peer. It may announce any
+     * number of servers behind it, and every one would otherwise cost memory here and on every server
+     * the route is gossiped to (room lists, contact lists and mapping probes are all keyed by them).
+     */
+    static final int MAX_ROUTES_FROM_UNTRUSTED = 128;
+    /** The same bound for a trusted peer: generous, it only guards against a runaway or broken peer. */
+    static final int MAX_ROUTES_FROM_TRUSTED = 2048;
+    /** Most destinations the table holds; a new one beyond this is not installed. */
+    static final int MAX_ROUTES = 4096;
+    /** Most destinations {@link #everRoutable} remembers. */
+    private static final int MAX_EVER_ROUTABLE = 8192;
+    private volatile long capLoggedAt = 0;
+
     /** destination → best known route */
     private final ConcurrentHashMap<String, RouteEntry> table = new ConcurrentHashMap<>();
     /** peer domain → destinations learned from that peer (for cleanup) */
@@ -42,7 +56,7 @@ public class FederationRoutingTable {
      */
     public void addDirectPeer(String domain) {
         table.put(domain, new RouteEntry(domain, domain, 1));
-        everRoutable.add(domain);
+        rememberRoutable(domain);
         // Do NOT add to routesLearnedFrom — direct routes are owned by addDirectPeer/removePeer,
         // not by gossip. A peer never advertises itself in routing-updates, so adding it here
         // would cause the stale-withdrawal check to delete the direct route on every update.
@@ -78,6 +92,8 @@ public class FederationRoutingTable {
         Set<String> learnedSet = routesLearnedFrom.computeIfAbsent(fromPeer, k -> ConcurrentHashMap.newKeySet());
         Set<String> inUpdate = new HashSet<>();
         boolean fromUntrusted = untrusted.test(fromPeer);
+        int perPeerCap = fromUntrusted ? MAX_ROUTES_FROM_UNTRUSTED : MAX_ROUTES_FROM_TRUSTED;
+        int skipped = 0;
 
         for (RouteEntry remote : peerTable) {
             // The advertised metric is the peer's claim, so bound it before using it: a negative
@@ -94,12 +110,15 @@ public class FederationRoutingTable {
             // accepting one would let a misbehaving peer overwrite its own direct entry, which
             // is owned by addDirectPeer/removePeer.
             if (dest.equals(fromPeer)) continue;
+            if (!isPlausibleDomain(dest)) { skipped++; continue; }
+            if (inUpdate.size() >= perPeerCap) { skipped++; continue; }
             inUpdate.add(dest);
             boolean candidateEdge = fromUntrusted || remote.edge();
             RouteEntry current = table.get(dest);
             RouteEntry offered = new RouteEntry(dest, fromPeer, candidate, candidateEdge);
 
             if (current == null) {
+                if (table.size() >= MAX_ROUTES) { skipped++; continue; }
                 install(offered, learnedSet, changed);
             } else if (current.nextHop().equals(dest)) {
                 // A direct link is owned by addDirectPeer/removePeer; gossip never displaces it.
@@ -123,6 +142,16 @@ public class FederationRoutingTable {
                 if ((!candidateEdge && currentEdge) || candidate < current.hops()) {
                     install(offered, learnedSet, changed);
                 }
+            }
+        }
+
+        if (skipped > 0) {
+            long now = System.currentTimeMillis();
+            if (now - capLoggedAt >= 60_000L) {
+                capLoggedAt = now;
+                Log.warn("Routing: ignored {} destination(s) from {} — malformed, or past the limit of {} per {} "
+                       + "peer / {} in all. Further cases are logged at most once a minute.", skipped, fromPeer,
+                         perPeerCap, fromUntrusted ? "untrusted" : "trusted", MAX_ROUTES);
             }
         }
 
@@ -192,6 +221,11 @@ public class FederationRoutingTable {
         return Optional.ofNullable(table.get(destination)).map(RouteEntry::nextHop);
     }
 
+    /** The route to {@code destination}, or empty if unreachable. */
+    public Optional<RouteEntry> getRoute(String destination) {
+        return Optional.ofNullable(table.get(destination));
+    }
+
     public boolean isReachable(String destination) {
         return table.containsKey(destination);
     }
@@ -214,9 +248,27 @@ public class FederationRoutingTable {
         return entry.edge() || untrusted.test(entry.nextHop());
     }
 
+    /**
+     * A destination a peer may announce: a bare domain of sane length, with nothing that could break
+     * out of an attribute, a log line or the admin page.
+     */
+    static boolean isPlausibleDomain(String d) {
+        if (d == null || d.isEmpty() || d.length() > 253 || d.indexOf('.') <= 0) return false;
+        for (int i = 0; i < d.length(); i++) {
+            char c = d.charAt(i);
+            if (c <= 0x20 || c == 0x7f || c == '@' || c == '/' || c == '"' || c == '\'' || c == '<'
+                    || c == '>' || c == '&' || c == '\\' || c == ',') return false;
+        }
+        return true;
+    }
+
+    private void rememberRoutable(String destination) {
+        if (everRoutable.size() < MAX_EVER_ROUTABLE) everRoutable.add(destination);
+    }
+
     private void install(RouteEntry route, Set<String> learnedSet, Set<String> changed) {
         table.put(route.destination(), route);
-        everRoutable.add(route.destination());
+        rememberRoutable(route.destination());
         learnedSet.add(route.destination());
         changed.add(route.destination());
         Log.debug("Routing: {} via {} in {} hop(s){}", route.destination(), route.nextHop(), route.hops(),

@@ -1,12 +1,13 @@
 package com.igniterealtime.openfire.plugin.federation.protocol;
 
 import com.igniterealtime.openfire.plugin.federation.FederationManager;
-import com.igniterealtime.openfire.plugin.federation.UserDirectory;
+import com.igniterealtime.openfire.plugin.federation.ContactListManager;
 import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
 import org.dom4j.Element;
+import org.dom4j.QName;
 import org.jivesoftware.openfire.IQHandlerInfo;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.auth.UnauthorizedException;
@@ -36,8 +37,10 @@ import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -53,10 +56,20 @@ import java.util.stream.Collectors;
  *                      all other mapped spokes after injecting locally
  * mapping-ping/pong  → end-to-end probe of an active mapping's path; catches a route
  *                      silently broken mid-way (e.g. an intermediate deny)
+ * contact-list       → the contacts another server shares with us (or relay it on)
  */
 public class FederationIQHandler extends IQHandler {
 
     private static final Logger Log = LoggerFactory.getLogger(FederationIQHandler.class);
+
+    private static final String NS_STANZA_ID   = "urn:xmpp:sid:0";
+    static final String NS_OCCUPANT_ID = "urn:xmpp:occupant-id:0";
+    /**
+     * A peer-supplied stanza-id we reuse verbatim: Openfire's UUIDs and similar opaque tokens. At least
+     * 16 characters, so it cannot equal the small numeric id Monitoring's MAM falls back to for an
+     * archived message that has no stanza-id of its own (federated messages archived before 1.10.10).
+     */
+    private static final Pattern REUSABLE_STANZA_ID = Pattern.compile("[A-Za-z0-9._:-]{16,128}");
 
     private final IQHandlerInfo   info;
     private final FederationManager manager;
@@ -78,6 +91,20 @@ public class FederationIQHandler extends IQHandler {
     private static final long PENDING_DELIVERY_TTL_MS = 60_000;
     private static final int  PENDING_DELIVERY_MAX_PER_ROOM = 20;
     private final ConcurrentHashMap<String, Deque<PendingDelivery>> pendingRoomDeliveries = new ConcurrentHashMap<>();
+
+    /**
+     * Moderations relayed from other servers and applied here, per room, newest last, for
+     * {@link #replayModerations}. In memory only: after a restart a late joiner sees those messages again.
+     */
+    private record StoredModeration(String targetId, Element announcement, long at) { }
+    private static final int MODERATIONS_KEPT_PER_ROOM = 200;
+
+    /** Bounds on one server's advertised rooms, so a peer cannot make every server cache megabytes. */
+    private static final int MAX_ADVERTISED_ROOMS  = 250;
+    private static final int MAX_ROOM_NAME         = 128;
+    private static final int MAX_ROOM_DESCRIPTION  = 512;
+    private static final int MAX_ROOM_VISIBLE_TO   = 64;
+    private final ConcurrentHashMap<String, Deque<StoredModeration>> federatedModerations = new ConcurrentHashMap<>();
 
     public FederationIQHandler(FederationManager manager) {
         super("Federation IQ Handler");
@@ -153,8 +180,11 @@ public class FederationIQHandler extends IQHandler {
             case "direct-forward"      -> handleDirectForward(fromDomain, child);
             case "presence-forward"    -> handlePresenceForward(fromDomain, child);
             case "iq-forward"          -> handleIqForward(fromDomain, child);
-            case "user-directory"      -> handleUserDirectory(fromDomain, child);
-            case "bookmark-push"       -> handleBookmarkPush(fromDomain, child);
+            case "contact-list", "contact-list-request"
+                                       -> handleContactListAction(child.getName(), fromDomain, child);
+            // Retired in 1.10.13 (replaced by contact-list); a peer still on an older build may send them.
+            case "user-directory", "bookmark-push"
+                                       -> Log.debug("Ignoring retired federation action '{}' from {}", child.getName(), fromDomain);
             case "file-request", "file-offer", "file-chunk", "file-error"
                                        -> handleFileRelay(child.getName(), fromDomain, child);
             default -> Log.warn("Unknown federation action '{}' from {}", child.getName(), fromDomain);
@@ -252,8 +282,6 @@ public class FederationIQHandler extends IQHandler {
             manager.solicitRouting(fromDomain);
             manager.resyncMappedDestinations(Set.of(fromDomain));
             manager.resendPendingRequests(fromDomain);
-            manager.publishDirectoryTo(fromDomain);
-            manager.pushBookmarksTo(fromDomain);
         } else if (!isReply) {
             // Steady-state keepalive: send one reply back so the reverse S2S socket —
             // which our own keepalive timer cannot reach (separate per-direction sockets,
@@ -414,10 +442,12 @@ public class FederationIQHandler extends IQHandler {
         }
 
         List<FederatedRoom> rooms = new ArrayList<>();
+        int overLimit = 0;
         for (Element r : el.elements("room")) {
+            if (rooms.size() >= MAX_ADVERTISED_ROOMS) { overLimit++; continue; }
             String jid  = r.attributeValue("jid");
-            String name = r.attributeValue("name", "");
-            String desc = r.attributeValue("description", "");
+            String name = clip(r.attributeValue("name", ""), MAX_ROOM_NAME);
+            String desc = clip(r.attributeValue("description", ""), MAX_ROOM_DESCRIPTION);
             // Per-room visibility ACL carried on the ad so we enforce it when relaying onward. Absence
             // is parsed as an empty set, which roomVisibleAtHop treats as "visible to nobody" — the
             // same secure default as a locally-federated room. (Same-version peers always emit the
@@ -425,7 +455,10 @@ public class FederationIQHandler extends IQHandler {
             // rooms won't relay past us until they upgrade.)
             String visibleto = r.attributeValue("visibleto", "");
             java.util.Set<String> visibleTo = new java.util.LinkedHashSet<>();
-            for (String s : visibleto.split(",")) if (!s.isBlank()) visibleTo.add(s.strip().toLowerCase());
+            for (String s : visibleto.split(",")) {
+                if (visibleTo.size() >= MAX_ROOM_VISIBLE_TO) break;
+                if (!s.isBlank()) visibleTo.add(s.strip().toLowerCase());
+            }
             // Reject a peer-supplied room JID carrying characters that are invalid in an XMPP JID and
             // that would enable admin-console script injection or malformed routing if cached/rendered.
             if (jid != null && isSafeFederationJid(jid)) {
@@ -434,6 +467,10 @@ public class FederationIQHandler extends IQHandler {
                 Log.warn("SECURITY: dropping advertised room with malformed JID from {} (len={})",
                          fromDomain, jid.length());
             }
+        }
+        if (overLimit > 0) {
+            Log.warn("room-advertisement from {} (source={}): ignored {} room(s) past the limit of {}",
+                     fromDomain, sourceDomain, overLimit, MAX_ADVERTISED_ROOMS);
         }
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
         if (rooms.isEmpty()) {
@@ -1110,6 +1147,13 @@ public class FederationIQHandler extends IQHandler {
             // Checked ahead of the probe branch too: answering a probe for a user who does not live
             // here would disclose local presence to a peer that addressed someone else's server.
             if (!deliverableHere(pto, "presence-forward", fromDomain)) return;
+            // A probe or subscription request for a user shared with the sender's server: answered by
+            // the plugin, so the user is never prompted to approve a contact the admin shared.
+            if (manager.getContactLists().handleInboundSubscription(pres)) {
+                Log.info("presence-forward: answered {} {} -> {} for a shared contact (from {})",
+                         pres.getType(), pres.getFrom(), pto, fromDomain);
+                return;
+            }
             // A probe for a local user: Openfire's own answer would be routed past the interceptor and
             // never cross the overlay, so answer explicitly with the user's current presence.
             if (pres.getType() == Presence.Type.probe) {
@@ -1354,6 +1398,20 @@ public class FederationIQHandler extends IQHandler {
      * {@code item-not-found} for a node the contact never created, an empty {@code <items/>} for a
      * node that exists but holds nothing, and the item itself otherwise.
      */
+    /**
+     * Answers a PEP items GET that reached us over native S2S from a contact on a server the target
+     * user is shared with (see {@code ContactListManager}). Openfire would refuse it: the contact is
+     * not on the user's roster, so a presence-access node (the avatar) looks private to them. Returns
+     * false, leaving the request to Openfire, for anything else.
+     */
+    boolean answerSharedContactPepFetch(IQ request) {
+        JID from = request.getFrom();
+        JID to   = request.getTo();
+        if (from == null || to == null || !XMPPServer.getInstance().isLocal(to)) return false;
+        if (!manager.getContactLists().isAuthorizedContact(to, from)) return false;
+        return answerPepItemsLocally(request, from.getDomain());
+    }
+
     private boolean answerPepItemsLocally(IQ request, String fromDomain) {
         if (request.getType() != IQ.Type.get) return false;
         Element pubsub = request.getChildElement();
@@ -1473,72 +1531,94 @@ public class FederationIQHandler extends IQHandler {
         return true;
     }
 
-    // ── user-directory (opt-in online-user gossip) ─────────────────────────────
+    // ── contact-list / contact-list-request (per-server contact sharing) ────────
 
-    /** Caches an inbound user-directory and relays it onward (loop-guarded). */
-    private void handleUserDirectory(String fromDomain, Element el) {
+    /**
+     * Relays a {@code contact-list} or {@code contact-list-request} toward its destination, or applies
+     * it when we are the destination.
+     *
+     * <p>An untrusted link is crossed only when this server allows contact lists on that link (a
+     * per-peer setting), and then under the link's exposure settings, like the 1:1 forwards: arriving
+     * over an untrusted link, the
+     * origin must be the peer or a server behind it, and the destination (us, or the server we would
+     * relay to) must be one we expose to that peer; leaving over an untrusted link, the origin must be
+     * a server we expose to it.
+     */
+    private void handleContactListAction(String element, String fromDomain, Element el) {
+        String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
-        if (FederationStanzaFactory.viaContains(via, localDomain)) {
-            Log.debug("user-directory loop detected (via={}), dropping", via);
+        if (destination == null || origin == null || origin.equals(localDomain)) {
+            Log.warn("{} from {} has a missing or invalid origin/destination ({} → {}), dropping",
+                     element, fromDomain, origin, destination);
             return;
         }
-
-        String sourceDomain = (origin != null) ? origin : fromDomain;
-        if (localDomain.equals(sourceDomain)) {
-            Log.debug("user-directory origin is our own domain, ignoring");
-            return;
-        }
-
-        List<UserDirectory.UserPresence> users = new ArrayList<>();
-        for (Element u : el.elements("user")) {
-            String jid = u.attributeValue("jid");
-            if (jid != null && !jid.isBlank()) {
-                users.add(new UserDirectory.UserPresence(
-                        jid.strip(),
-                        u.attributeValue("show", ""),
-                        u.attributeValue("status", "")));
+        // Arriving over an untrusted link needs no opt-in: the per-link flag gates sending, and the
+        // receiving admin still decides what a list does by mapping it. The exposure model applies,
+        // and an admin who does not trust the neighbour can refuse its lists outright.
+        boolean fromUntrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
+        if (fromUntrusted) {
+            if ("contact-list".equals(element) && manager.getPeerRegistry().isContactListsRefused(fromDomain)) {
+                Log.debug("Refusing contact-list from untrusted peer {} (origin {}) — refused on that link here",
+                          fromDomain, origin);
+                return;
             }
+            if (!claimedOriginOk(fromDomain, origin, element)) return;
+            if (!oneToOneExposureOk(fromDomain, destination, localDomain, element)) return;
         }
-        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
-        manager.handleUserDirectory(fromDomain, sourceDomain, users, newVia);
-        Log.debug("user-directory from {} (source={}) — {} user(s)", fromDomain, sourceDomain, users.size());
-    }
-
-    // ── bookmark-push (XEP-0048 connected-client advertisement) ────────────────
-
-    /** Injects an inbound bookmark-push into local users' storage and relays it onward (loop-guarded). */
-    private void handleBookmarkPush(String fromDomain, Element el) {
-        String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
-        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
-            Log.debug("bookmark-push loop detected (via={}), dropping", via);
+            Log.warn("{} loop detected (via={}), dropping", element, via);
             return;
         }
 
-        String sourceDomain = (origin != null) ? origin : fromDomain;
-        if (localDomain.equals(sourceDomain)) {
-            Log.debug("bookmark-push origin is our own domain, ignoring");
-            return;
-        }
-
-        List<UserDirectory.UserPresence> users = new ArrayList<>();
-        for (Element u : el.elements("user")) {
-            String jid = u.attributeValue("jid");
-            if (jid != null && !jid.isBlank()) {
-                users.add(new UserDirectory.UserPresence(
-                        jid.strip(),
-                        u.attributeValue("show", ""),
-                        u.attributeValue("status", "")));
+        if (!destination.equals(localDomain)) {
+            String nextHop = manager.getRoutingTable().findNextHop(destination).orElse(null);
+            if (nextHop == null) {
+                Log.debug("{}: no route to {}, dropping", element, destination);
+                return;
             }
+            if (manager.getPeerRegistry().isUntrusted(nextHop)) {
+                // Only a list leaving over the link needs the link's flag; a request carries no contacts.
+                boolean allowed = "contact-list-request".equals(element)
+                               || manager.getPeerRegistry().isContactListsAllowed(nextHop);
+                if (!allowed || !manager.getPeerRegistry().getExposedServers(nextHop).contains(origin)) {
+                    Log.warn("SECURITY: not relaying {} from {} toward {} — the next hop {} is untrusted and {}",
+                             element, origin, destination, nextHop,
+                             allowed ? origin + " is not exposed to it" : "sending contact lists is not allowed on that link here");
+                    return;
+                }
+            }
+            String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+            try {
+                XMPPServer.getInstance().getPacketRouter()
+                          .route(FederationStanzaFactory.relay(nextHop, el, newVia));
+            } catch (Exception e) {
+                Log.warn("Could not relay {} toward {}: {}", element, destination, e.getMessage());
+            }
+            return;
         }
-        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
-        manager.handleBookmarkPush(fromDomain, sourceDomain, users, newVia);
-        Log.debug("bookmark-push from {} (source={}) — {} user(s)", fromDomain, sourceDomain, users.size());
+
+        if ("contact-list-request".equals(element)) {
+            manager.getContactLists().handleRequest(origin);
+            return;
+        }
+        List<ContactListManager.Contact> contacts = new ArrayList<>();
+        int rejected = 0;
+        for (Element c : el.elements("contact")) {
+            ContactListManager.Contact contact =
+                    ContactListManager.parseContact(origin, c.attributeValue("jid"), c.attributeValue("name"));
+            if (contact == null) { rejected++; continue; }
+            if (contacts.size() >= ContactListManager.MAX_CONTACTS) { rejected++; continue; }
+            contacts.add(contact);
+        }
+        if (rejected > 0) {
+            Log.warn("contact-list from {}: ignored {} entr(ies) — not a bare JID on {}, or past the {}-contact limit",
+                     origin, rejected, origin, ContactListManager.MAX_CONTACTS);
+        }
+        boolean crossedUntrusted = fromUntrusted || manager.getContactLists().crossesUntrusted(origin);
+        manager.getContactLists().handleContactList(origin, contacts, crossedUntrusted);
     }
 
     private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {
@@ -1670,6 +1750,12 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
 
+        Element moderatedRetract = RoomModeration.moderatedRetract(msgEl);
+        if (moderatedRetract != null) {
+            injectModeration(msgEl, moderatedRetract, room);
+            return;
+        }
+
         JID targetJID      = new JID(targetRoom);
         String senderNick  = virtualNick(msgEl.attributeValue("from"));
 
@@ -1702,6 +1788,10 @@ public class FederationIQHandler extends IQHandler {
                 if (rewritten != null) deliverEl = rewritten;
             }
         }
+        // msgEl itself continues to fan-out with the origin's stanza-id intact, so stamp a copy.
+        if (deliverEl == msgEl) deliverEl = msgEl.createCopy();
+        RoomModeration.stripModeration(deliverEl);
+        stampRoomIdentity(deliverEl, room, senderNick);
 
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;
 
@@ -1718,6 +1808,193 @@ public class FederationIQHandler extends IQHandler {
         }
         deliverToOccupants(deliverEl, virtualFrom, occupants);
         Log.debug("injectMessage: delivered to {} occupant(s) in {}", occupants.size(), targetRoom);
+    }
+
+    /**
+     * Gives a relayed groupchat message the room-scoped identity Openfire gives a local occupant's
+     * message: a {@code <stanza-id by=thisRoom>} (XEP-0359) and an {@code <occupant-id>} (XEP-0421).
+     * Clients address a groupchat message by that stanza-id when they react (XEP-0444), reply
+     * (XEP-0461), retract or moderate it, and Conversations refuses to react without one ("Could not
+     * add reaction"). It also drops any incoming reaction that has no occupant-id.
+     *
+     * <p>The origin room's stanza-id arrives on the forwarded copy (Openfire stamps the original packet
+     * before our post-processing forwarder sees it) and every hop relays it unchanged. Reusing its
+     * {@code id} with {@code by} set to this room gives a message the same ID in every copy of the
+     * room. A reaction made on any server then names a message every other server knows, with no ID
+     * translation table.
+     *
+     * <p>Only the stanza-id stamped by the origin room is reused: {@code by} must equal the payload's
+     * {@code to}, the room it was sent to. The origin server strips any client-supplied stanza-id that
+     * claims its own room, so a user cannot choose that one, while one with any other {@code by} is
+     * whatever the client wrote. An id this room has already used gets a fresh one instead, so a peer
+     * cannot make two messages share an id. Every incoming stanza-id/occupant-id is dropped: a peer
+     * must not assert one in this room's name.
+     */
+    private void stampRoomIdentity(Element msgEl, MUCRoom room, String senderNick) {
+        String roomJid = room.getJID().toBareJID();
+        String originRoom = bareJidOf(msgEl.attributeValue("to"));
+        String id = null;
+        for (Element sid : msgEl.elements(QName.get("stanza-id", NS_STANZA_ID))) {
+            String candidate = sid.attributeValue("id");
+            if (id == null && originRoom != null && !originRoom.equals(roomJid)
+                    && originRoom.equals(bareJidOf(sid.attributeValue("by")))
+                    && candidate != null && REUSABLE_STANZA_ID.matcher(candidate).matches()) {
+                id = candidate;
+            }
+            msgEl.remove(sid);
+        }
+        // Remembered with its origin so a moderation from that room can find it (see injectModeration).
+        var origin = new RoomMessageIds.Origin(originRoom, id, senderNick);
+        if (id != null && !manager.getRoomMessageIds().claim(roomJid, id, origin)) {
+            Log.warn("SECURITY: relayed message from {} into {} reuses stanza-id {} already used in the room; "
+                   + "giving it a fresh one", senderNick, roomJid, id);
+            id = null;
+        }
+        if (id == null) {
+            id = UUID.randomUUID().toString();
+            manager.getRoomMessageIds().claim(roomJid, id, origin);
+        }
+        msgEl.addElement(QName.get("stanza-id", NS_STANZA_ID))
+             .addAttribute("id", id)
+             .addAttribute("by", roomJid);
+
+        for (Element oid : msgEl.elements(QName.get("occupant-id", NS_OCCUPANT_ID))) {
+            msgEl.remove(oid);
+        }
+        String occupantId = occupantIdFor(room, senderNick);
+        if (occupantId != null) {
+            msgEl.addElement(QName.get("occupant-id", NS_OCCUPANT_ID)).addAttribute("id", occupantId);
+        }
+    }
+
+    /**
+     * Applies a moderation (XEP-0425) relayed from the room {@code msgEl} names in {@code from}/{@code to}.
+     * It is applied only to a message that came from that same room and whose author belongs to that
+     * room's server: the author's own server may remove its users' messages everywhere, and nobody else
+     * may (see {@link RoomModeration}). The message is found by the origin's stanza-id in this room's
+     * bookkeeping; one too old to be remembered, or from before a restart, is not moderated here.
+     *
+     * <p>The room's occupants get the announcement from this room's bare JID with the id this room gave
+     * the message, as from a local moderator, and it is kept for {@link #replayModerations}.
+     */
+    private void injectModeration(Element msgEl, Element retract, MUCRoom room) {
+        String roomJid    = room.getJID().toBareJID();
+        String originRoom = bareJidOf(msgEl.attributeValue("to"));
+        String targetId   = retract.attributeValue("id");
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+
+        if (originRoom == null || originRoom.equals(roomJid)
+                || !originRoom.equals(msgEl.attributeValue("from"))) {
+            Log.warn("SECURITY: dropping a moderation for {} that does not come from its origin room "
+                   + "(from={}, to={})", roomJid, msgEl.attributeValue("from"), msgEl.attributeValue("to"));
+            return;
+        }
+        if (RoomModeration.belongsToRoomServer(localDomain, originRoom)) {
+            Log.debug("injectModeration: dropping an echo of our own room {}'s moderation", originRoom);
+            return;
+        }
+        var ids = manager.getRoomMessageIds();
+        String localId = ids.localIdOf(roomJid, originRoom, targetId);
+        if (localId == null) {
+            Log.info("Not applying a moderation from {} in {}: message {} is not one this room received "
+                   + "from there, or is too old to be remembered", originRoom, roomJid, targetId);
+            return;
+        }
+        String author = ids.originOf(roomJid, localId).author();
+        if (!RoomModeration.belongsToRoomServer(author, originRoom)) {
+            Log.warn("SECURITY: refusing a moderation from {} in {}: message {} was written by {}, who is "
+                   + "not a user of that room's server", originRoom, roomJid, targetId, author);
+            return;
+        }
+        if (!ids.markModerated(roomJid, localId)) {
+            Log.debug("injectModeration: {} in {} already moderated", localId, roomJid);
+            return;
+        }
+
+        // by names the moderator's virtual occupant here, the same "user@home" nick their messages use.
+        // Only the origin's own users can moderate there, so anyone else is dropped from the claim.
+        Element moderated = retract.element(QName.get("moderated", RoomModeration.NS_MODERATE));
+        String moderator = null;
+        try {
+            String claimed = new JID(moderated.attributeValue("by")).getResource();
+            if (claimed != null && RoomModeration.belongsToRoomServer(claimed, originRoom)) moderator = claimed;
+        } catch (Exception ignored) {
+            // no or unparseable by: announce without one
+        }
+        Element announcement = RoomModeration.announcement(roomJid, msgEl.attributeValue("id"), localId,
+                moderator == null ? null : roomJid + "/" + moderator,
+                moderator == null ? null : occupantIdFor(room, moderator),
+                RoomModeration.reasonOf(retract));
+        announcement.remove(announcement.attribute("to"));
+
+        Deque<StoredModeration> kept = federatedModerations.computeIfAbsent(roomJid, k -> new ConcurrentLinkedDeque<>());
+        kept.addLast(new StoredModeration(localId, announcement.createCopy(), System.currentTimeMillis()));
+        while (kept.size() > MODERATIONS_KEPT_PER_ROOM) kept.pollFirst();
+
+        Log.info("Applying a moderation from {} in {}: message {} by {}", originRoom, roomJid, localId, author);
+        // An empty room needs no buffering: whoever joins next gets it from replayModerations.
+        deliverToOccupants(announcement, roomJid, room.getOccupants());
+    }
+
+    /**
+     * Re-sends the federated moderations this room applied to a local occupant who just joined, for
+     * messages still in the room's history, so the history replay on join does not bring them back. A
+     * moderation made on this server is replayed by the moderation plugin itself, never here. Each
+     * goes out with a XEP-0203 delay, which also keeps the forwarder from relaying it again.
+     */
+    public void replayModerations(String roomJid, JID joiner) {
+        Deque<StoredModeration> kept = federatedModerations.get(roomJid);
+        if (kept == null || kept.isEmpty() || joiner == null) return;
+        MUCRoom room = findLocalRoom(roomJid);
+        if (room == null) return;
+
+        Set<String> inHistory = new HashSet<>();
+        for (var it = room.getRoomHistory().getMessageHistory(); it.hasNext(); ) {
+            Message m = it.next();
+            for (Element sid : m.getElement().elements(QName.get("stanza-id", NS_STANZA_ID))) {
+                if (roomJid.equals(bareJidOf(sid.attributeValue("by")))) inHistory.add(sid.attributeValue("id"));
+            }
+        }
+        int sent = 0;
+        for (StoredModeration sm : kept) {
+            if (!inHistory.contains(sm.targetId())) continue;
+            Element copy = sm.announcement().createCopy();
+            copy.addElement(QName.get("delay", RoomModeration.NS_DELAY))
+                .addAttribute("from", roomJid)
+                .addAttribute("stamp", org.jivesoftware.util.XMPPDateTimeFormat.format(new java.util.Date(sm.at())));
+            copy.addAttribute("from", roomJid);
+            copy.addAttribute("to", joiner.toString());
+            Message delivery = new Message(copy);
+            FederationStanzaFactory.markAsForwarded(delivery);
+            FederationStanzaFactory.directDeliver(delivery);
+            sent++;
+        }
+        if (sent > 0) Log.debug("replayModerations: sent {} to {} joining {}", sent, joiner, roomJid);
+    }
+
+    /** Normalized bare JID of {@code jid}, or null if absent or unparseable. */
+    private static String bareJidOf(String jid) {
+        if (jid == null) return null;
+        try {
+            return new JID(jid).toBareJID();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * The XEP-0421 occupant-id of a virtual occupant ("user@home" nick): what Openfire computes for a
+     * real occupant with that bare JID (an HMAC over room and user), so it stays the same across
+     * messages, presences and reconnects. Null if Openfire cannot compute one; the stanza then goes out
+     * without it, as it did before.
+     */
+    private String occupantIdFor(MUCRoom room, String senderNick) {
+        try {
+            return room.generateOccupantId(new JID(senderNick));
+        } catch (Exception e) {
+            Log.debug("Could not compute an occupant-id for {} in {}: {}", senderNick, room.getJID(), e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -1872,6 +2149,7 @@ public class FederationIQHandler extends IQHandler {
                     statusEl0 != null ? statusEl0.getText() : "");
         }
 
+        String occupantId = occupantIdFor(room, senderNick);
         for (MUCOccupant occupant : occupants) {
             Presence delivery = new Presence();
             delivery.setFrom(virtualFromJID);
@@ -1900,6 +2178,11 @@ public class FederationIQHandler extends IQHandler {
             item.addAttribute("affiliation", "none");
             item.addAttribute("role", leaving ? "none" : "participant");
             if (originalFrom != null) item.addAttribute("jid", originalFrom);
+            // XEP-0421: the room advertises occupant-id, so its occupants' presence must carry it;
+            // the same value as on this occupant's messages (see stampRoomIdentity).
+            if (occupantId != null) {
+                delivery.getElement().addElement("occupant-id", NS_OCCUPANT_ID).addAttribute("id", occupantId);
+            }
 
             FederationStanzaFactory.markAsForwarded(delivery);
             FederationStanzaFactory.directDeliver(delivery);
@@ -2081,6 +2364,10 @@ public class FederationIQHandler extends IQHandler {
      * is not full RFC 7622 validation; it closes the injection/robustness surface (see the admin UI's
      * inline event handlers) without rejecting legitimate lab room JIDs like {@code r_ext@conference.2503}.
      */
+    private static String clip(String s, int max) {
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
     private static boolean isSafeFederationJid(String jid) {
         if (jid == null || jid.isEmpty() || jid.length() > 3071) return false;   // RFC 7622 max length
         for (int i = 0; i < jid.length(); i++) {

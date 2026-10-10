@@ -466,13 +466,12 @@ public class S2SMonitor {
         // (Idempotent and cheap — early-returns when the effective interval is unchanged.)
         rescheduleKeepalive();
 
-        // Refresh the published user directory so login/logout churn propagates (only when the
-        // admin has enabled publishing — otherwise we'd resend empty lists every poll).
-        if (FederationProperties.DIRECTORY_PUBLISH.getValue()) {
-            federationManager.publishDirectory();
-        }
-        if (FederationProperties.BOOKMARK_PUSH.getValue()) {
-            federationManager.pushBookmarks();
+        // Shared contact lists: send each target its list when it changed (group membership, a
+        // renamed user) or the target just became reachable; solicit lists from origins that did.
+        try {
+            federationManager.getContactLists().tick();
+        } catch (Exception e) {
+            Log.warn("Contact-list reconciliation failed: {}", e.toString());
         }
     }
 
@@ -542,12 +541,6 @@ public class S2SMonitor {
         // Revive any pending mapping requests toward this peer (e.g. legacy mappings awaiting
         // re-acceptance, or requests queued while it was down).
         federationManager.resendPendingRequests(domain);
-        // Publish our online-user directory to the freshly-reachable peer (no-op unless enabled).
-        // Per-peer variant: the broadcast form skips when our directory is unchanged, but this
-        // peer's cache is empty and needs the current state regardless.
-        federationManager.publishDirectoryTo(domain);
-        // Advertise our connected clients as XEP-0048 bookmarks (no-op unless enabled).
-        federationManager.pushBookmarksTo(domain);
     }
 
     private void onPeerDown(String domain) {
