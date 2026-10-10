@@ -1522,8 +1522,9 @@ public class FederationIQHandler extends IQHandler {
      * Relays a {@code contact-list} or {@code contact-list-request} toward its destination, or applies
      * it when we are the destination.
      *
-     * <p>An untrusted link is crossed only with {@code contactListsAcrossUntrusted} on, and then under
-     * the link's exposure settings, exactly like the 1:1 forwards: arriving over an untrusted link, the
+     * <p>An untrusted link is crossed only when this server allows contact lists on that link (a
+     * per-peer setting), and then under the link's exposure settings, like the 1:1 forwards: arriving
+     * over an untrusted link, the
      * origin must be the peer or a server behind it, and the destination (us, or the server we would
      * relay to) must be one we expose to that peer; leaving over an untrusted link, the origin must be
      * a server we expose to it.
@@ -1533,8 +1534,6 @@ public class FederationIQHandler extends IQHandler {
         String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        boolean acrossUntrusted =
-                com.igniterealtime.openfire.plugin.federation.FederationProperties.CONTACT_LISTS_ACROSS_UNTRUSTED.getValue();
 
         if (destination == null || origin == null || origin.equals(localDomain)) {
             Log.warn("{} from {} has a missing or invalid origin/destination ({} → {}), dropping",
@@ -1542,9 +1541,9 @@ public class FederationIQHandler extends IQHandler {
             return;
         }
         if (manager.getPeerRegistry().isUntrusted(fromDomain)) {
-            if (!acrossUntrusted) {
-                Log.warn("SECURITY: dropping {} from untrusted peer {} — contact lists across untrusted links "
-                       + "are disabled here (plugin.federation.contactListsAcrossUntrusted)", element, fromDomain);
+            if (!manager.getPeerRegistry().isContactListsAllowed(fromDomain)) {
+                Log.warn("SECURITY: dropping {} from untrusted peer {} — contact lists are not allowed on that "
+                       + "link here", element, fromDomain);
                 return;
             }
             if (!claimedOriginOk(fromDomain, origin, element)) return;
@@ -1561,12 +1560,14 @@ public class FederationIQHandler extends IQHandler {
                 Log.debug("{}: no route to {}, dropping", element, destination);
                 return;
             }
-            if (manager.getPeerRegistry().isUntrusted(nextHop)
-                    && (!acrossUntrusted || !manager.getPeerRegistry().getExposedServers(nextHop).contains(origin))) {
-                Log.warn("SECURITY: not relaying {} from {} toward {} — the next hop {} is untrusted and {}",
-                         element, origin, destination, nextHop,
-                         acrossUntrusted ? origin + " is not exposed to it" : "contact lists across untrusted links are disabled here");
-                return;
+            if (manager.getPeerRegistry().isUntrusted(nextHop)) {
+                boolean allowed = manager.getPeerRegistry().isContactListsAllowed(nextHop);
+                if (!allowed || !manager.getPeerRegistry().getExposedServers(nextHop).contains(origin)) {
+                    Log.warn("SECURITY: not relaying {} from {} toward {} — the next hop {} is untrusted and {}",
+                             element, origin, destination, nextHop,
+                             allowed ? origin + " is not exposed to it" : "contact lists are not allowed on that link here");
+                    return;
+                }
             }
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
             try {

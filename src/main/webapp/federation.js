@@ -115,7 +115,6 @@ function renderAll(data) {
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
     updateProbeOnSubscribeToggle(data.probeOnSubscribe);
-    updateContactsAcrossUntrustedToggle(data.contactListsAcrossUntrusted);
     renderFileConfig(data.fileConfig || {});
     applyAllFilters();
 }
@@ -306,7 +305,14 @@ function renderPeerDetailRow(p) {
             <div style="margin-top:8px">
                 <button class="btn-small btn-primary" onclick="saveExposedServers('${dom}')">Save</button>
                 <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
-            </div>`;
+            </div>
+            <label class="exposed-room" style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
+                <input type="checkbox" ${p.contactListsAllowed ? 'checked' : ''}
+                       onchange="setPeerContactLists('${dom}', this.checked)">
+                <span><strong>Allow shared contact lists across this link</strong><br>
+                    <small>Lists from checked servers may go out to ${dom}; lists from ${dom} may come in for checked
+                    servers. The admin of ${dom} must allow it on their side too.</small></span>
+            </label>`;
     } else {
         outbound = '<p class="empty" style="margin:4px 0">Trusted — this peer sees the full topology and all federated rooms.</p>';
     }
@@ -397,6 +403,15 @@ function acceptCert(domain) {
         + 'Only do this if you know the server was legitimately re-created or its certificate '
         + 'was renewed. The new certificate will be pinned and the alert cleared.')) return;
     post({ action: 'accept-cert', domain }).then(refresh);
+}
+
+function setPeerContactLists(domain, enabled) {
+    post({ action: 'set-peer-contact-lists', domain, enabled }).then(result => {
+        if (result && result.ok) {
+            flashSaved(enabled ? 'Contact lists allowed ✓' : 'Contact lists blocked ✓');
+            refresh();
+        }
+    });
 }
 
 function saveExposedServers(domain) {
@@ -909,27 +924,6 @@ function saveProbeOnSubscribe() {
         });
 }
 
-// ── Security: contact lists across untrusted links ────────────────────────────
-
-function updateContactsAcrossUntrustedToggle(enabled) {
-    const cb = document.getElementById('contactsedge-toggle');
-    const lbl = document.getElementById('contactsedge-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Allowed where exposed' : 'Trusted links only';
-}
-
-function saveContactsAcrossUntrusted() {
-    const cb = document.getElementById('contactsedge-toggle');
-    if (!cb) return;
-    post({ action: 'set-contact-lists-across-untrusted', enabled: cb.checked })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
 function removePeer(domain) {
     if (!confirm('Remove peer ' + domain + '?')) return;
     post({ action: 'remove-peer', domain }).then(refresh);
@@ -1230,7 +1224,7 @@ function renderShareDetailRow(group, targets, hidden) {
         const pending = shareable.includes(s) ? ''
             : '<span class="badge badge-out" title="no usable route right now — sent when it is back">pending</span>';
         const edge = viaUntrusted.includes(s)
-            ? '<span class="badge badge-untrusted" title="reached across an untrusted link — the servers on each side of it must allow the list through">via untrusted link</span>'
+            ? '<span class="badge badge-untrusted" title="reached across an untrusted link — the admins on both sides of it must allow contact lists on that link">via untrusted link</span>'
             : '';
         return `
             <label class="exposed-room">
@@ -1313,9 +1307,11 @@ function renderSentLists(sent) {
     el.innerHTML = sent.map(t => {
         const state = !t.reachable
             ? '<span class="status-dot grey"></span> Unreachable — sent when it is back'
-            : t.delivered
-                ? '<span class="status-dot green"></span> Up to date'
-                : '<span class="status-dot orange"></span> Sending…';
+            : !t.delivered
+                ? '<span class="status-dot orange"></span> Sending…'
+                : t.crossesUntrusted
+                    ? '<span class="status-dot orange"></span> Sent — crosses an untrusted link; arrives only if that link allows contact lists'
+                    : '<span class="status-dot green"></span> Up to date';
         return `
         <div class="peer-section">
             <div class="peer-section-header" style="cursor:default">

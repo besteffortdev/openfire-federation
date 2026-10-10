@@ -62,14 +62,14 @@ still holds the old list.
 ```
 if destination or origin is missing, or origin == our own domain → drop
 if the sending link is UNTRUSTED:
-    if crossing untrusted links is not enabled here → drop, log SECURITY
+    if contact lists are not allowed on this link here → drop, log SECURITY
     if origin is not the sender or a server routed through it → drop, log SECURITY
     if (destination, or our own domain when we are it) is not exposed to the sender → drop, log SECURITY
 if via contains our own domain                  → drop (loop)
 if destination != our own domain:
     next := next hop toward destination; none   → drop
     if next is an UNTRUSTED peer:
-        if crossing untrusted links is not enabled here, or origin is not exposed to next
+        if contact lists are not allowed on that link here, or origin is not exposed to next
                                                 → drop, log SECURITY
     relay to next with via + our own domain
     stop
@@ -83,9 +83,10 @@ contact-list:
 Sending, relaying and accepting all refuse one, and a sender only targets servers whose route is
 trusted end to end (no *edge* flag, [03](03-routing.md#untrusted-peers)).
 
-A server MAY let contact lists cross its untrusted links. This implementation does so only when
-`plugin.federation.contactListsAcrossUntrusted` is on. It then applies the link's exposure model,
-the same rule as the 1:1 forwards ([09](09-validation.md)):
+A server MAY let contact lists cross its untrusted links. This implementation decides per link: an
+untrusted peer's settings carry an *allow shared contact lists* flag, off by default. On a link
+where it is set, the link's exposure model applies, the same rule as the 1:1 forwards
+([09](09-validation.md)):
 
 - **Leaving over an untrusted link:** the `origin` must be a server exposed to that peer. A sender
   whose own next hop is untrusted checks this before sending. A relay checks it before re-emitting.
@@ -93,7 +94,7 @@ the same rule as the 1:1 forwards ([09](09-validation.md)):
   The destination must be one exposed to that peer: this server when it is the destination, or the
   server being relayed to.
 
-Each side applies only its own setting and its own exposed set, so a list crosses only when both
+Each side applies only its own flag and its own exposed set, so a list crosses only when both
 admins of the link allow it. A sender whose route crosses an untrusted link further away cannot see
 those checks. Its list is dropped (and logged) there if they fail.
 

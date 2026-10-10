@@ -29,6 +29,7 @@ public class PeerRegistry {
     private static final String PROP_EXPOSED_LEGACY = "federation.peer.exposed.";
     private static final String PROP_CERTFP     = "federation.peer.certfp.";    // + domain → sha256 hex of pinned cert
     private static final String PROP_DENIED_RT  = "federation.peer.deniedroutes."; // + domain → csv of denied destinations
+    private static final String PROP_CONTACT_LISTS = "federation.peer.contactlists."; // + domain → true (lists may cross)
 
     private final ConcurrentHashMap<String, PeerServer> peers = new ConcurrentHashMap<>();
 
@@ -60,6 +61,7 @@ public class PeerRegistry {
                     if (JiveGlobals.getBooleanProperty(PROP_UNTRUSTED + domain, false)) {
                         peer.setUntrusted(true);
                         peer.setExposedServers(parseCsv(JiveGlobals.getProperty(PROP_EXPOSED_SRV + domain, "")));
+                        peer.setContactListsAllowed(JiveGlobals.getBooleanProperty(PROP_CONTACT_LISTS + domain, false));
                         Log.info("Loaded untrusted peer {} with {} exposed server(s)",
                                  domain, peer.getExposedServers().size());
                     }
@@ -108,6 +110,7 @@ public class PeerRegistry {
             JiveGlobals.deleteProperty(PROP_EXPOSED_LEGACY + domain);
             JiveGlobals.deleteProperty(PROP_CERTFP + domain);
             JiveGlobals.deleteProperty(PROP_DENIED_RT + domain);
+            JiveGlobals.deleteProperty(PROP_CONTACT_LISTS + domain);
             persist();
         }
         return removed;
@@ -136,6 +139,27 @@ public class PeerRegistry {
             JiveGlobals.setProperty(PROP_UNTRUSTED + domain, "true");
         } else {
             JiveGlobals.deleteProperty(PROP_UNTRUSTED + domain);
+        }
+    }
+
+    /**
+     * Whether shared contact lists may cross the untrusted link to {@code domain}. False for an unknown
+     * peer; meaningless (and ignored) for a trusted one, whose links always carry them.
+     */
+    public boolean isContactListsAllowed(String domain) {
+        PeerServer peer = peers.get(domain);
+        return peer != null && peer.isContactListsAllowed();
+    }
+
+    /** Allows (or stops) shared contact lists across the link to {@code domain} and persists it. No-op if unknown. */
+    public void setContactListsAllowed(String domain, boolean allowed) {
+        PeerServer peer = peers.get(domain);
+        if (peer == null) return;
+        peer.setContactListsAllowed(allowed);
+        if (allowed) {
+            JiveGlobals.setProperty(PROP_CONTACT_LISTS + domain, "true");
+        } else {
+            JiveGlobals.deleteProperty(PROP_CONTACT_LISTS + domain);
         }
     }
 

@@ -143,6 +143,7 @@ public class FederationApiServlet extends HttpServlet {
              .append("\"foreign\":").append(mgr.isForeignDomain(p.getDomain())).append(",")
              .append("\"certPinned\":").append(p.getPinnedCertFp() != null).append(",")
              .append("\"certMismatch\":").append(p.isCertMismatch()).append(",")
+             .append("\"contactListsAllowed\":").append(p.isContactListsAllowed()).append(",")
              .append("\"exposedServers\":");
             strings(b, p.getExposedServers());
 
@@ -312,8 +313,7 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"allowRemoteRoomTraversal\":").append(FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()).append(",");
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
         sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
-        sb.append("\"contactListsAcrossUntrusted\":")
-          .append(FederationProperties.CONTACT_LISTS_ACROSS_UNTRUSTED.getValue()).append(",");
+
         sb.append("\"filesEnabled\":").append(FederationProperties.FILES_ENABLED.getValue()).append(",");
         // Distinct from filesEnabled: the switch can be on while the relay itself failed to come up
         // (unusable storage directory, download endpoint not mounted). Shares then keep their
@@ -486,6 +486,7 @@ public class FederationApiServlet extends HttpServlet {
             b.append("{\"target\":\"").append(esc(t))
              .append("\",\"reachable\":").append(cl.canExchangeWith(t))
              .append(",\"delivered\":").append(contacts.equals(last))
+             .append(",\"crossesUntrusted\":").append(cl.crossesUntrusted(t))
              .append(",\"count\":").append(contacts.size())
              .append(",\"contacts\":");
             appendContacts(b, contacts);
@@ -656,6 +657,16 @@ public class FederationApiServlet extends HttpServlet {
                     mgr.sendRoutingUpdate(d);
                     mgr.sendRoomState(d);
                 }
+                return OK;
+            }
+            case "set-peer-contact-lists": {
+                String d = domainParam(req, "domain");
+                String enabled = req.getParameter("enabled");
+                if (d == null || enabled == null) return required("domain", "enabled");
+                if (!mgr.getPeerRegistry().contains(d)) return error("not a configured peer");
+                mgr.getPeerRegistry().setContactListsAllowed(d, Boolean.parseBoolean(enabled.strip()));
+                // Servers newly reachable across this link get their list (and are asked for theirs) now.
+                mgr.getContactLists().resendAll();
                 return OK;
             }
             case "deny-route": case "allow-route": {
@@ -917,13 +928,7 @@ public class FederationApiServlet extends HttpServlet {
                 return applyToggle(req, FederationProperties.DIRECT_MSG_RELAY, "directMsgRelay");
             case "set-probe-on-subscribe":
                 return applyToggle(req, FederationProperties.PROBE_ON_SUBSCRIBE, "probeOnSubscribe");
-            case "set-contact-lists-across-untrusted": {
-                String reply = applyToggle(req, FederationProperties.CONTACT_LISTS_ACROSS_UNTRUSTED,
-                                           "contactListsAcrossUntrusted");
-                // Servers newly reachable under the new setting get their list (and are asked for theirs) now.
-                if (isOk(reply)) mgr.getContactLists().resendAll();
-                return reply;
-            }
+
             case "set-keepalive": {
                 Integer seconds = intParam(req, "seconds");
                 if (seconds == null) return secondsError(req);
