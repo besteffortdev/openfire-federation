@@ -56,8 +56,9 @@ import java.util.concurrent.RejectedExecutionException;
  * </ul>
  *
  * <p>Presence is one-way: sharing alice with server B lets B's mapped users see alice; alice sees
- * B's users only if B shares them back. Contact lists never cross an untrusted link, in either
- * direction.
+ * B's users only if B shares them back. Contact lists cross an untrusted link only when
+ * {@link FederationProperties#CONTACT_LISTS_ACROSS_UNTRUSTED} is on and the link's exposed-server
+ * settings allow it.
  *
  * <p>Persistence: share rules and mappings in JiveGlobals (rewritten wholesale — both sets are
  * small). Received lists are in memory: the advertising server re-sends whenever the route comes
@@ -242,11 +243,14 @@ public class ContactListManager {
         tick();
     }
 
-    /** Servers a share can target: every routable server reached over a trusted path. */
+    /**
+     * Servers a share can target: every routable server contact lists may travel to (see
+     * {@link #canExchangeWith}) — over trusted links only, unless crossing untrusted links is enabled.
+     */
     public Set<String> shareableServers() {
         Set<String> out = new java.util.TreeSet<>();
         for (RouteEntry e : manager.getRoutingTable().getAll()) {
-            if (cleanRoute(e)) out.add(e.destination());
+            if (canExchangeWith(e.destination())) out.add(e.destination());
         }
         return out;
     }
@@ -700,13 +704,26 @@ public class ContactListManager {
     // ── Helpers ─────────────────────────────────────────────────────────────────
 
     /**
-     * Whether contact lists may travel to/from {@code domain}: it has a route, and that route runs
-     * entirely over trusted links. A list never crosses an untrusted edge.
+     * Whether contact lists may travel to/from {@code domain}. Always when the route runs entirely
+     * over trusted links. A route that crosses an untrusted link qualifies only with
+     * {@link FederationProperties#CONTACT_LISTS_ACROSS_UNTRUSTED} on, and, when that link is our own
+     * next hop, only if this server is exposed to it. An untrusted link further along is checked by
+     * the servers on either side of it (see {@code FederationIQHandler}), which this one cannot see.
      */
     public boolean canExchangeWith(String domain) {
         if (domain == null || domain.equals(localDomain())) return false;
         Optional<RouteEntry> route = manager.getRoutingTable().getRoute(domain);
-        return route.isPresent() && cleanRoute(route.get());
+        if (route.isEmpty()) return false;
+        if (cleanRoute(route.get())) return true;
+        if (!FederationProperties.CONTACT_LISTS_ACROSS_UNTRUSTED.getValue()) return false;
+        String nextHop = route.get().nextHop();
+        return !manager.getPeerRegistry().isUntrusted(nextHop)
+            || manager.getPeerRegistry().getExposedServers(nextHop).contains(localDomain());
+    }
+
+    /** True when the route to {@code domain} crosses an untrusted link (for the admin page). */
+    public boolean crossesUntrusted(String domain) {
+        return manager.getRoutingTable().getRoute(domain).map(e -> !cleanRoute(e)).orElse(false);
     }
 
     private boolean cleanRoute(RouteEntry e) {

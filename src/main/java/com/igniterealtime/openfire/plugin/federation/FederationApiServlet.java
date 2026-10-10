@@ -312,6 +312,8 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"allowRemoteRoomTraversal\":").append(FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()).append(",");
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
         sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
+        sb.append("\"contactListsAcrossUntrusted\":")
+          .append(FederationProperties.CONTACT_LISTS_ACROSS_UNTRUSTED.getValue()).append(",");
         sb.append("\"filesEnabled\":").append(FederationProperties.FILES_ENABLED.getValue()).append(",");
         // Distinct from filesEnabled: the switch can be on while the relay itself failed to come up
         // (unusable storage directory, download endpoint not mounted). Shares then keep their
@@ -465,6 +467,10 @@ public class FederationApiServlet extends HttpServlet {
 
         sb.append(",\"shareableServers\":");
         strings(sb, cl.shareableServers());
+
+        // Of those, the ones reached across an untrusted link (badged in the server list).
+        sb.append(",\"untrustedPathServers\":");
+        strings(sb, cl.shareableServers().stream().filter(cl::crossesUntrusted).toList());
 
         sb.append(",\"localGroups\":");
         strings(sb, cl.localGroupNames());
@@ -911,6 +917,13 @@ public class FederationApiServlet extends HttpServlet {
                 return applyToggle(req, FederationProperties.DIRECT_MSG_RELAY, "directMsgRelay");
             case "set-probe-on-subscribe":
                 return applyToggle(req, FederationProperties.PROBE_ON_SUBSCRIBE, "probeOnSubscribe");
+            case "set-contact-lists-across-untrusted": {
+                String reply = applyToggle(req, FederationProperties.CONTACT_LISTS_ACROSS_UNTRUSTED,
+                                           "contactListsAcrossUntrusted");
+                // Servers newly reachable under the new setting get their list (and are asked for theirs) now.
+                if (isOk(reply)) mgr.getContactLists().resendAll();
+                return reply;
+            }
             case "set-keepalive": {
                 Integer seconds = intParam(req, "seconds");
                 if (seconds == null) return secondsError(req);

@@ -107,6 +107,17 @@ public final class FederationProperties {
         boolProp("plugin.federation.directMessageRelay", true, true);
 
     /**
+     * Let shared contact lists cross an untrusted link (OFF by default). When false, a contact list is
+     * never sent, relayed or accepted over an untrusted link. When true, it may cross one only where
+     * the link's exposed-server settings already allow it: on the way out, the sharing server must be
+     * exposed to the untrusted peer; on the way in, the destination server must be exposed to the peer
+     * it arrives from — the same rule 1:1 messages and presence follow across that link. Each server
+     * applies its own setting, so both ends of the link have to turn it on.
+     */
+    public static final SystemProperty<Boolean> CONTACT_LISTS_ACROSS_UNTRUSTED =
+        boolProp("plugin.federation.contactListsAcrossUntrusted", false, true);
+
+    /**
      * Probe a multi-hop contact's presence over the overlay when a local user subscribes to them
      * mid-session (ON by default). Openfire auto-probes a freshly-approved contact via native S2S,
      * which leaks past the federation interceptor and fails for a multi-hop peer (no direct link),

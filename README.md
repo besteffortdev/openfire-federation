@@ -220,6 +220,7 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.keepaliveSeconds` | `240` | Interval for lightweight keepalive pings to reachable peers. Min 30. Auto‑clamped below Openfire's S2S idle timeout. |
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
+| `plugin.federation.contactListsAcrossUntrusted` | `false` | Let shared contact lists cross an untrusted link, but only where its exposed‑server settings allow it (the sharing server exposed on the way out, the destination exposed on the way in). Both ends of the link must enable it. Also in *Settings → Security & presence*. |
 | `plugin.federation.peerAllowlist` | `true` | Secure‑by‑default trust mode. Only configured peers may drive federation; every action from any other peer is rejected. Set `false` for open federation. See [Security](#security). |
 | `plugin.federation.files.enabled` | `true` | Federate HTTP File Upload shares: relay content to the servers that deliver the message and rewrite the link to their local `/federation-files` endpoint (HTTP‑bind port). Also in the *Files* tab. |
 | `plugin.federation.files.maxSizeMB` | `25` | Largest file the relay will stage, transfer, or accept. Also in the *Files* tab. |

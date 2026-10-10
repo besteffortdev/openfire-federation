@@ -217,7 +217,7 @@ Where it applies, and against what:
 | `file-*`, addressed to us | **our own domain** |
 | `direct-forward`, `presence-forward`, `iq-forward` | the `destination`, or our own domain when we are it |
 | stanzas to a local MUC address, from a sender behind an untrusted edge | the room must be federated and shared with the sender's server or the edge ([05](05-muc-traffic.md#direct-room-access-without-a-mapping)) |
-| `contact-list`, `contact-list-request` | refused outright from an untrusted link, and never relayed into one ([08](08-contact-lists.md)) |
+| `contact-list`, `contact-list-request` | refused from an untrusted link unless crossing is enabled; then the origin must be the peer or behind it, and the destination (or our own domain when we are it) must be exposed ([08](08-contact-lists.md)) |
 
 Two notes:
 
@@ -237,7 +237,7 @@ The gate has a sending half, and both are required for the exposure model to mea
 
 - `routing-update` — filtered to exposed destinations ([03](03-routing.md#untrusted-peers)).
 - `room-advertisement` — filtered to rooms homed on exposed servers, then by per-room visibility.
-- `contact-list` / `contact-list-request` — never sent at all, and only to a destination whose route is trusted end to end.
+- `contact-list` / `contact-list-request` — not sent or relayed into an untrusted peer unless crossing is enabled, and then only when the `origin` is a server exposed to it ([08](08-contact-lists.md)).
 - Relayed `room-advertisement` for an origin the peer is not exposed to — not sent, not even as an
   empty withdrawal (since 1.10.9).
 - `direct-forward`, `presence-forward`, `iq-forward` — sent only when the payload's sender is on an

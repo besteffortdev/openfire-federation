@@ -115,6 +115,7 @@ function renderAll(data) {
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
     updateProbeOnSubscribeToggle(data.probeOnSubscribe);
+    updateContactsAcrossUntrustedToggle(data.contactListsAcrossUntrusted);
     renderFileConfig(data.fileConfig || {});
     applyAllFilters();
 }
@@ -908,6 +909,27 @@ function saveProbeOnSubscribe() {
         });
 }
 
+// ── Security: contact lists across untrusted links ────────────────────────────
+
+function updateContactsAcrossUntrustedToggle(enabled) {
+    const cb = document.getElementById('contactsedge-toggle');
+    const lbl = document.getElementById('contactsedge-state');
+    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
+    if (lbl) lbl.textContent = enabled ? 'Allowed where exposed' : 'Trusted links only';
+}
+
+function saveContactsAcrossUntrusted() {
+    const cb = document.getElementById('contactsedge-toggle');
+    if (!cb) return;
+    post({ action: 'set-contact-lists-across-untrusted', enabled: cb.checked })
+        .then(result => {
+            if (result && result.ok) {
+                flashSaved('Saved ✓');
+                refresh();
+            }
+        });
+}
+
 function removePeer(domain) {
     if (!confirm('Remove peer ' + domain + '?')) return;
     post({ action: 'remove-peer', domain }).then(refresh);
@@ -1198,18 +1220,23 @@ function renderLocalGroups() {
 function renderShareDetailRow(group, targets, hidden) {
     const id = 'share-' + jidToElemId(group);
     const cur = editedShares[group] || new Set(targets);
-    const shareable = (lastData.contactLists || {}).shareableServers || [];
+    const cl = lastData.contactLists || {};
+    const shareable = cl.shareableServers || [];
+    const viaUntrusted = cl.untrustedPathServers || [];
     const servers = new Set(shareable);
     targets.forEach(t => servers.add(t));
     cur.forEach(t => servers.add(t));
     const rows = Array.from(servers).sort().map(s => {
         const pending = shareable.includes(s) ? ''
-            : '<span class="badge badge-out" title="no trusted route right now — sent when it is back">pending</span>';
+            : '<span class="badge badge-out" title="no usable route right now — sent when it is back">pending</span>';
+        const edge = viaUntrusted.includes(s)
+            ? '<span class="badge badge-untrusted" title="reached across an untrusted link — the servers on each side of it must allow the list through">via untrusted link</span>'
+            : '';
         return `
             <label class="exposed-room">
                 <input type="checkbox" class="share-cb" data-group="${escHtml(group)}" value="${escHtml(s)}"
                        ${cur.has(s) ? 'checked' : ''} onchange="captureShareEdits('${jsArg(group)}')">
-                <span>${escHtml(s)}</span> ${pending}
+                <span>${escHtml(s)}</span> ${pending}${edge}
             </label>`;
     }).join('');
     return `
@@ -1222,7 +1249,7 @@ function renderShareDetailRow(group, targets, hidden) {
                             contact list, kept in step with the group's membership</span>
                     </div>
                     ${filteredChecklist(id, rows, 'Filter servers…', checklistFilters,
-                        '<p class="empty" style="margin:4px 0">No server is reachable over a trusted path yet.</p>')}
+                        '<p class="empty" style="margin:4px 0">No server can receive contact lists from here yet.</p>')}
                     <div style="margin-top:8px">
                         <button class="btn-small btn-primary" onclick="saveShare('${jsArg(group)}')">Save</button>
                         ${targets.length ? `<button class="btn-small btn-danger" style="margin-left:4px"

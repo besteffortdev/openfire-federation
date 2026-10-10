@@ -594,6 +594,27 @@
                         <span id="probesub-state" class="setting-state">…</span>
                     </div>
                 </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Allow shared contact lists across untrusted links</div>
+                        <div class="setting-desc">
+                            Off by default: a shared contact list never crosses an untrusted link. When
+                            enabled, it may cross one only where that link's exposed-server settings
+                            already allow it, the same rule 1:1 messages follow. The sharing server must
+                            be exposed to the untrusted peer on the way out. The destination server must be
+                            exposed on the way in. Each server applies its own setting, so both ends of the
+                            link must enable it. Turning it off stops further updates across the link;
+                            lists already delivered stay until the receiving admin unmaps them.
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="contactsedge-toggle" onchange="saveContactsAcrossUntrusted()">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="contactsedge-state" class="setting-state">…</span>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -782,7 +803,8 @@
                     group shared with it, kept in step with group membership. The receiving server's admin
                     chooses which of their users see the list. Their users see the presence and avatar
                     of the contacts you share. Your users don't see theirs unless that server shares
-                    back. Only servers reached over trusted links are listed.
+                    back. Only servers reached over trusted links are listed, unless <em>Allow shared contact lists
+                    across untrusted links</em> is on (Settings → Security &amp; presence).
                 </p>
                 <input type="text" id="group-search" class="list-search" placeholder="Filter groups…">
             </div>
