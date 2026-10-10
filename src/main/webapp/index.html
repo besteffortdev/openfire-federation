@@ -114,18 +114,20 @@
         .count-chip:empty { display: none; }
 
         /* ══ Filter inputs ═══════════════════════════════════════════ */
-        .filter-input, #room-search {
+        .filter-input, #room-search, .list-search {
             margin-left: auto; width: 220px; max-width: 50%;
             padding: 6px 11px 6px 30px; border: 1px solid var(--line);
             border-radius: 999px; font: inherit; font-size: 12.5px; color: var(--fg);
             background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2398a2b3' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E") no-repeat 10px center;
             transition: border-color .12s ease, box-shadow .12s ease;
         }
-        .filter-input:focus, #room-search:focus {
+        .filter-input:focus, #room-search:focus, .list-search:focus {
             outline: none; border-color: var(--primary);
             box-shadow: 0 0 0 3px var(--primary-soft);
         }
         #room-search { margin: 0 0 14px; width: 320px; }
+        #principal-search { margin: 0 0 14px; width: 320px; }
+        .list-search.in-col { width: 100%; max-width: none; box-sizing: border-box; margin: 0 0 6px; }
 
         /* ══ Tables ══════════════════════════════════════════════════ */
         .table-scroll { max-height: 480px; overflow: auto; }
@@ -761,61 +763,40 @@
     <div id="panel-users" class="fed-panel">
 
         <div class="fed-subtabs">
-            <button class="fed-subtab active" data-subtab="users-share">Share my contacts</button>
-            <button class="fed-subtab"        data-subtab="users-received">Received contact lists</button>
-            <button class="fed-subtab"        data-subtab="users-clients">Connected clients</button>
+            <button class="fed-subtab active" data-subtab="contact-sharing">Contact Sharing</button>
+            <button class="fed-subtab"        data-subtab="contact-delivery">Sent lists</button>
         </div>
 
-        <!-- ·· Share my contacts ·········································· -->
-        <div id="subpanel-users-share" class="fed-subpanel active">
+        <!-- ·· Contact Sharing ··········································· -->
+        <div id="subpanel-contact-sharing" class="fed-subpanel active">
 
         <div class="section-box">
-            <div class="section-box-header">Share users and groups with other servers</div>
-            <div class="section-box-body">
+            <div class="section-box-header">
+                Local users and groups — share with other servers
+                <span class="count-chip" data-count-for="local-principals-tbody"></span>
+            </div>
+            <div class="section-box-body" style="padding-bottom:0">
                 <p class="hint" style="margin-top:0">
-                    Like Openfire's Contact List Sharing, across servers. Pick a local user or group and
-                    the servers to share it with. Each server receives one contact list: everyone
-                    shared with it. A group is shared by membership, so people who join or leave the
-                    group are added or removed automatically. The receiving server's admin chooses
-                    which of their users see the list. Their users see the presence and avatar of the
-                    contacts you share. Your users don't see theirs unless that server shares contacts
+                    Like Openfire's Contact List Sharing, across servers. Expand a user or group (▸) and
+                    tick the servers to share it with. Each server receives one contact list: everyone
+                    shared with it. A shared group follows its membership. The receiving server's admin
+                    chooses which of their users see the list. Their users see the presence and avatar
+                    of the contacts you share. Your users don't see theirs unless that server shares
                     back. Only servers reached over trusted links are listed.
                 </p>
-                <form id="form-contact-share" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
-                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
-                        Share
-                        <select id="cs-kind" style="margin-top:3px">
-                            <option value="user">User</option>
-                            <option value="group">Group</option>
-                        </select>
-                    </label>
-                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
-                        Name
-                        <input type="text" id="cs-name" list="cs-name-options" autocomplete="off"
-                               placeholder="username or group" style="margin-top:3px;min-width:200px">
-                        <datalist id="cs-name-options"></datalist>
-                    </label>
-                    <div style="display:flex;flex-direction:column;font-size:12px;color:#555">
-                        With servers
-                        <div id="cs-targets" style="margin-top:3px;display:flex;flex-wrap:wrap;gap:4px 14px;max-width:520px">
-                            <span class="hint">Loading…</span>
-                        </div>
-                    </div>
-                    <button type="submit" class="btn btn-primary btn-small">Save</button>
-                </form>
+                <input type="text" id="principal-search" class="list-search" placeholder="Filter users and groups…">
             </div>
             <div class="table-scroll">
                 <table class="fed-table">
                     <thead>
                         <tr>
-                            <th>Shared</th>
                             <th>Name</th>
-                            <th>With servers</th>
-                            <th></th>
+                            <th>Type</th>
+                            <th style="text-align:right">Shared with</th>
                         </tr>
                     </thead>
-                    <tbody id="contact-share-tbody">
-                        <tr><td colspan="4" class="empty">Loading…</td></tr>
+                    <tbody id="local-principals-tbody">
+                        <tr><td colspan="3" class="empty">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -823,32 +804,16 @@
 
         <div class="section-box">
             <div class="section-box-header">
-                What each server receives
-                <button class="btn btn-small" style="margin-left:auto" onclick="resendContactLists()">Re-send now</button>
-            </div>
-            <div class="section-box-body" id="contact-sent-container">
-                <p class="empty">Loading…</p>
-            </div>
-        </div>
-
-        </div><!-- /subpanel-users-share -->
-
-        <!-- ·· Received contact lists ····································· -->
-        <div id="subpanel-users-received" class="fed-subpanel">
-
-        <div class="section-box">
-            <div class="section-box-header">
-                Contact lists shared with this server
+                Contact lists shared with this server (by peers)
                 <input class="filter-input" data-target="contact-received-container" placeholder="Filter servers…">
             </div>
             <div class="section-box-body">
                 <p class="hint" style="margin-top:0">
-                    Each server that shares contacts with you appears here. Map its list to one or more
-                    local groups (or all users). The plugin then keeps an Openfire shared group, named
-                    <code>federation-contacts-&lt;server&gt;</code>, holding those contacts. That puts
-                    them in each chosen user's contact list under the roster group name you pick. If
-                    the server stops sharing someone, they're removed. Removing the mapping deletes the
-                    group, which takes the contacts out of every contact list.
+                    Map a server's list to one or more local groups (or all users). The plugin keeps an
+                    Openfire shared group, <code>federation-contacts-&lt;server&gt;</code>, holding those
+                    contacts, which puts them in each chosen user's contact list under the roster group
+                    name you pick. If the server stops sharing someone, they're removed. Removing the
+                    mapping deletes the group, which takes the contacts out of every contact list.
                 </p>
                 <p id="contact-readonly-note" class="hint" style="display:none;color:var(--red-ink)">
                     The Openfire group provider is read-only (for example LDAP), so the plugin cannot
@@ -858,33 +823,23 @@
             </div>
         </div>
 
-        </div><!-- /subpanel-users-received -->
+        </div><!-- /subpanel-contact-sharing -->
 
-        <!-- ·· Connected clients ········································· -->
-        <div id="subpanel-users-clients" class="fed-subpanel">
+        <!-- ·· Sent lists ··············································· -->
+        <div id="subpanel-contact-delivery" class="fed-subpanel">
 
         <div class="section-box">
             <div class="section-box-header">
-                Connected clients on this server
-                <span class="count-chip" data-count-for="local-users-tbody"></span>
-                <input class="filter-input" data-target="local-users-tbody" placeholder="Filter clients…">
+                What each server receives
+                <input class="filter-input" data-target="contact-sent-container" placeholder="Filter servers…">
+                <button class="btn btn-small" onclick="resendContactLists()">Re-send now</button>
             </div>
-            <div class="table-scroll">
-                <table class="fed-table">
-                    <thead>
-                        <tr>
-                            <th>User</th>
-                            <th>Presence</th>
-                        </tr>
-                    </thead>
-                    <tbody id="local-users-tbody">
-                        <tr><td colspan="2" class="empty">Loading…</td></tr>
-                    </tbody>
-                </table>
+            <div class="section-box-body" id="contact-sent-container">
+                <p class="empty">Loading…</p>
             </div>
         </div>
 
-        </div><!-- /subpanel-users-clients -->
+        </div><!-- /subpanel-contact-delivery -->
     </div>
 
     <!-- ── Files panel ───────────────────────────────────────────────────────── -->

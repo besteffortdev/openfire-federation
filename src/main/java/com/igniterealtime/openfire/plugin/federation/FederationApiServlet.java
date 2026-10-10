@@ -381,14 +381,6 @@ public class FederationApiServlet extends HttpServlet {
         strings(sb, fcResult.warnings());
         sb.append("},");
 
-        // ── this server's connected clients (local online users) ───────────────
-        sb.append("\"localUsers\":");
-        array(sb, connectedClients(), (b, c) ->
-            b.append("{\"jid\":\"").append(esc(c[0]))
-             .append("\",\"show\":\"").append(esc(c[1]))
-             .append("\",\"status\":\"").append(esc(c[2])).append("\"}"));
-        sb.append(",");
-
         // ── shared contact lists (sent and received) ──────────────────────────
         sb.append("\"contactLists\":");
         appendContactLists(sb, mgr);
@@ -453,25 +445,6 @@ public class FederationApiServlet extends HttpServlet {
     private static final int CONTACTS_SHOWN = 500;
     /** Users offered by the share picker. */
     private static final int PRINCIPALS_MAX = 2000;
-
-    /** This server's logged-in users as {@code [bareJid, show, status]}, one entry per user. */
-    private static List<String[]> connectedClients() {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        Map<String, String[]> byJid = new java.util.TreeMap<>();
-        for (org.jivesoftware.openfire.session.ClientSession session
-                : XMPPServer.getInstance().getSessionManager().getSessions()) {
-            org.xmpp.packet.JID jid = session.getAddress();
-            if (jid == null || jid.getNode() == null || !localDomain.equals(jid.getDomain())) continue;
-            String show = "", status = "";
-            org.xmpp.packet.Presence p = session.getPresence();
-            if (p != null && p.isAvailable()) {
-                if (p.getShow() != null)   show   = p.getShow().name();
-                if (p.getStatus() != null) status = p.getStatus();
-            }
-            byJid.putIfAbsent(jid.toBareJID(), new String[] { jid.toBareJID(), show, status });
-        }
-        return new ArrayList<>(byJid.values());
-    }
 
     private static void appendContacts(StringBuilder sb, List<ContactListManager.Contact> contacts) {
         array(sb, contacts.size() > CONTACTS_SHOWN ? contacts.subList(0, CONTACTS_SHOWN) : contacts, (b, c) ->

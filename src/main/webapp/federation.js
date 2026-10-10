@@ -24,7 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
     bindPeerForm();
     bindRoomDefaultForm();
-    bindContactShareForm();
+    bindContactSharing();
     bindRoomSearch();
     bindFilters();
     pollLoop();                       // long-poll: renders immediately, then on every change
@@ -99,7 +99,7 @@ function renderAll(data) {
     renderPeers(data.peers || []);
     renderS2SSessions(data.s2sSessions || []);
     renderRouting(data.routing || []);
-    renderUsersTab(data.localUsers || [], data.contactLists || {});
+    renderUsersTab(data.contactLists || {});
     renderPendingRequests(data.pendingRequests || []);
     renderLocalRooms(localRooms);
     renderRoomDefaults(data.roomDefaults || []);
@@ -1072,27 +1072,10 @@ function allowRoute(peerDomain, destination) {
 
 // ── Users tab ──────────────────────────────────────────────────────────────────
 
-function renderUsersTab(localUsers, cl) {
-    renderConnectedClients(localUsers);
-    renderShareTargets(cl.shareableServers || [], cl.shareRules || []);
-    renderShareRules(cl.shareRules || []);
-    renderSentLists(cl.sent || []);
+function renderUsersTab(cl) {
+    renderLocalPrincipals();
     renderReceivedLists(cl.received || [], cl.localGroups || [], !!cl.groupsReadOnly);
-}
-
-function renderConnectedClients(localUsers) {
-    const tbody = document.getElementById('local-users-tbody');
-    if (!tbody) return;
-    tbody.innerHTML = localUsers.length === 0
-        ? '<tr><td colspan="2" class="empty">No clients connected to this server.</td></tr>'
-        : localUsers.map(u => {
-            const st = u.status ? ` <span style="color:#888">${escHtml(u.status)}</span>` : '';
-            return `
-            <tr>
-                <td style="font-family:monospace;font-size:12px">${escHtml(u.jid)}</td>
-                <td>${presenceDot(u.show)}${u.show ? escHtml(u.show) : 'available'}${st}</td>
-            </tr>`;
-        }).join('');
+    renderSentLists(cl.sent || []);
 }
 
 // A contact as "Name <jid>" (or just the JID when its server gave no name).
@@ -1109,64 +1092,223 @@ function contactChips(contacts, count) {
     return contacts.map(contactChip).join('') + more;
 }
 
-// ── Users tab: share my contacts ───────────────────────────────────────────────
+// Keeps keyboard focus (and caret) on an input across an innerHTML re-render of its container.
+function rememberFocus(container) {
+    const a = document.activeElement;
+    if (!a || !a.id || !container.contains(a)) return null;
+    return { id: a.id, start: a.selectionStart, end: a.selectionEnd };
+}
+
+function restoreFocus(f) {
+    if (!f) return;
+    const el = document.getElementById(f.id);
+    if (!el) return;
+    el.focus();
+    try { if (f.start != null) el.setSelectionRange(f.start, f.end); } catch (e) { /* not a text input */ }
+}
+
+// Hides the `.exposed-room` rows of a checklist that don't contain the query (case-insensitive).
+function filterChecklist(listId, q) {
+    const list = document.getElementById(listId);
+    if (!list) return;
+    const needle = (q || '').toLowerCase();
+    list.querySelectorAll('.exposed-room').forEach(row => {
+        row.style.display = row.textContent.toLowerCase().includes(needle) ? '' : 'none';
+    });
+}
+
+// A checklist with a filter bar on top. `filters` remembers each list's query across re-renders.
+function filteredChecklist(id, rowsHtml, placeholder, filters, emptyHtml) {
+    const q = filters[id] || '';
+    return `
+        <input type="text" id="${id}-filter" class="list-search in-col" placeholder="${escHtml(placeholder)}"
+               value="${escHtml(q)}" oninput="checklistFilters['${id}']=this.value;filterChecklist('${id}', this.value)">
+        <div class="roomvis-list" id="${id}">${rowsHtml || emptyHtml}</div>`;
+}
+const checklistFilters = {};
+
+// Re-applies every remembered checklist query (renders rebuild the rows unfiltered).
+function reapplyChecklistFilters() {
+    Object.entries(checklistFilters).forEach(([id, q]) => filterChecklist(id, q));
+}
+
+// ── Users tab: local users and groups (share side) ─────────────────────────────
 
 let principals = { users: [], groups: [] };
+let principalFilter = '';
+const expandedShares = new Set();   // "kind:name" of rows whose settings panel is open
+const editedShares = {};            // "kind:name" -> Set of ticked servers not saved yet
+
+function shareKey(kind, name) { return kind + ':' + name; }
 
 function loadPrincipals() {
     return fetch(API_URL + '?action=principals', { credentials: 'same-origin' })
         .then(r => r.json())
-        .then(p => { principals = p || { users: [], groups: [] }; fillShareNameOptions(); })
+        .then(p => { principals = p || { users: [], groups: [] }; renderLocalPrincipals(); })
         .catch(err => console.error('principals:', err));
 }
 
-function fillShareNameOptions() {
-    const dl = document.getElementById('cs-name-options');
-    const kind = document.getElementById('cs-kind');
-    if (!dl || !kind) return;
-    dl.innerHTML = kind.value === 'group'
-        ? (principals.groups || []).map(g => `<option value="${escHtml(g)}"></option>`).join('')
-        : (principals.users || []).map(u =>
-            `<option value="${escHtml(u.username)}">${escHtml(u.name || '')}</option>`).join('');
+function bindContactSharing() {
+    loadPrincipals();
+    // Refresh the user/group list whenever the Users tab is opened (accounts change outside the plugin).
+    const tab = document.querySelector('.fed-tab[data-tab="users"]');
+    if (tab) tab.addEventListener('click', loadPrincipals);
+    document.getElementById('principal-search').addEventListener('input', e => {
+        principalFilter = e.target.value.toLowerCase();
+        applyPrincipalFilter();
+    });
 }
 
-// Target checkboxes: re-rendered only when the server list changes, keeping what is ticked.
-let shareTargetsKey = null;
-function renderShareTargets(servers) {
-    const box = document.getElementById('cs-targets');
-    if (!box) return;
-    const key = servers.join(',');
-    if (key === shareTargetsKey) return;
-    shareTargetsKey = key;
-    const checked = new Set([...box.querySelectorAll('input:checked')].map(i => i.value));
-    box.innerHTML = servers.length === 0
-        ? '<span class="hint">No server is reachable over a trusted path yet.</span>'
-        : servers.map(srv => `
-            <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:inherit">
-                <input type="checkbox" value="${escHtml(srv)}" ${checked.has(srv) ? 'checked' : ''}> ${escHtml(srv)}
-            </label>`).join('');
+function applyPrincipalFilter() {
+    // Settings rows carry data-parent-key and follow their user/group row.
+    document.querySelectorAll('#local-principals-tbody tr[data-key], #local-principals-tbody tr[data-parent-key]').forEach(row => {
+        const text = row.dataset.search || '';
+        row.style.display = text.includes(principalFilter) ? '' : 'none';
+    });
 }
 
-function renderShareRules(rules) {
-    const tbody = document.getElementById('contact-share-tbody');
+// Groups first, then users; any shared name no longer returned by Openfire is still listed.
+function principalRows() {
+    const rules = (lastData.contactLists || {}).shareRules || [];
+    const byKey = new Map();
+    (principals.groups || []).forEach(g => byKey.set(shareKey('group', g), { kind: 'group', name: g, label: g }));
+    (principals.users || []).forEach(u => byKey.set(shareKey('user', u.username),
+        { kind: 'user', name: u.username, label: u.name || u.username }));
+    rules.forEach(r => {
+        if (!byKey.has(shareKey(r.kind, r.name))) byKey.set(shareKey(r.kind, r.name), { kind: r.kind, name: r.name, label: r.name, missing: true });
+    });
+    const rows = Array.from(byKey.values());
+    rows.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'group' ? -1 : 1)
+                        || a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+    return rows;
+}
+
+function renderLocalPrincipals() {
+    const tbody = document.getElementById('local-principals-tbody');
     if (!tbody) return;
-    if (!rules.length) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty">Nothing shared — other servers receive no contacts from this server.</td></tr>';
+    const rows = principalRows();
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty">No local users or groups found.</td></tr>';
         return;
     }
-    tbody.innerHTML = rules.map(r => {
-        const k = jsArg(r.kind), n = jsArg(r.name);
-        return `<tr>
-            <td>${r.kind === 'group' ? 'Group' : 'User'}</td>
-            <td><code>${escHtml(r.name)}</code></td>
-            <td>${escHtml(r.targets.join(', '))}</td>
-            <td style="text-align:right">
-                <button class="btn btn-small" onclick="editContactShare('${k}','${n}')">Edit</button>
-                <button class="btn btn-small btn-danger" onclick="deleteContactShare('${k}','${n}')">Stop sharing</button>
+    expandedShares.forEach(captureShareEdits);
+    const rules = (lastData.contactLists || {}).shareRules || [];
+    const focus = rememberFocus(tbody);
+
+    tbody.innerHTML = rows.map(p => {
+        const key = shareKey(p.kind, p.name);
+        const rule = rules.find(r => r.kind === p.kind && r.name === p.name);
+        const targets = rule ? rule.targets : [];
+        const expanded = expandedShares.has(key);
+        const search = (p.name + ' ' + p.label + ' ' + p.kind).toLowerCase();
+        const hidden = search.includes(principalFilter) ? '' : 'display:none';
+        const sum = targets.length ? escHtml(targets.length <= 2 ? targets.join(', ') : targets.length + ' servers')
+                                   : 'not shared';
+        const sub = p.kind === 'user' && p.label !== p.name ? `<br><small>${escHtml(p.name)}</small>` : '';
+        const missing = p.missing ? ' <span class="badge badge-tls" title="Openfire no longer has this user or group">missing</span>' : '';
+        let row = `
+        <tr data-key="${escHtml(key)}" data-search="${escHtml(search)}" style="${hidden}">
+            <td><strong>${escHtml(p.label)}</strong>${missing}${sub}</td>
+            <td>${p.kind === 'group' ? 'Group' : 'User'}</td>
+            <td class="room-detail-cell">
+                <span class="room-detail-sum">${sum}</span>
+                <button class="room-expand-btn ${expanded ? 'open' : ''}"
+                        title="${expanded ? 'Hide' : 'Show'} sharing settings"
+                        onclick="toggleShareDetail('${jsArg(p.kind)}','${jsArg(p.name)}')">▸</button>
             </td>
         </tr>`;
+        if (expanded) row += renderShareDetailRow(p, targets, search, hidden);
+        return row;
     }).join('');
+    reapplyChecklistFilters();
+    restoreFocus(focus);
 }
+
+function renderShareDetailRow(p, targets, search, hidden) {
+    const key = shareKey(p.kind, p.name);
+    const id = 'share-' + jidToElemId(key);
+    const cur = editedShares[key] || new Set(targets);
+    const shareable = (lastData.contactLists || {}).shareableServers || [];
+    const servers = new Set(shareable);
+    targets.forEach(t => servers.add(t));
+    cur.forEach(t => servers.add(t));
+    const rows = Array.from(servers).sort().map(s => {
+        const pending = shareable.includes(s) ? ''
+            : '<span class="badge badge-out" title="no trusted route right now — sent when it is back">pending</span>';
+        return `
+            <label class="exposed-room">
+                <input type="checkbox" class="share-cb" data-key="${escHtml(key)}" value="${escHtml(s)}"
+                       ${cur.has(s) ? 'checked' : ''} onchange="captureShareEdits('${jsArg(key)}')">
+                <span>${escHtml(s)}</span> ${pending}
+            </label>`;
+    }).join('');
+    const what = p.kind === 'group'
+        ? `every member of ${escHtml(p.name)}, kept in step with the group`
+        : escHtml(p.label);
+    return `
+    <tr class="exposed-editor-row room-detail-row" data-parent-key="${escHtml(key)}" data-search="${escHtml(search)}" style="${hidden}">
+        <td colspan="3">
+            <div class="exposed-cols">
+                <div class="exposed-col">
+                    <div class="exposed-col-h">Share with
+                        <span class="exposed-col-sub">ticked servers get ${what} in their contact list</span>
+                    </div>
+                    ${filteredChecklist(id, rows, 'Filter servers…', checklistFilters,
+                        '<p class="empty" style="margin:4px 0">No server is reachable over a trusted path yet.</p>')}
+                    <div style="margin-top:8px">
+                        <button class="btn-small btn-primary" onclick="saveShare('${jsArg(p.kind)}','${jsArg(p.name)}')">Save</button>
+                        ${targets.length ? `<button class="btn-small btn-danger" style="margin-left:4px"
+                            onclick="stopShare('${jsArg(p.kind)}','${jsArg(p.name)}')">Stop sharing</button>` : ''}
+                    </div>
+                </div>
+            </div>
+        </td>
+    </tr>`;
+}
+
+function captureShareEdits(key) {
+    const boxes = document.querySelectorAll(`.share-cb[data-key="${cssEscape(key)}"]`);
+    if (boxes.length === 0) return;
+    const set = editedShares[key] || new Set();
+    boxes.forEach(b => { if (b.checked) set.add(b.value); else set.delete(b.value); });
+    editedShares[key] = set;
+}
+
+function toggleShareDetail(kind, name) {
+    const key = shareKey(kind, name);
+    if (expandedShares.has(key)) { captureShareEdits(key); expandedShares.delete(key); }
+    else expandedShares.add(key);
+    renderLocalPrincipals();
+}
+
+function saveShare(kind, name) {
+    const key = shareKey(kind, name);
+    captureShareEdits(key);
+    const targets = Array.from(editedShares[key] || []);
+    const action = targets.length ? 'save-contact-share' : 'delete-contact-share';
+    post({ action, kind, name, targets: targets.join(',') }).then(result => {
+        if (result && result.ok) {
+            delete editedShares[key];
+            flashSaved(targets.length ? 'Shared ✓' : 'Sharing stopped ✓');
+            refresh();
+        } else if (result && result.error) {
+            alert(result.error);
+        }
+    });
+}
+
+function stopShare(kind, name) {
+    if (!confirm('Stop sharing ' + kind + ' "' + name + '"? Servers that received it will remove these contacts.')) return;
+    post({ action: 'delete-contact-share', kind, name }).then(result => {
+        if (result && result.ok) {
+            delete editedShares[shareKey(kind, name)];
+            flashSaved('Sharing stopped ✓');
+            refresh();
+        }
+    });
+}
+
+// ── Users tab: what each server receives ───────────────────────────────────────
 
 function renderSentLists(sent) {
     const el = document.getElementById('contact-sent-container');
@@ -1193,57 +1335,15 @@ function renderSentLists(sent) {
     }).join('');
 }
 
-function bindContactShareForm() {
-    const form = document.getElementById('form-contact-share');
-    if (!form) return;
-    document.getElementById('cs-kind').addEventListener('change', fillShareNameOptions);
-    loadPrincipals();
-    form.addEventListener('submit', e => {
-        e.preventDefault();
-        const kind = document.getElementById('cs-kind').value;
-        const name = document.getElementById('cs-name').value.trim();
-        const targets = [...document.querySelectorAll('#cs-targets input:checked')].map(i => i.value);
-        if (!name) return;
-        if (!targets.length) { alert('Choose at least one server to share with.'); return; }
-        post({ action: 'save-contact-share', kind, name, targets: targets.join(',') }).then(result => {
-            if (result && result.ok) {
-                document.getElementById('cs-name').value = '';
-                document.querySelectorAll('#cs-targets input').forEach(i => { i.checked = false; });
-                flashSaved('Shared ✓');
-                refresh();
-            } else if (result && result.error) {
-                alert(result.error);
-            }
-        });
-    });
-}
-
-// Load a share back into the form; saving replaces it (same kind + name).
-function editContactShare(kind, name) {
-    const r = ((lastData.contactLists || {}).shareRules || []).find(x => x.kind === kind && x.name === name);
-    if (!r) return;
-    document.getElementById('cs-kind').value = r.kind;
-    fillShareNameOptions();
-    document.getElementById('cs-name').value = r.name;
-    document.querySelectorAll('#cs-targets input').forEach(i => { i.checked = r.targets.includes(i.value); });
-    document.getElementById('cs-name').focus();
-}
-
-function deleteContactShare(kind, name) {
-    if (!confirm('Stop sharing ' + kind + ' "' + name + '"? Servers that received it will remove these contacts.')) return;
-    post({ action: 'delete-contact-share', kind, name }).then(result => {
-        if (result && result.ok) { flashSaved('Sharing stopped ✓'); refresh(); }
-    });
-}
-
 function resendContactLists() {
     post({ action: 'resend-contact-lists' }).then(result => {
         if (result && result.ok) { flashSaved('Re-sent ✓'); refresh(); }
     });
 }
 
-// ── Users tab: received contact lists ──────────────────────────────────────────
+// ── Users tab: contact lists received from peers ───────────────────────────────
 
+const collapsedOrigins = new Set();
 // Unsaved mapping-form edits per origin, so a re-render (any status change) doesn't wipe them.
 const contactMapEdits = {};
 
@@ -1253,11 +1353,13 @@ function renderReceivedLists(received, localGroups, readOnly) {
     const el = document.getElementById('contact-received-container');
     if (!el) return;
     if (!received.length) {
-        el.innerHTML = '<p class="empty">No server shares contacts with this server yet.</p>';
+        el.innerHTML = '<p class="empty">No server shares contacts with this server yet. When a peer shares '
+            + 'users or groups with you, its list appears here.</p>';
         return;
     }
     const focus = rememberFocus(el);
     el.innerHTML = received.map(r => renderReceivedList(r, localGroups, readOnly)).join('');
+    reapplyChecklistFilters();
     restoreFocus(focus);
 }
 
@@ -1268,61 +1370,94 @@ function renderReceivedList(r, localGroups, readOnly) {
     const display = edit ? edit.displayName : (m ? m.displayName : o);
     const groups = new Set(edit ? edit.groups : (m ? m.groups : []));
     const everybody = groups.has('*');
+    const collapsed = collapsedOrigins.has(o);
 
     const received = r.receivedAt
         ? 'received ' + new Date(r.receivedAt).toLocaleString()
         : 'not received since restart';
+    const mapInfo = m ? '<span class="peer-map-count">mapped</span>' : '';
     const status = m
-        ? `<span class="status-dot green"></span> Mapped — Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
+        ? `Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
           + (m.groups.includes('*') ? 'all users' : escHtml(m.groups.join(', ')))
-          + ` as <strong>${escHtml(m.displayName)}</strong>`
-        : '<span class="status-dot grey"></span> Not mapped — no local user sees these contacts yet.';
+          + ` as <strong>${escHtml(m.displayName)}</strong>.`
+        : 'Not mapped — no local user sees these contacts yet.';
     const error = r.error ? `<p class="hint" style="color:var(--red-ink);margin:6px 0 0">${escHtml(r.error)}</p>` : '';
 
-    const groupBoxes = localGroups.length === 0
-        ? '<span class="hint">No local groups — create one in Openfire, or show the list to all users.</span>'
-        : localGroups.map(g => `
-            <label style="display:flex;align-items:center;gap:4px;font-size:13px">
-                <input type="checkbox" class="cm-group" value="${escHtml(g)}" ${groups.has(g) ? 'checked' : ''}
-                       ${everybody ? 'disabled' : ''} onchange="captureContactMapEdit('${oj}')"> ${escHtml(g)}
-            </label>`).join('');
+    const listId = 'cmgroups-' + id;
+    const groupRows = localGroups.map(g => `
+        <label class="exposed-room">
+            <input type="checkbox" class="cm-group" value="${escHtml(g)}" ${groups.has(g) ? 'checked' : ''}
+                   ${everybody || readOnly ? 'disabled' : ''} onchange="captureContactMapEdit('${oj}')">
+            <span>${escHtml(g)}</span>
+        </label>`).join('');
+
+    const contactRows = r.count === 0
+        ? '<tr><td colspan="2" class="empty">This server shares no contacts with you right now.</td></tr>'
+        : r.contacts.map(c => `<tr><td>${escHtml(c.name || '—')}</td><td><small>${escHtml(c.jid)}</small></td></tr>`).join('')
+          + (r.count > r.contacts.length
+              ? `<tr><td colspan="2" class="hint">… and ${r.count - r.contacts.length} more</td></tr>` : '');
 
     return `
     <div class="peer-section" id="cm-${id}">
-        <div class="peer-section-header" style="cursor:default">
+        <div class="peer-section-header" onclick="toggleOrigin('${oj}')">
+            <span class="peer-collapse-icon" id="origin-icon-${id}">${collapsed ? '▶' : '▼'}</span>
             <span class="status-dot ${r.reachable ? 'green' : 'grey'}" title="${r.reachable ? 'reachable' : 'unreachable'}"></span>
             <strong>${escHtml(o)}</strong>
             <span class="peer-room-count">${r.count} contact(s)</span>
+            ${mapInfo}
             <span class="hint" style="margin-left:auto">${received}</span>
         </div>
-        <div class="peer-section-body" style="padding:12px 14px">
-            <div style="font-size:13px">${status}</div>
-            ${error}
-            <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:12px">
-                <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
-                    Roster group name
-                    <input type="text" id="cm-name-${id}" value="${escHtml(display)}" style="margin-top:3px;min-width:180px"
-                           oninput="captureContactMapEdit('${oj}')" ${readOnly ? 'disabled' : ''}>
-                </label>
-                <div style="display:flex;flex-direction:column;font-size:12px;color:#555">
-                    Show to
-                    <div style="margin-top:3px;display:flex;flex-wrap:wrap;gap:4px 14px;max-width:560px">
-                        <label style="display:flex;align-items:center;gap:4px;font-size:13px">
-                            <input type="checkbox" class="cm-all" ${everybody ? 'checked' : ''}
-                                   onchange="captureContactMapEdit('${oj}')"> <strong>All users</strong>
-                        </label>
-                        ${groupBoxes}
+        <div class="peer-section-body" id="origin-body-${id}" style="${collapsed ? 'display:none' : ''}">
+            <div class="exposed-cols" style="padding:12px 14px;align-items:flex-start">
+                <div class="exposed-col" style="flex:0 0 300px">
+                    <div class="exposed-col-h">Mapping
+                        <span class="exposed-col-sub">${status}</span>
+                    </div>
+                    ${error}
+                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555;margin-bottom:8px">
+                        Roster group name
+                        <input type="text" id="cm-name-${id}" value="${escHtml(display)}" style="margin-top:3px"
+                               oninput="captureContactMapEdit('${oj}')" ${readOnly ? 'disabled' : ''}>
+                    </label>
+                    <label class="exposed-room" style="font-weight:600">
+                        <input type="checkbox" class="cm-all" ${everybody ? 'checked' : ''} ${readOnly ? 'disabled' : ''}
+                               onchange="captureContactMapEdit('${oj}')">
+                        <span>Show to all users</span>
+                    </label>
+                    ${filteredChecklist(listId, groupRows, 'Filter groups…', checklistFilters,
+                        '<p class="empty" style="margin:4px 0">No local groups — create one in Openfire, or show the list to all users.</p>')}
+                    <div style="margin-top:8px">
+                        <button class="btn-small btn-primary" onclick="saveContactMapping('${oj}')" ${readOnly ? 'disabled' : ''}>
+                            ${m ? 'Save' : 'Map'}</button>
+                        ${m ? `<button class="btn-small btn-danger" style="margin-left:4px" onclick="removeContactMapping('${oj}')">Unmap</button>` : ''}
+                        ${edit ? `<button class="btn-small" style="margin-left:4px;background:#e2e3e5;color:#383d41"
+                                          onclick="discardContactMapEdit('${oj}')">Discard</button>` : ''}
                     </div>
                 </div>
-                <button class="btn btn-primary btn-small" onclick="saveContactMapping('${oj}')" ${readOnly ? 'disabled' : ''}>
-                    ${m ? 'Update mapping' : 'Map'}
-                </button>
-                ${m ? `<button class="btn btn-small btn-danger" onclick="removeContactMapping('${oj}')">Remove mapping</button>` : ''}
-                ${edit ? `<button class="btn btn-small" onclick="discardContactMapEdit('${oj}')">Discard changes</button>` : ''}
+                <div class="exposed-col">
+                    <div class="exposed-col-h">Contacts
+                        <span class="exposed-col-sub">the users ${escHtml(o)} shares with this server</span>
+                    </div>
+                    <div class="roomvis-list" style="max-height:260px">
+                        <table class="fed-table">
+                            <thead><tr><th>Name</th><th>Address</th></tr></thead>
+                            <tbody>${contactRows}</tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
-            <div style="margin-top:12px">${contactChips(r.contacts, r.count)}</div>
         </div>
     </div>`;
+}
+
+function toggleOrigin(origin) {
+    const wasCollapsed = collapsedOrigins.has(origin);
+    if (wasCollapsed) collapsedOrigins.delete(origin); else collapsedOrigins.add(origin);
+    const id = jidToElemId(origin);
+    const body = document.getElementById('origin-body-' + id);
+    const icon = document.getElementById('origin-icon-' + id);
+    if (body) body.style.display = wasCollapsed ? '' : 'none';
+    if (icon) icon.textContent = wasCollapsed ? '▼' : '▶';
 }
 
 function readContactMapForm(origin) {
@@ -1340,7 +1475,7 @@ function captureContactMapEdit(origin) {
     const f = readContactMapForm(origin);
     if (!f) return;
     contactMapEdits[origin] = f;
-    // "All users" disables the per-group boxes; reflect that right away.
+    // "Show to all users" disables the per-group boxes; reflect that right away.
     const card = document.getElementById('cm-' + jidToElemId(origin));
     const all = card.querySelector('.cm-all').checked;
     card.querySelectorAll('.cm-group').forEach(i => { i.disabled = all; });
@@ -1354,7 +1489,7 @@ function discardContactMapEdit(origin) {
 function saveContactMapping(origin) {
     const f = readContactMapForm(origin);
     if (!f) return;
-    if (!f.groups.length) { alert('Choose at least one group, or All users.'); return; }
+    if (!f.groups.length) { alert('Choose at least one group, or Show to all users.'); return; }
     post({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n') })
         .then(result => {
             if (result && result.ok) {
@@ -1368,7 +1503,7 @@ function saveContactMapping(origin) {
 }
 
 function removeContactMapping(origin) {
-    if (!confirm('Remove the mapping for ' + origin + '? Its contacts will be removed from every local contact list.')) return;
+    if (!confirm('Unmap the list from ' + origin + '? Its contacts will be removed from every local contact list.')) return;
     post({ action: 'unmap-contact-list', origin }).then(result => {
         if (result && result.ok) {
             delete contactMapEdits[origin];
@@ -1376,21 +1511,6 @@ function removeContactMapping(origin) {
             refresh();
         }
     });
-}
-
-// Keeps keyboard focus (and caret) on an input across an innerHTML re-render of its container.
-function rememberFocus(container) {
-    const a = document.activeElement;
-    if (!a || !a.id || !container.contains(a)) return null;
-    return { id: a.id, start: a.selectionStart, end: a.selectionEnd };
-}
-
-function restoreFocus(f) {
-    if (!f) return;
-    const el = document.getElementById(f.id);
-    if (!el) return;
-    el.focus();
-    try { if (f.start != null) el.setSelectionRange(f.start, f.end); } catch (e) { /* not a text input */ }
 }
 
 // ── Room default-settings rules (Rooms tab) ────────────────────────────────────
