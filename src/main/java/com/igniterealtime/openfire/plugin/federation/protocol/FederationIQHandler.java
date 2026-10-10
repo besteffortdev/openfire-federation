@@ -98,6 +98,12 @@ public class FederationIQHandler extends IQHandler {
      */
     private record StoredModeration(String targetId, Element announcement, long at) { }
     private static final int MODERATIONS_KEPT_PER_ROOM = 200;
+
+    /** Bounds on one server's advertised rooms, so a peer cannot make every server cache megabytes. */
+    private static final int MAX_ADVERTISED_ROOMS  = 250;
+    private static final int MAX_ROOM_NAME         = 128;
+    private static final int MAX_ROOM_DESCRIPTION  = 512;
+    private static final int MAX_ROOM_VISIBLE_TO   = 64;
     private final ConcurrentHashMap<String, Deque<StoredModeration>> federatedModerations = new ConcurrentHashMap<>();
 
     public FederationIQHandler(FederationManager manager) {
@@ -436,10 +442,12 @@ public class FederationIQHandler extends IQHandler {
         }
 
         List<FederatedRoom> rooms = new ArrayList<>();
+        int overLimit = 0;
         for (Element r : el.elements("room")) {
+            if (rooms.size() >= MAX_ADVERTISED_ROOMS) { overLimit++; continue; }
             String jid  = r.attributeValue("jid");
-            String name = r.attributeValue("name", "");
-            String desc = r.attributeValue("description", "");
+            String name = clip(r.attributeValue("name", ""), MAX_ROOM_NAME);
+            String desc = clip(r.attributeValue("description", ""), MAX_ROOM_DESCRIPTION);
             // Per-room visibility ACL carried on the ad so we enforce it when relaying onward. Absence
             // is parsed as an empty set, which roomVisibleAtHop treats as "visible to nobody" — the
             // same secure default as a locally-federated room. (Same-version peers always emit the
@@ -447,7 +455,10 @@ public class FederationIQHandler extends IQHandler {
             // rooms won't relay past us until they upgrade.)
             String visibleto = r.attributeValue("visibleto", "");
             java.util.Set<String> visibleTo = new java.util.LinkedHashSet<>();
-            for (String s : visibleto.split(",")) if (!s.isBlank()) visibleTo.add(s.strip().toLowerCase());
+            for (String s : visibleto.split(",")) {
+                if (visibleTo.size() >= MAX_ROOM_VISIBLE_TO) break;
+                if (!s.isBlank()) visibleTo.add(s.strip().toLowerCase());
+            }
             // Reject a peer-supplied room JID carrying characters that are invalid in an XMPP JID and
             // that would enable admin-console script injection or malformed routing if cached/rendered.
             if (jid != null && isSafeFederationJid(jid)) {
@@ -456,6 +467,10 @@ public class FederationIQHandler extends IQHandler {
                 Log.warn("SECURITY: dropping advertised room with malformed JID from {} (len={})",
                          fromDomain, jid.length());
             }
+        }
+        if (overLimit > 0) {
+            Log.warn("room-advertisement from {} (source={}): ignored {} room(s) past the limit of {}",
+                     fromDomain, sourceDomain, overLimit, MAX_ADVERTISED_ROOMS);
         }
         String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
         if (rooms.isEmpty()) {
@@ -2349,6 +2364,10 @@ public class FederationIQHandler extends IQHandler {
      * is not full RFC 7622 validation; it closes the injection/robustness surface (see the admin UI's
      * inline event handlers) without rejecting legitimate lab room JIDs like {@code r_ext@conference.2503}.
      */
+    private static String clip(String s, int max) {
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
     private static boolean isSafeFederationJid(String jid) {
         if (jid == null || jid.isEmpty() || jid.length() > 3071) return false;   // RFC 7622 max length
         for (int i = 0; i < jid.length(); i++) {

@@ -507,9 +507,12 @@ Stops an unrelated peer from injecting content into a transfer you started with 
 
 ```
 size >= 0 and size <= configured maximum
-chunkSize in [1, 1 MiB]
+chunkSize in [1, 1 MiB], and at least 16 KiB unless totalChunks <= 1
 totalChunks >= 0  and  totalChunks == ceil(size / chunkSize)      exactly
 ```
+
+The chunk floor matters because the receiver keeps one bit per chunk: 1-byte chunks would size that
+bitmap, and the number of IQs, by the file's byte count.
 
 This is the allocation bound. An offer claiming an implausible size or an inconsistent chunk count
 must fail before anything is sized from it.
@@ -522,6 +525,26 @@ if decoded length != expected → FAIL the transfer
 ```
 
 Prevents a write outside the region the geometry accounted for.
+
+## 9. Resource bounds
+
+Every check above can pass while a peer still sends far more than any real deployment would. Each
+per-peer cache therefore has a bound, and anything past it is dropped and logged at most once a
+minute. This implementation's values:
+
+| What | Bound |
+|------|-------|
+| Destinations from one `routing-update` | 128 from an untrusted peer, 2048 from a trusted one; each a plausible domain (no `@`, `/`, quotes, `<>&\,`, whitespace; at most 253 characters) |
+| Routing table | 4096 destinations |
+| Rooms in one `room-advertisement` | 250, name clipped to 128 characters, description to 512, `visibleto` to 64 entries |
+| Contact lists from servers not mapped here | 32 servers, 50 000 contacts in all; forgotten when the origin loses its route |
+| Remote contacts tracked per shared local user | 1000 |
+| `contact-list-request` answers | one per 30 s per requesting server |
+| File transfers tracked at once | 512 |
+| Domains remembered as answering mapping probes | 1024, only ones we route to; pongs for an unprobed domain are ignored |
+
+The untrusted route bound is what keeps the rest small: most caches are keyed by origin server, and
+an untrusted peer can only claim origins it has a route for.
 
 ---
 

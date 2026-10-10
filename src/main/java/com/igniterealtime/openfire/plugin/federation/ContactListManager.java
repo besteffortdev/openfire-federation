@@ -101,6 +101,8 @@ public class ContactListManager {
     static final int MAX_UNMAPPED_LISTS = 32;
     /** Most contacts kept across all unmapped lists together. */
     static final int MAX_UNMAPPED_CONTACTS = 50_000;
+    /** Most remote contacts tracked as receiving one local user's presence and PEP updates. */
+    private static final int MAX_SUBSCRIBERS_PER_USER = 1000;
     /** A server's contact-list-request is answered at most this often. */
     private static final long REQUEST_COOLDOWN_MS = 30_000L;
     /** A received list is logged at INFO at most this often per origin; refusals at most this often overall. */
@@ -488,7 +490,16 @@ public class ContactListManager {
         }
         if (!isAuthorized(localBare, from.getDomain())) return false;
 
-        boolean isNew = subscribers.computeIfAbsent(localBare, k -> ConcurrentHashMap.newKeySet()).add(remoteBare);
+        Set<String> subs = subscribers.computeIfAbsent(localBare, k -> ConcurrentHashMap.newKeySet());
+        if (!subs.contains(remoteBare) && subs.size() >= MAX_SUBSCRIBERS_PER_USER) {
+            // Any JID on an authorized server can probe; a server inventing JIDs must not grow this
+            // set (and the presence fan-out on every change) without limit. Still answered once.
+            manager.pushContactPresenceTo(from.asBareJID(), to.asBareJID());
+            Log.debug("contact-list: {} already has {} remote subscribers — not tracking {}", localBare,
+                      MAX_SUBSCRIBERS_PER_USER, remoteBare);
+            return true;
+        }
+        boolean isNew = subs.add(remoteBare);
         manager.pushContactPresenceTo(from.asBareJID(), to.asBareJID());
         // PEP only for a contact seen for the first time: mapping a list makes the receiving server
         // send a subscribe AND a probe per recipient per contact, and the items only change on publish

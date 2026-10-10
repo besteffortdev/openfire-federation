@@ -126,6 +126,13 @@ public class FileRelayManager {
     /** Concurrent outbound sends across all peers; a further request is refused, not queued. */
     private static final int  MAX_INFLIGHT_SENDS      = 8;
     /**
+     * Most transfers tracked at once (failed ones linger {@link #FAILED_ENTRY_TTL_MS}). Each shared
+     * file link a peer sends starts one, so a flood of distinct links must not grow this, or the
+     * open part files, without limit.
+     */
+    private static final int  MAX_TRANSFERS           = 512;
+    private volatile long transferCapLoggedAt = 0;
+    /**
      * The one chunk geometry both ends of the protocol agree on: a sender clamps to it, a receiver
      * rejects an offer outside it. Two independent numbers (a property minimum on one side, a
      * literal bound on the other) let an administrator configure a size that allocated a huge buffer
@@ -992,6 +999,15 @@ public class FileRelayManager {
         // Already have the content: it will be served straight from the store and can never be
         // rejected, so there is nothing to notify — registering a dest here would only leak.
         if (store.has(id)) return;
+        if (!transfers.containsKey(id) && transfers.size() >= MAX_TRANSFERS) {
+            long now = System.currentTimeMillis();
+            if (now - transferCapLoggedAt >= 60_000L) {
+                transferCapLoggedAt = now;
+                Log.warn("File relay: not pulling {} from {} — {} transfers already tracked. Further cases are "
+                       + "logged at most once a minute.", id, LogSafe.text(origin), MAX_TRANSFERS);
+            }
+            return;
+        }
         List<String> hintList = new ArrayList<>();
         for (String h : hints) {
             if (h != null && !h.isBlank() && !h.equals(localDomain())) hintList.add(h);
@@ -1227,7 +1243,10 @@ public class FileRelayManager {
             return;
         }
         long cap = maxSizeBytes();
+        // A chunk below MIN_CHUNK_BYTES is only legitimate as the single chunk of a small file; tiny
+        // chunks would size the received-chunk bitmap (and the IQ count) by the file's byte count.
         if (size < 0 || size > cap || chunkSize < 1 || chunkSize > MAX_CHUNK_BYTES
+                || (chunkSize < MIN_CHUNK_BYTES && totalChunks > 1)
                 || totalChunks < 0 || totalChunks != (int) ((size + chunkSize - 1) / chunkSize)) {
             Log.warn("File relay: rejecting file-offer for {} from {} — implausible geometry "
                    + "(size={}, chunkSize={}, totalChunks={}, cap={})",

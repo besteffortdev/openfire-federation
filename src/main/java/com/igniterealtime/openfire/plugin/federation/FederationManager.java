@@ -1438,6 +1438,7 @@ public class FederationManager {
     // plugin (re)starts would otherwise never be flagged and its ghost occupants never evicted.
     private static final String PROBE_CAPABLE_KEY = "plugin.federation.probeCapableDomains";
     private final Set<String> probeCapable = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final int MAX_PROBE_CAPABLE = 1024;
     private volatile boolean probeCapableLoaded = false;
 
     private Set<String> probeCapable() {
@@ -1458,6 +1459,10 @@ public class FederationManager {
     /** Records (persistently) that this domain answers mapping probes, enabling break detection toward it. */
     public void markProbeCapable(String domain) {
         if (domain == null || domain.isEmpty()) return;
+        // Persisted, so only for a server we actually route to, and bounded: a peer can claim any
+        // origin on a mapping-ping.
+        if (routingTable.findNextHop(domain).isEmpty()) return;
+        if (probeCapable().size() >= MAX_PROBE_CAPABLE && !probeCapable().contains(domain)) return;
         if (probeCapable().add(domain)) {
             JiveGlobals.setProperty(PROBE_CAPABLE_KEY, String.join(",", probeCapable));
         }
@@ -1520,7 +1525,9 @@ public class FederationManager {
      * older peers — the newest ping's send time is used for the RTT instead).
      */
     public void onMappingPong(String remoteDomain, String echoedTs) {
-        MappingPingState st = mappingPingStates.computeIfAbsent(remoteDomain, k -> new MappingPingState());
+        // State exists only for domains we map to and probe; a pong for any other is unsolicited.
+        MappingPingState st = mappingPingStates.get(remoteDomain);
+        if (st == null) return;
         boolean wasBroken = st.broken;
         st.everPonged = true;
         markProbeCapable(remoteDomain);

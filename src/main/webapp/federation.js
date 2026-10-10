@@ -1258,14 +1258,13 @@ function renderShareDetailRow(group, targets, hidden) {
                 <div class="exposed-col">
                     <div class="exposed-col-h">Share with
                         <span class="exposed-col-sub">ticked servers get every member of ${escHtml(group)} in their
-                            contact list, kept in step with the group's membership</span>
+                            contact list, kept in step with the group's membership. Untick a server and save to stop
+                            sharing with it.</span>
                     </div>
                     ${filteredChecklist(id, rows, 'Filter servers…', checklistFilters,
                         '<p class="empty" style="margin:4px 0">No server can receive contact lists from here yet.</p>')}
                     <div style="margin-top:8px">
                         <button class="btn-small btn-primary" onclick="saveShare('${jsArg(group)}')">Save</button>
-                        ${targets.length ? `<button class="btn-small btn-danger" style="margin-left:4px"
-                            onclick="stopShare('${jsArg(group)}')">Stop sharing</button>` : ''}
                     </div>
                 </div>
             </div>
@@ -1298,17 +1297,6 @@ function saveShare(group) {
             refresh();
         } else if (result && result.error) {
             alert(result.error);
-        }
-    });
-}
-
-function stopShare(group) {
-    if (!confirm('Stop sharing group "' + group + '"? Servers that received its members will remove them.')) return;
-    post({ action: 'delete-contact-share', group }).then(result => {
-        if (result && result.ok) {
-            delete editedShares[group];
-            flashSaved('Sharing stopped ✓');
-            refresh();
         }
     });
 }
@@ -1389,7 +1377,7 @@ function renderReceivedList(r, localGroups, readOnly) {
     const status = m
         ? `Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
           + (m.groups.includes('*') ? 'all users' : escHtml(m.groups.join(', ')))
-          + ` as <strong>${escHtml(m.displayName)}</strong>.`
+          + ` as <strong>${escHtml(m.displayName)}</strong>. Untick everything and save to unmap.`
         : 'Not mapped — no local user sees these contacts yet.';
     const error = r.error ? `<p class="hint" style="color:var(--red-ink);margin:6px 0 0">${escHtml(r.error)}</p>` : '';
 
@@ -1440,7 +1428,6 @@ function renderReceivedList(r, localGroups, readOnly) {
                     <div style="margin-top:8px">
                         <button class="btn-small btn-primary" onclick="saveContactMapping('${oj}')" ${readOnly ? 'disabled' : ''}>
                             ${m ? 'Save' : 'Map'}</button>
-                        ${m ? `<button class="btn-small btn-danger" style="margin-left:4px" onclick="removeContactMapping('${oj}')">Unmap</button>` : ''}
                         ${edit ? `<button class="btn-small" style="margin-left:4px;background:#e2e3e5;color:#383d41"
                                           onclick="discardContactMapEdit('${oj}')">Discard</button>` : ''}
                     </div>
@@ -1500,7 +1487,12 @@ function discardContactMapEdit(origin) {
 function saveContactMapping(origin) {
     const f = readContactMapForm(origin);
     if (!f) return;
-    if (!f.groups.length) { alert('Choose at least one group, or Show to all users.'); return; }
+    if (!f.groups.length) {
+        // Nothing ticked on a mapped list = unmap it; on an unmapped one there is nothing to save.
+        if (lastMappingOf(origin)) { unmapContactList(origin); return; }
+        alert('Choose at least one group, or Show to all users.');
+        return;
+    }
     post({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n') })
         .then(result => {
             if (result && result.ok) {
@@ -1513,8 +1505,13 @@ function saveContactMapping(origin) {
         });
 }
 
-function removeContactMapping(origin) {
-    if (!confirm('Unmap the list from ' + origin + '? Its contacts will be removed from every local contact list.')) return;
+function lastMappingOf(origin) {
+    const received = (lastData.contactLists && lastData.contactLists.received) || [];
+    const r = received.find(x => x.origin === origin);
+    return r ? r.mapping : null;
+}
+
+function unmapContactList(origin) {
     post({ action: 'unmap-contact-list', origin }).then(result => {
         if (result && result.ok) {
             delete contactMapEdits[origin];
