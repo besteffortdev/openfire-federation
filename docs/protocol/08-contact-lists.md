@@ -35,7 +35,7 @@ Each send carries **complete state**: it replaces whatever the destination held 
 **An empty `<contact-list/>` withdraws** the list, and the destination removes those contacts from
 every roster it put them in.
 
-The sender re-sends when the list changes (a user shared or unshared, a shared group's membership
+The sender re-sends when the list changes (a group shared or unshared, a shared group's membership
 changes, a display name changes), when the destination becomes reachable again, and on a periodic
 refresh as a backstop for a lost IQ.
 

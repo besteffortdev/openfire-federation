@@ -126,7 +126,7 @@
             box-shadow: 0 0 0 3px var(--primary-soft);
         }
         #room-search { margin: 0 0 14px; width: 320px; }
-        #principal-search { margin: 0 0 14px; width: 320px; }
+        #group-search { margin: 0 0 14px; width: 320px; }
         .list-search.in-col { width: 100%; max-width: none; box-sizing: border-box; margin: 0 0 6px; }
 
         /* ══ Tables ══════════════════════════════════════════════════ */
@@ -772,31 +772,30 @@
 
         <div class="section-box">
             <div class="section-box-header">
-                Local users and groups — share with other servers
-                <span class="count-chip" data-count-for="local-principals-tbody"></span>
+                Local groups — share with other servers
+                <span class="count-chip" data-count-for="local-groups-tbody"></span>
             </div>
             <div class="section-box-body" style="padding-bottom:0">
                 <p class="hint" style="margin-top:0">
-                    Like Openfire's Contact List Sharing, across servers. Expand a user or group (▸) and
-                    tick the servers to share it with. Each server receives one contact list: everyone
-                    shared with it. A shared group follows its membership. The receiving server's admin
+                    Like Openfire's Contact List Sharing, across servers. Expand a group (▸) and tick the
+                    servers to share it with. Each server receives one contact list: the members of every
+                    group shared with it, kept in step with group membership. The receiving server's admin
                     chooses which of their users see the list. Their users see the presence and avatar
                     of the contacts you share. Your users don't see theirs unless that server shares
                     back. Only servers reached over trusted links are listed.
                 </p>
-                <input type="text" id="principal-search" class="list-search" placeholder="Filter users and groups…">
+                <input type="text" id="group-search" class="list-search" placeholder="Filter groups…">
             </div>
             <div class="table-scroll">
                 <table class="fed-table">
                     <thead>
                         <tr>
-                            <th>Name</th>
-                            <th>Type</th>
+                            <th>Group</th>
                             <th style="text-align:right">Shared with</th>
                         </tr>
                     </thead>
-                    <tbody id="local-principals-tbody">
-                        <tr><td colspan="3" class="empty">Loading…</td></tr>
+                    <tbody id="local-groups-tbody">
+                        <tr><td colspan="2" class="empty">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>

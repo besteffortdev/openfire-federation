@@ -1073,7 +1073,7 @@ function allowRoute(peerDomain, destination) {
 // ── Users tab ──────────────────────────────────────────────────────────────────
 
 function renderUsersTab(cl) {
-    renderLocalPrincipals();
+    renderLocalGroups();
     renderReceivedLists(cl.received || [], cl.localGroups || [], !!cl.groupsReadOnly);
     renderSentLists(cl.sent || []);
 }
@@ -1132,102 +1132,72 @@ function reapplyChecklistFilters() {
     Object.entries(checklistFilters).forEach(([id, q]) => filterChecklist(id, q));
 }
 
-// ── Users tab: local users and groups (share side) ─────────────────────────────
+// ── Users tab: local groups (share side) ───────────────────────────────────────
 
-let principals = { users: [], groups: [] };
-let principalFilter = '';
-const expandedShares = new Set();   // "kind:name" of rows whose settings panel is open
-const editedShares = {};            // "kind:name" -> Set of ticked servers not saved yet
-
-function shareKey(kind, name) { return kind + ':' + name; }
-
-function loadPrincipals() {
-    return fetch(API_URL + '?action=principals', { credentials: 'same-origin' })
-        .then(r => r.json())
-        .then(p => { principals = p || { users: [], groups: [] }; renderLocalPrincipals(); })
-        .catch(err => console.error('principals:', err));
-}
+let groupFilter = '';
+const expandedShares = new Set();   // groups whose settings panel is open
+const editedShares = {};            // group -> Set of ticked servers not saved yet
 
 function bindContactSharing() {
-    loadPrincipals();
-    // Refresh the user/group list whenever the Users tab is opened (accounts change outside the plugin).
-    const tab = document.querySelector('.fed-tab[data-tab="users"]');
-    if (tab) tab.addEventListener('click', loadPrincipals);
-    document.getElementById('principal-search').addEventListener('input', e => {
-        principalFilter = e.target.value.toLowerCase();
-        applyPrincipalFilter();
+    document.getElementById('group-search').addEventListener('input', e => {
+        groupFilter = e.target.value.toLowerCase();
+        applyGroupFilter();
     });
 }
 
-function applyPrincipalFilter() {
-    // Settings rows carry data-parent-key and follow their user/group row.
-    document.querySelectorAll('#local-principals-tbody tr[data-key], #local-principals-tbody tr[data-parent-key]').forEach(row => {
-        const text = row.dataset.search || '';
-        row.style.display = text.includes(principalFilter) ? '' : 'none';
+function applyGroupFilter() {
+    // Settings rows carry data-parent-group and follow their group row.
+    document.querySelectorAll('#local-groups-tbody tr[data-group], #local-groups-tbody tr[data-parent-group]').forEach(row => {
+        const g = (row.dataset.group || row.dataset.parentGroup || '').toLowerCase();
+        row.style.display = g.includes(groupFilter) ? '' : 'none';
     });
 }
 
-// Groups first, then users; any shared name no longer returned by Openfire is still listed.
-function principalRows() {
-    const rules = (lastData.contactLists || {}).shareRules || [];
-    const byKey = new Map();
-    (principals.groups || []).forEach(g => byKey.set(shareKey('group', g), { kind: 'group', name: g, label: g }));
-    (principals.users || []).forEach(u => byKey.set(shareKey('user', u.username),
-        { kind: 'user', name: u.username, label: u.name || u.username }));
-    rules.forEach(r => {
-        if (!byKey.has(shareKey(r.kind, r.name))) byKey.set(shareKey(r.kind, r.name), { kind: r.kind, name: r.name, label: r.name, missing: true });
-    });
-    const rows = Array.from(byKey.values());
-    rows.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'group' ? -1 : 1)
-                        || a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
-    return rows;
-}
-
-function renderLocalPrincipals() {
-    const tbody = document.getElementById('local-principals-tbody');
+function renderLocalGroups() {
+    const tbody = document.getElementById('local-groups-tbody');
     if (!tbody) return;
-    const rows = principalRows();
-    if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="3" class="empty">No local users or groups found.</td></tr>';
+    const cl = lastData.contactLists || {};
+    const rules = cl.shareRules || [];
+    // Every local group, plus any shared group Openfire no longer returns (so it can be unshared).
+    const groups = new Set(cl.localGroups || []);
+    rules.forEach(r => groups.add(r.group));
+    const names = Array.from(groups).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    if (!names.length) {
+        tbody.innerHTML = '<tr><td colspan="2" class="empty">No local groups — create one in Openfire to share its members.</td></tr>';
         return;
     }
     expandedShares.forEach(captureShareEdits);
-    const rules = (lastData.contactLists || {}).shareRules || [];
     const focus = rememberFocus(tbody);
 
-    tbody.innerHTML = rows.map(p => {
-        const key = shareKey(p.kind, p.name);
-        const rule = rules.find(r => r.kind === p.kind && r.name === p.name);
+    tbody.innerHTML = names.map(g => {
+        const rule = rules.find(r => r.group === g);
         const targets = rule ? rule.targets : [];
-        const expanded = expandedShares.has(key);
-        const search = (p.name + ' ' + p.label + ' ' + p.kind).toLowerCase();
-        const hidden = search.includes(principalFilter) ? '' : 'display:none';
+        const expanded = expandedShares.has(g);
+        const hidden = g.toLowerCase().includes(groupFilter) ? '' : 'display:none';
         const sum = targets.length ? escHtml(targets.length <= 2 ? targets.join(', ') : targets.length + ' servers')
                                    : 'not shared';
-        const sub = p.kind === 'user' && p.label !== p.name ? `<br><small>${escHtml(p.name)}</small>` : '';
-        const missing = p.missing ? ' <span class="badge badge-tls" title="Openfire no longer has this user or group">missing</span>' : '';
+        const missing = (cl.localGroups || []).includes(g) ? ''
+            : ' <span class="badge badge-tls" title="Openfire no longer has this group">missing</span>';
         let row = `
-        <tr data-key="${escHtml(key)}" data-search="${escHtml(search)}" style="${hidden}">
-            <td><strong>${escHtml(p.label)}</strong>${missing}${sub}</td>
-            <td>${p.kind === 'group' ? 'Group' : 'User'}</td>
+        <tr data-group="${escHtml(g)}" style="${hidden}">
+            <td><strong>${escHtml(g)}</strong>${missing}</td>
             <td class="room-detail-cell">
                 <span class="room-detail-sum">${sum}</span>
                 <button class="room-expand-btn ${expanded ? 'open' : ''}"
                         title="${expanded ? 'Hide' : 'Show'} sharing settings"
-                        onclick="toggleShareDetail('${jsArg(p.kind)}','${jsArg(p.name)}')">▸</button>
+                        onclick="toggleShareDetail('${jsArg(g)}')">▸</button>
             </td>
         </tr>`;
-        if (expanded) row += renderShareDetailRow(p, targets, search, hidden);
+        if (expanded) row += renderShareDetailRow(g, targets, hidden);
         return row;
     }).join('');
     reapplyChecklistFilters();
     restoreFocus(focus);
 }
 
-function renderShareDetailRow(p, targets, search, hidden) {
-    const key = shareKey(p.kind, p.name);
-    const id = 'share-' + jidToElemId(key);
-    const cur = editedShares[key] || new Set(targets);
+function renderShareDetailRow(group, targets, hidden) {
+    const id = 'share-' + jidToElemId(group);
+    const cur = editedShares[group] || new Set(targets);
     const shareable = (lastData.contactLists || {}).shareableServers || [];
     const servers = new Set(shareable);
     targets.forEach(t => servers.add(t));
@@ -1237,28 +1207,26 @@ function renderShareDetailRow(p, targets, search, hidden) {
             : '<span class="badge badge-out" title="no trusted route right now — sent when it is back">pending</span>';
         return `
             <label class="exposed-room">
-                <input type="checkbox" class="share-cb" data-key="${escHtml(key)}" value="${escHtml(s)}"
-                       ${cur.has(s) ? 'checked' : ''} onchange="captureShareEdits('${jsArg(key)}')">
+                <input type="checkbox" class="share-cb" data-group="${escHtml(group)}" value="${escHtml(s)}"
+                       ${cur.has(s) ? 'checked' : ''} onchange="captureShareEdits('${jsArg(group)}')">
                 <span>${escHtml(s)}</span> ${pending}
             </label>`;
     }).join('');
-    const what = p.kind === 'group'
-        ? `every member of ${escHtml(p.name)}, kept in step with the group`
-        : escHtml(p.label);
     return `
-    <tr class="exposed-editor-row room-detail-row" data-parent-key="${escHtml(key)}" data-search="${escHtml(search)}" style="${hidden}">
-        <td colspan="3">
+    <tr class="exposed-editor-row room-detail-row" data-parent-group="${escHtml(group)}" style="${hidden}">
+        <td colspan="2">
             <div class="exposed-cols">
                 <div class="exposed-col">
                     <div class="exposed-col-h">Share with
-                        <span class="exposed-col-sub">ticked servers get ${what} in their contact list</span>
+                        <span class="exposed-col-sub">ticked servers get every member of ${escHtml(group)} in their
+                            contact list, kept in step with the group's membership</span>
                     </div>
                     ${filteredChecklist(id, rows, 'Filter servers…', checklistFilters,
                         '<p class="empty" style="margin:4px 0">No server is reachable over a trusted path yet.</p>')}
                     <div style="margin-top:8px">
-                        <button class="btn-small btn-primary" onclick="saveShare('${jsArg(p.kind)}','${jsArg(p.name)}')">Save</button>
+                        <button class="btn-small btn-primary" onclick="saveShare('${jsArg(group)}')">Save</button>
                         ${targets.length ? `<button class="btn-small btn-danger" style="margin-left:4px"
-                            onclick="stopShare('${jsArg(p.kind)}','${jsArg(p.name)}')">Stop sharing</button>` : ''}
+                            onclick="stopShare('${jsArg(group)}')">Stop sharing</button>` : ''}
                     </div>
                 </div>
             </div>
@@ -1266,29 +1234,27 @@ function renderShareDetailRow(p, targets, search, hidden) {
     </tr>`;
 }
 
-function captureShareEdits(key) {
-    const boxes = document.querySelectorAll(`.share-cb[data-key="${cssEscape(key)}"]`);
+function captureShareEdits(group) {
+    const boxes = document.querySelectorAll(`.share-cb[data-group="${cssEscape(group)}"]`);
     if (boxes.length === 0) return;
-    const set = editedShares[key] || new Set();
+    const set = editedShares[group] || new Set();
     boxes.forEach(b => { if (b.checked) set.add(b.value); else set.delete(b.value); });
-    editedShares[key] = set;
+    editedShares[group] = set;
 }
 
-function toggleShareDetail(kind, name) {
-    const key = shareKey(kind, name);
-    if (expandedShares.has(key)) { captureShareEdits(key); expandedShares.delete(key); }
-    else expandedShares.add(key);
-    renderLocalPrincipals();
+function toggleShareDetail(group) {
+    if (expandedShares.has(group)) { captureShareEdits(group); expandedShares.delete(group); }
+    else expandedShares.add(group);
+    renderLocalGroups();
 }
 
-function saveShare(kind, name) {
-    const key = shareKey(kind, name);
-    captureShareEdits(key);
-    const targets = Array.from(editedShares[key] || []);
+function saveShare(group) {
+    captureShareEdits(group);
+    const targets = Array.from(editedShares[group] || []);
     const action = targets.length ? 'save-contact-share' : 'delete-contact-share';
-    post({ action, kind, name, targets: targets.join(',') }).then(result => {
+    post({ action, group, targets: targets.join(',') }).then(result => {
         if (result && result.ok) {
-            delete editedShares[key];
+            delete editedShares[group];
             flashSaved(targets.length ? 'Shared ✓' : 'Sharing stopped ✓');
             refresh();
         } else if (result && result.error) {
@@ -1297,11 +1263,11 @@ function saveShare(kind, name) {
     });
 }
 
-function stopShare(kind, name) {
-    if (!confirm('Stop sharing ' + kind + ' "' + name + '"? Servers that received it will remove these contacts.')) return;
-    post({ action: 'delete-contact-share', kind, name }).then(result => {
+function stopShare(group) {
+    if (!confirm('Stop sharing group "' + group + '"? Servers that received its members will remove them.')) return;
+    post({ action: 'delete-contact-share', group }).then(result => {
         if (result && result.ok) {
-            delete editedShares[shareKey(kind, name)];
+            delete editedShares[group];
             flashSaved('Sharing stopped ✓');
             refresh();
         }

@@ -62,7 +62,7 @@ the server on its list, which is exactly what room B needs and nothing more.*
   `*` is the catch-all. Two servers sharing a naming rule auto-link with zero clicks.
 - **Room mapping** — connect a local room to a room advertised by a peer; occupants and messages merge.
 - **Contact‑list sharing** — like Openfire's Contact List (Roster) Sharing, across servers. Share chosen
-  local users or groups with specific servers. On the receiving side, map each server's list to local
+  local groups with specific servers (a group's members, kept in step with membership). On the receiving side, map each server's list to local
   groups and the contacts appear in those users' rosters, with presence and avatars and no approval
   prompts. Presence is one‑way: each server decides which of its own users the others may see.
 - **Multi‑hop forwarding** — rooms federate across servers that aren't directly connected, relayed hop‑by‑hop.
@@ -151,7 +151,7 @@ The **Federation** tab has three sub‑views:
 | **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
 | **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
 | **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers. |
-| **Users** | *Contact Sharing*: local users and groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups. *Sent lists*: what each server currently receives. |
+| **Users** | *Contact Sharing*: local groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups. *Sent lists*: what each server currently receives. |
 
 The page auto‑refreshes every 5 seconds.
 
@@ -340,7 +340,7 @@ The plugin exchanges control messages with peers using IQ stanzas in the `urn:xm
 | `direct-forward` | Carries 1:1 chat messages to a multi‑hop contact (and message‑embedded XEPs: typing, receipts, reactions, OOB/upload links). |
 | `presence-forward` | Carries 1:1 presence and subscription stanzas to a multi‑hop contact. |
 | `iq-forward` | Carries user‑addressed IQs to a multi‑hop contact — **vCard/avatar (XEP‑0054/0153)**, plus disco/version/ping when answered by the contact's client. The vCard reply is built at the contact's server and relayed back, correlated by `id`. |
-| `contact-list` / `contact-list-request` | The users and groups one server shares with another, routed to that server only. The receiver turns a mapped list into an Openfire shared group, so the contacts appear in its users' rosters. |
+| `contact-list` / `contact-list-request` | The members of the groups one server shares with another, routed to that server only. The receiver turns a mapped list into an Openfire shared group, so the contacts appear in its users' rosters. |
 
 Remote users appear in local rooms as **virtual occupants**, tracked by their home origin (for reachability
 cleanup) and by the neighbour they arrived through (for per‑mapping teardown). Loop prevention uses a

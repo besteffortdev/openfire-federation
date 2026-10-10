@@ -47,8 +47,6 @@ public class FederationApiServlet extends HttpServlet {
 
         if ("poll".equals(req.getParameter("action"))) {
             out.print(longPoll(req.getParameter("hash")));
-        } else if ("principals".equals(req.getParameter("action"))) {
-            out.print(principalsJson(plugin.getManager()));
         } else {
             out.print(buildStatusJson(plugin));
         }
@@ -443,8 +441,6 @@ public class FederationApiServlet extends HttpServlet {
 
     /** Contacts listed per server in the status document; the page shows the count beyond this. */
     private static final int CONTACTS_SHOWN = 500;
-    /** Users offered by the share picker. */
-    private static final int PRINCIPALS_MAX = 2000;
 
     private static void appendContacts(StringBuilder sb, List<ContactListManager.Contact> contacts) {
         array(sb, contacts.size() > CONTACTS_SHOWN ? contacts.subList(0, CONTACTS_SHOWN) : contacts, (b, c) ->
@@ -462,8 +458,7 @@ public class FederationApiServlet extends HttpServlet {
 
         sb.append(",\"shareRules\":");
         array(sb, cl.getShareRules(), (b, r) -> {
-            b.append("{\"kind\":\"").append(r.kind())
-             .append("\",\"name\":\"").append(esc(r.name())).append("\",\"targets\":");
+            b.append("{\"group\":\"").append(esc(r.group())).append("\",\"targets\":");
             strings(b, r.targets());
             b.append("}");
         });
@@ -520,31 +515,6 @@ public class FederationApiServlet extends HttpServlet {
         });
         sb.append("}");
     }
-
-    /** Local users and groups for the share picker: {@code {"users":[{username,name}],"groups":[…]}}. */
-    private static String principalsJson(FederationManager mgr) {
-        org.jivesoftware.openfire.user.UserManager um = org.jivesoftware.openfire.user.UserManager.getInstance();
-        List<String> usernames = new ArrayList<>(um.getUsernames());
-        Collections.sort(usernames);
-        boolean truncated = usernames.size() > PRINCIPALS_MAX;
-        if (truncated) usernames = usernames.subList(0, PRINCIPALS_MAX);
-        StringBuilder sb = new StringBuilder("{\"users\":");
-        array(sb, usernames, (b, u) -> {
-            String name = "";
-            try {
-                org.jivesoftware.openfire.user.User user = um.getUser(u);
-                if (user.getName() != null) name = user.getName();
-            } catch (org.jivesoftware.openfire.user.UserNotFoundException ignored) {
-                // Deleted between listing and lookup — show it without a name.
-            }
-            b.append("{\"username\":\"").append(esc(u)).append("\",\"name\":\"").append(esc(name)).append("\"}");
-        });
-        sb.append(",\"truncated\":").append(truncated);
-        sb.append(",\"groups\":");
-        strings(sb, mgr.getContactLists().localGroupNames());
-        return sb.append("}").toString();
-    }
-
 
     /**
      * Dispatches one admin action. Each action answers with exactly one JSON document — either
@@ -872,34 +842,26 @@ public class FederationApiServlet extends HttpServlet {
         ContactListManager cl = mgr.getContactLists();
         switch (action) {
             case "save-contact-share": {
-                String kind = param(req, "kind");
-                String name = param(req, "name");
-                if (kind == null || name == null) return required("kind", "name");
-                if (ContactListManager.KIND_USER.equals(kind)) {
-                    try {
-                        org.jivesoftware.openfire.user.UserManager.getInstance().getUser(name);
-                    } catch (org.jivesoftware.openfire.user.UserNotFoundException e) {
-                        return error("no such user: " + name);
-                    }
-                } else if (ContactListManager.KIND_GROUP.equals(kind)) {
-                    if (!cl.localGroupNames().contains(name)) return error("no such group: " + name);
-                } else {
-                    return error("kind must be user or group");
-                }
-                Set<String> shareable = cl.shareableServers();
+                String group = param(req, "group");
+                if (group == null) return required("group");
+                if (!cl.localGroupNames().contains(group)) return error("no such group: " + group);
+                // A server the group is already shared with stays allowed while its route is down
+                // (the page shows it as pending); a new one must be reachable over a trusted path.
+                Set<String> allowed = new java.util.HashSet<>(cl.shareableServers());
+                cl.getShareRules().stream().filter(r -> r.group().equals(group))
+                  .forEach(r -> allowed.addAll(r.targets()));
                 List<String> targets = new ArrayList<>();
                 for (String t : csvDomains(req, "targets")) {
-                    if (!shareable.contains(t)) return error(t + " is not reachable over a trusted path");
+                    if (!allowed.contains(t)) return error(t + " is not reachable over a trusted path");
                     targets.add(t);
                 }
-                cl.saveShareRule(kind, name, targets);
+                cl.saveShareRule(group, targets);
                 return OK;
             }
             case "delete-contact-share": {
-                String kind = param(req, "kind");
-                String name = param(req, "name");
-                if (kind == null || name == null) return required("kind", "name");
-                cl.deleteShareRule(kind, name);
+                String group = param(req, "group");
+                if (group == null) return required("group");
+                cl.deleteShareRule(group);
                 return OK;
             }
             case "map-contact-list": {

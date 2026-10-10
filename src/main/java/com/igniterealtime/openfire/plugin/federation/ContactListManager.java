@@ -41,10 +41,11 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * <p>Two halves:
  * <ul>
- *   <li><b>Advertising</b> — the admin shares local users and/or local groups with specific peer
- *       servers ({@link ShareRule}). Each target server is sent its own {@code contact-list}: the
- *       union of every user shared with it, routed hop-by-hop to that server only (never flooded).
- *       Sharing a user with a server is also what authorizes that server's users to see the user's
+ *   <li><b>Advertising</b> — the admin shares local groups with specific peer servers
+ *       ({@link ShareRule}); a group is shared by membership, never as single users. Each target
+ *       server is sent its own {@code contact-list}: the members of every group shared with it,
+ *       routed hop-by-hop to that server only (never flooded). Sharing a user with a server (through
+ *       one of their groups) is also what authorizes that server's users to see the user's
  *       presence and PEP data (avatar, nickname): probes and subscription requests from an
  *       authorized server are answered by the plugin, without prompting the user.</li>
  *   <li><b>Receiving</b> — each server that shares contacts with us shows up as one received list.
@@ -67,6 +68,7 @@ public class ContactListManager {
     private static final Logger Log = LoggerFactory.getLogger(ContactListManager.class);
 
     private static final String PROP_SHARE_COUNT   = "federation.contactshare.count";
+    /** Retired with single-user sharing (1.10.15); a rule carrying kind=user is dropped on load. */
     private static final String PROP_SHARE_KIND    = "federation.contactshare.%d.kind";
     private static final String PROP_SHARE_NAME    = "federation.contactshare.%d.name";
     private static final String PROP_SHARE_TARGETS = "federation.contactshare.%d.targets";   // csv of domains
@@ -84,8 +86,6 @@ public class ContactListManager {
     /** Mapping token meaning "show this list to every local user". */
     public static final String EVERYBODY = "*";
 
-    public static final String KIND_USER  = "user";
-    public static final String KIND_GROUP = "group";
 
     /** Most contacts accepted in one list; anything past this is dropped (and logged). */
     public static final int MAX_CONTACTS = 5000;
@@ -98,8 +98,8 @@ public class ContactListManager {
     /** One shared contact: a bare JID plus the display name its server gave it (may be empty). */
     public record Contact(String jid, String name) {}
 
-    /** One local user or group shared with a set of peer servers. {@code kind} + {@code name} is the key. */
-    public record ShareRule(String kind, String name, List<String> targets) {
+    /** One local group shared with a set of peer servers. {@code group} is the key. */
+    public record ShareRule(String group, List<String> targets) {
         public ShareRule {
             targets = (targets == null) ? List.of() : List.copyOf(targets);
         }
@@ -165,14 +165,21 @@ public class ContactListManager {
 
     public void load() {
         rules.clear();
+        boolean droppedUserRules = false;
         int count = JiveGlobals.getIntProperty(PROP_SHARE_COUNT, 0);
         for (int i = 0; i < count; i++) {
             String kind = JiveGlobals.getProperty(String.format(PROP_SHARE_KIND, i));
             String name = JiveGlobals.getProperty(String.format(PROP_SHARE_NAME, i));
-            if (!isKind(kind) || name == null || name.isBlank()) continue;
-            rules.add(new ShareRule(kind, name.strip(),
+            if (name == null || name.isBlank()) continue;
+            if ("user".equals(kind)) {
+                Log.warn("Dropping contact share of single user '{}': only groups can be shared now", name);
+                droppedUserRules = true;
+                continue;
+            }
+            rules.add(new ShareRule(name.strip(),
                     parseCsv(JiveGlobals.getProperty(String.format(PROP_SHARE_TARGETS, i)))));
         }
+        if (droppedUserRules) persistRules();
 
         mappings.clear();
         count = JiveGlobals.getIntProperty(PROP_MAP_COUNT, 0);
@@ -200,41 +207,38 @@ public class ContactListManager {
 
     // ── Advertising: share rules ────────────────────────────────────────────────
 
-    /** Share rules, users first, each sorted by name. */
+    /** Share rules, sorted by group name. */
     public List<ShareRule> getShareRules() {
         synchronized (rules) {
             List<ShareRule> copy = new ArrayList<>(rules);
-            copy.sort((a, b) -> {
-                int k = b.kind().compareTo(a.kind());   // "user" before "group"
-                return k != 0 ? k : a.name().compareToIgnoreCase(b.name());
-            });
+            copy.sort((a, b) -> a.group().compareToIgnoreCase(b.group()));
             return copy;
         }
     }
 
-    /** Adds or replaces (by kind + name) a share rule, persists it, and re-sends affected lists. */
-    public void saveShareRule(String kind, String name, Collection<String> targets) {
-        if (!isKind(kind) || name == null || name.isBlank()) return;
-        String n = name.strip();
-        ShareRule rule = new ShareRule(kind, n, new ArrayList<>(new LinkedHashSet<>(targets)));
+    /** Sets the servers a group is shared with (none = stop sharing), persists, and re-sends affected lists. */
+    public void saveShareRule(String group, Collection<String> targets) {
+        if (group == null || group.isBlank()) return;
+        String g = group.strip();
+        ShareRule rule = new ShareRule(g, new ArrayList<>(new LinkedHashSet<>(targets)));
         synchronized (rules) {
-            rules.removeIf(r -> r.kind().equals(kind) && r.name().equals(n));
+            rules.removeIf(r -> r.group().equals(g));
             if (!rule.targets().isEmpty()) rules.add(rule);
             persistRules();
         }
-        Log.info("Contact share saved: {} '{}' → {}", kind, n, rule.targets());
+        Log.info("Contact share saved: group '{}' → {}", g, rule.targets());
         tick();
     }
 
-    /** Removes a share rule; its contacts are withdrawn from servers no other rule still covers. */
-    public void deleteShareRule(String kind, String name) {
-        if (name == null) return;
-        String n = name.strip();
+    /** Stops sharing a group; its members are withdrawn from servers no other shared group still covers. */
+    public void deleteShareRule(String group) {
+        if (group == null) return;
+        String g = group.strip();
         synchronized (rules) {
-            rules.removeIf(r -> r.kind().equals(kind) && r.name().equals(n));
+            rules.removeIf(r -> r.group().equals(g));
             persistRules();
         }
-        Log.info("Contact share removed: {} '{}'", kind, n);
+        Log.info("Contact share removed: group '{}'", g);
         tick();
     }
 
@@ -257,18 +261,14 @@ public class ContactListManager {
         Map<String, String> byJid = new TreeMap<>();
         for (ShareRule rule : getShareRules()) {
             if (!rule.targets().contains(target)) continue;
-            if (KIND_USER.equals(rule.kind())) {
-                addLocalUser(byJid, rule.name());
-            } else {
-                try {
-                    Group g = GroupManager.getInstance().getGroup(rule.name());
-                    if (isPluginGroup(g)) continue;   // never re-share contacts another server shared with us
-                    for (JID j : g.getAll()) {
-                        if (XMPPServer.getInstance().isLocal(j) && j.getNode() != null) addLocalUser(byJid, j.getNode());
-                    }
-                } catch (GroupNotFoundException e) {
-                    Log.debug("Contact share: group '{}' no longer exists", rule.name());
+            try {
+                Group g = GroupManager.getInstance().getGroup(rule.group());
+                if (isPluginGroup(g)) continue;   // never re-share contacts another server shared with us
+                for (JID j : g.getAll()) {
+                    if (XMPPServer.getInstance().isLocal(j) && j.getNode() != null) addLocalUser(byJid, j.getNode());
                 }
+            } catch (GroupNotFoundException e) {
+                Log.debug("Contact share: group '{}' no longer exists", rule.group());
             }
         }
         List<Contact> out = new ArrayList<>(byJid.size());
@@ -740,10 +740,6 @@ public class ContactListManager {
         return Collections.unmodifiableSet(out);
     }
 
-    private static boolean isKind(String kind) {
-        return KIND_USER.equals(kind) || KIND_GROUP.equals(kind);
-    }
-
     private static String localDomain() {
         return XMPPServer.getInstance().getServerInfo().getXMPPDomain();
     }
@@ -757,8 +753,7 @@ public class ContactListManager {
         }
         int i = 0;
         for (ShareRule r : rules) {
-            JiveGlobals.setProperty(String.format(PROP_SHARE_KIND, i), r.kind());
-            JiveGlobals.setProperty(String.format(PROP_SHARE_NAME, i), r.name());
+            JiveGlobals.setProperty(String.format(PROP_SHARE_NAME, i), r.group());
             JiveGlobals.setProperty(String.format(PROP_SHARE_TARGETS, i), String.join(",", r.targets()));
             i++;
         }
