@@ -47,6 +47,8 @@ public class FederationApiServlet extends HttpServlet {
 
         if ("poll".equals(req.getParameter("action"))) {
             out.print(longPoll(req.getParameter("hash")));
+        } else if ("principals".equals(req.getParameter("action"))) {
+            out.print(principalsJson(plugin.getManager()));
         } else {
             out.print(buildStatusJson(plugin));
         }
@@ -311,8 +313,6 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue()).append(",");
         sb.append("\"allowRemoteRoomTraversal\":").append(FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()).append(",");
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
-        sb.append("\"directoryPublish\":").append(FederationProperties.DIRECTORY_PUBLISH.getValue()).append(",");
-        sb.append("\"bookmarkPush\":").append(FederationProperties.BOOKMARK_PUSH.getValue()).append(",");
         sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
         sb.append("\"filesEnabled\":").append(FederationProperties.FILES_ENABLED.getValue()).append(",");
         // Distinct from filesEnabled: the switch can be on while the relay itself failed to come up
@@ -383,18 +383,15 @@ public class FederationApiServlet extends HttpServlet {
 
         // ── this server's connected clients (local online users) ───────────────
         sb.append("\"localUsers\":");
-        array(sb, mgr.getUserDirectory().localOnlineUsers(), FederationApiServlet::appendPresence);
+        array(sb, connectedClients(), (b, c) ->
+            b.append("{\"jid\":\"").append(esc(c[0]))
+             .append("\",\"show\":\"").append(esc(c[1]))
+             .append("\",\"status\":\"").append(esc(c[2])).append("\"}"));
         sb.append(",");
 
-        // ── user directory (origin server domain → [{jid,show,status}]) ────────
-        sb.append("\"directory\":");
-        objectOfArrays(sb, mgr.getUserDirectory().getRemoteUsers(), FederationApiServlet::appendPresence);
-        sb.append(",");
-
-        // ── bookmarks advertised to us by peers (origin domain → [jid]) ────────
-        sb.append("\"advertisedBookmarks\":");
-        objectOfArrays(sb, mgr.getBookmarkInjector().getAdvertised(),
-                       (b, jid) -> b.append("\"").append(esc(jid)).append("\""));
+        // ── shared contact lists (sent and received) ──────────────────────────
+        sb.append("\"contactLists\":");
+        appendContactLists(sb, mgr);
         sb.append(",");
 
         // ── default-settings rules for newly-created rooms (by name pattern) ───
@@ -452,11 +449,127 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("}");
     }
 
-    /** The {@code {jid,show,status}} element shared by the local-user list and the remote directory. */
-    private static void appendPresence(StringBuilder sb, UserDirectory.UserPresence u) {
-        sb.append("{\"jid\":\"").append(esc(u.jid()))
-          .append("\",\"show\":\"").append(esc(u.show()))
-          .append("\",\"status\":\"").append(esc(u.status())).append("\"}");
+    /** Contacts listed per server in the status document; the page shows the count beyond this. */
+    private static final int CONTACTS_SHOWN = 500;
+    /** Users offered by the share picker. */
+    private static final int PRINCIPALS_MAX = 2000;
+
+    /** This server's logged-in users as {@code [bareJid, show, status]}, one entry per user. */
+    private static List<String[]> connectedClients() {
+        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        Map<String, String[]> byJid = new java.util.TreeMap<>();
+        for (org.jivesoftware.openfire.session.ClientSession session
+                : XMPPServer.getInstance().getSessionManager().getSessions()) {
+            org.xmpp.packet.JID jid = session.getAddress();
+            if (jid == null || jid.getNode() == null || !localDomain.equals(jid.getDomain())) continue;
+            String show = "", status = "";
+            org.xmpp.packet.Presence p = session.getPresence();
+            if (p != null && p.isAvailable()) {
+                if (p.getShow() != null)   show   = p.getShow().name();
+                if (p.getStatus() != null) status = p.getStatus();
+            }
+            byJid.putIfAbsent(jid.toBareJID(), new String[] { jid.toBareJID(), show, status });
+        }
+        return new ArrayList<>(byJid.values());
+    }
+
+    private static void appendContacts(StringBuilder sb, List<ContactListManager.Contact> contacts) {
+        array(sb, contacts.size() > CONTACTS_SHOWN ? contacts.subList(0, CONTACTS_SHOWN) : contacts, (b, c) ->
+            b.append("{\"jid\":\"").append(esc(c.jid()))
+             .append("\",\"name\":\"").append(esc(c.name())).append("\"}"));
+    }
+
+    /**
+     * The Users tab: what this server shares and with whom, what each target was last sent, and the
+     * lists other servers share with us with their mapping into local groups.
+     */
+    private static void appendContactLists(StringBuilder sb, FederationManager mgr) {
+        ContactListManager cl = mgr.getContactLists();
+        sb.append("{\"groupsReadOnly\":").append(cl.groupsReadOnly());
+
+        sb.append(",\"shareRules\":");
+        array(sb, cl.getShareRules(), (b, r) -> {
+            b.append("{\"kind\":\"").append(r.kind())
+             .append("\",\"name\":\"").append(esc(r.name())).append("\",\"targets\":");
+            strings(b, r.targets());
+            b.append("}");
+        });
+
+        sb.append(",\"shareableServers\":");
+        strings(sb, cl.shareableServers());
+
+        sb.append(",\"localGroups\":");
+        strings(sb, cl.localGroupNames());
+
+        // Every configured target, including one never sent to yet (unreachable since it was added).
+        Map<String, List<ContactListManager.Contact>> sent = cl.getSentLists();
+        Set<String> targets = new java.util.TreeSet<>(sent.keySet());
+        for (ContactListManager.ShareRule r : cl.getShareRules()) targets.addAll(r.targets());
+        sb.append(",\"sent\":");
+        array(sb, targets, (b, t) -> {
+            List<ContactListManager.Contact> contacts = cl.computeSnapshot(t);
+            List<ContactListManager.Contact> last = sent.get(t);
+            b.append("{\"target\":\"").append(esc(t))
+             .append("\",\"reachable\":").append(cl.canExchangeWith(t))
+             .append(",\"delivered\":").append(contacts.equals(last))
+             .append(",\"count\":").append(contacts.size())
+             .append(",\"contacts\":");
+            appendContacts(b, contacts);
+            b.append("}");
+        });
+
+        Map<String, ContactListManager.ReceivedList> received = cl.getReceived();
+        Map<String, ContactListManager.ListMapping> mappings = cl.getMappings();
+        Map<String, String> errors = cl.getMappingErrors();
+        Set<String> origins = new java.util.TreeSet<>(received.keySet());
+        origins.addAll(mappings.keySet());
+        sb.append(",\"received\":");
+        array(sb, origins, (b, o) -> {
+            ContactListManager.ReceivedList list = received.get(o);
+            ContactListManager.ListMapping m = mappings.get(o);
+            b.append("{\"origin\":\"").append(esc(o))
+             .append("\",\"reachable\":").append(cl.canExchangeWith(o))
+             .append(",\"receivedAt\":").append(list == null ? "null" : String.valueOf(list.receivedAt()))
+             .append(",\"count\":").append(list == null ? 0 : list.contacts().size())
+             .append(",\"groupName\":\"").append(esc(ContactListManager.groupNameFor(o)))
+             .append("\",\"error\":\"").append(esc(errors.getOrDefault(o, "")))
+             .append("\",\"contacts\":");
+            appendContacts(b, list == null ? List.of() : list.contacts());
+            b.append(",\"mapping\":");
+            if (m == null) {
+                b.append("null");
+            } else {
+                b.append("{\"displayName\":\"").append(esc(m.displayName())).append("\",\"groups\":");
+                strings(b, m.groups());
+                b.append("}");
+            }
+            b.append("}");
+        });
+        sb.append("}");
+    }
+
+    /** Local users and groups for the share picker: {@code {"users":[{username,name}],"groups":[…]}}. */
+    private static String principalsJson(FederationManager mgr) {
+        org.jivesoftware.openfire.user.UserManager um = org.jivesoftware.openfire.user.UserManager.getInstance();
+        List<String> usernames = new ArrayList<>(um.getUsernames());
+        Collections.sort(usernames);
+        boolean truncated = usernames.size() > PRINCIPALS_MAX;
+        if (truncated) usernames = usernames.subList(0, PRINCIPALS_MAX);
+        StringBuilder sb = new StringBuilder("{\"users\":");
+        array(sb, usernames, (b, u) -> {
+            String name = "";
+            try {
+                org.jivesoftware.openfire.user.User user = um.getUser(u);
+                if (user.getName() != null) name = user.getName();
+            } catch (org.jivesoftware.openfire.user.UserNotFoundException ignored) {
+                // Deleted between listing and lookup — show it without a name.
+            }
+            b.append("{\"username\":\"").append(esc(u)).append("\",\"name\":\"").append(esc(name)).append("\"}");
+        });
+        sb.append(",\"truncated\":").append(truncated);
+        sb.append(",\"groups\":");
+        strings(sb, mgr.getContactLists().localGroupNames());
+        return sb.append("}").toString();
     }
 
 
@@ -496,6 +609,7 @@ public class FederationApiServlet extends HttpServlet {
         if (reply == null) reply = roomAction(action, req, mgr);
         if (reply == null) reply = mappingAction(action, req, mgr);
         if (reply == null) reply = fileAction(action, req, mgr);
+        if (reply == null) reply = contactListAction(action, req, mgr);
         if (reply == null) reply = settingAction(action, req, mgr);
         if (reply == null) reply = error("unknown action");
         out.print(reply);
@@ -780,6 +894,76 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
+    /** Contact-list sharing: what this server shares with whom, and where received lists appear. */
+    private String contactListAction(String action, HttpServletRequest req, FederationManager mgr) {
+        ContactListManager cl = mgr.getContactLists();
+        switch (action) {
+            case "save-contact-share": {
+                String kind = param(req, "kind");
+                String name = param(req, "name");
+                if (kind == null || name == null) return required("kind", "name");
+                if (ContactListManager.KIND_USER.equals(kind)) {
+                    try {
+                        org.jivesoftware.openfire.user.UserManager.getInstance().getUser(name);
+                    } catch (org.jivesoftware.openfire.user.UserNotFoundException e) {
+                        return error("no such user: " + name);
+                    }
+                } else if (ContactListManager.KIND_GROUP.equals(kind)) {
+                    if (!cl.localGroupNames().contains(name)) return error("no such group: " + name);
+                } else {
+                    return error("kind must be user or group");
+                }
+                Set<String> shareable = cl.shareableServers();
+                List<String> targets = new ArrayList<>();
+                for (String t : csvDomains(req, "targets")) {
+                    if (!shareable.contains(t)) return error(t + " is not reachable over a trusted path");
+                    targets.add(t);
+                }
+                cl.saveShareRule(kind, name, targets);
+                return OK;
+            }
+            case "delete-contact-share": {
+                String kind = param(req, "kind");
+                String name = param(req, "name");
+                if (kind == null || name == null) return required("kind", "name");
+                cl.deleteShareRule(kind, name);
+                return OK;
+            }
+            case "map-contact-list": {
+                String origin = domainParam(req, "origin");
+                if (origin == null) return required("origin");
+                if (cl.groupsReadOnly()) return error("the group provider is read-only, so lists cannot be mapped");
+                List<String> groups = new ArrayList<>();
+                String raw = req.getParameter("groups");
+                if (raw != null) {
+                    List<String> known = cl.localGroupNames();
+                    for (String g : raw.split("\n")) {
+                        String t = g.strip();
+                        if (t.isEmpty()) continue;
+                        if (!t.equals(ContactListManager.EVERYBODY) && !known.contains(t)) {
+                            return error("no such group: " + t);
+                        }
+                        groups.add(t);
+                    }
+                }
+                if (groups.isEmpty()) return error("choose at least one group, or all users");
+                cl.setMapping(origin, param(req, "displayName"), groups);
+                return OK;
+            }
+            case "unmap-contact-list": {
+                String origin = domainParam(req, "origin");
+                if (origin == null) return required("origin");
+                cl.removeMapping(origin);
+                return OK;
+            }
+            case "resend-contact-lists":
+                cl.resendAll();
+                return OK;
+            default:
+                return null;
+        }
+    }
+
     /** Server-wide federation switches, timers, and the one-shot pushes the admin can trigger. */
     private String settingAction(String action, HttpServletRequest req, FederationManager mgr) {
         switch (action) {
@@ -792,22 +976,6 @@ public class FederationApiServlet extends HttpServlet {
                 return applyToggle(req, FederationProperties.DIRECT_MSG_RELAY, "directMsgRelay");
             case "set-probe-on-subscribe":
                 return applyToggle(req, FederationProperties.PROBE_ON_SUBSCRIBE, "probeOnSubscribe");
-            case "set-directory-publish": {
-                String reply = applyToggle(req, FederationProperties.DIRECTORY_PUBLISH, "directoryPublish");
-                // Push (or, when turning off, withdraw with an empty list) to peers immediately.
-                if (isOk(reply)) mgr.publishDirectory();
-                return reply;
-            }
-            case "set-bookmark-push": {
-                String reply = applyToggle(req, FederationProperties.BOOKMARK_PUSH, "bookmarkPush");
-                // Push (or, when turning off, withdraw with an empty list) to peers immediately.
-                if (isOk(reply)) mgr.pushBookmarks();
-                return reply;
-            }
-            case "push-bookmarks":
-                // Manual one-shot advertisement of our connected clients (independent of the toggle).
-                mgr.pushBookmarksNow();
-                return OK;
             case "set-keepalive": {
                 Integer seconds = intParam(req, "seconds");
                 if (seconds == null) return secondsError(req);

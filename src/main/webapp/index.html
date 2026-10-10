@@ -592,24 +592,6 @@
                         <span id="probesub-state" class="setting-state">…</span>
                     </div>
                 </div>
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Publish my user directory to peers</div>
-                        <div class="setting-desc">
-                            When enabled, this server gossips its list of currently-online users so
-                            peers can see who is reachable here (see the <strong>Users</strong> tab).
-                            Off by default for privacy; untrusted peers never receive it. Messaging
-                            by typed JID still works when this is off.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <label class="toggle">
-                            <input type="checkbox" id="dirpublish-toggle" onchange="saveDirectoryPublish()">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="dirpublish-state" class="setting-state">…</span>
-                    </div>
-                </div>
             </div>
         </div>
     </div>
@@ -647,7 +629,6 @@
             (per-link). The entry stays listed here as disabled — the deny survives route
             withdrawals and re-advertisements — until you click <strong>Allow</strong>
             (also available in that peer's settings panel — the expand arrow on the Peers tab).
-            See the <strong>Users</strong> tab for the clients each server has published.
         </p>
     </div>
 
@@ -779,44 +760,108 @@
     <!-- ── Users panel ───────────────────────────────────────────────────────── -->
     <div id="panel-users" class="fed-panel">
 
+        <div class="fed-subtabs">
+            <button class="fed-subtab active" data-subtab="users-share">Share my contacts</button>
+            <button class="fed-subtab"        data-subtab="users-received">Received contact lists</button>
+            <button class="fed-subtab"        data-subtab="users-clients">Connected clients</button>
+        </div>
+
+        <!-- ·· Share my contacts ·········································· -->
+        <div id="subpanel-users-share" class="fed-subpanel active">
+
         <div class="section-box">
-            <div class="section-box-header">Advertise connected clients as bookmarks (XEP-0048)</div>
+            <div class="section-box-header">Share users and groups with other servers</div>
             <div class="section-box-body">
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Auto-push my connected clients to peers</div>
-                        <div class="setting-desc">
-                            When enabled, this server's currently-connected clients are advertised
-                            to every trusted peer and injected into each peer user's bookmark
-                            storage as XEP-0048 <code>&lt;url&gt;</code> bookmarks — so they appear
-                            in a normal chat client. Re-pushes automatically as users come and go.
-                            Untrusted peers never receive it. Bookmarks are read at login, so a peer
-                            user sees changes on their next sign-in. Turning this off withdraws the
-                            bookmarks this server pushed.
+                <p class="hint" style="margin-top:0">
+                    Like Openfire's Contact List Sharing, across servers. Pick a local user or group and
+                    the servers to share it with. Each server receives one contact list: everyone
+                    shared with it. A group is shared by membership, so people who join or leave the
+                    group are added or removed automatically. The receiving server's admin chooses
+                    which of their users see the list. Their users see the presence and avatar of the
+                    contacts you share. Your users don't see theirs unless that server shares contacts
+                    back. Only servers reached over trusted links are listed.
+                </p>
+                <form id="form-contact-share" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
+                        Share
+                        <select id="cs-kind" style="margin-top:3px">
+                            <option value="user">User</option>
+                            <option value="group">Group</option>
+                        </select>
+                    </label>
+                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
+                        Name
+                        <input type="text" id="cs-name" list="cs-name-options" autocomplete="off"
+                               placeholder="username or group" style="margin-top:3px;min-width:200px">
+                        <datalist id="cs-name-options"></datalist>
+                    </label>
+                    <div style="display:flex;flex-direction:column;font-size:12px;color:#555">
+                        With servers
+                        <div id="cs-targets" style="margin-top:3px;display:flex;flex-wrap:wrap;gap:4px 14px;max-width:520px">
+                            <span class="hint">Loading…</span>
                         </div>
                     </div>
-                    <div class="setting-ctl">
-                        <label class="toggle">
-                            <input type="checkbox" id="bookmarkpush-toggle" onchange="saveBookmarkPush()">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="bookmarkpush-state" class="setting-state">…</span>
-                    </div>
-                </div>
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Push once now</div>
-                        <div class="setting-desc">
-                            Advertise the current connected clients a single time, without enabling
-                            automatic re-pushing.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <button class="btn btn-primary btn-small" onclick="pushBookmarks()">Push bookmarks to peers</button>
-                    </div>
-                </div>
+                    <button type="submit" class="btn btn-primary btn-small">Save</button>
+                </form>
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Shared</th>
+                            <th>Name</th>
+                            <th>With servers</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="contact-share-tbody">
+                        <tr><td colspan="4" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
+
+        <div class="section-box">
+            <div class="section-box-header">
+                What each server receives
+                <button class="btn btn-small" style="margin-left:auto" onclick="resendContactLists()">Re-send now</button>
+            </div>
+            <div class="section-box-body" id="contact-sent-container">
+                <p class="empty">Loading…</p>
+            </div>
+        </div>
+
+        </div><!-- /subpanel-users-share -->
+
+        <!-- ·· Received contact lists ····································· -->
+        <div id="subpanel-users-received" class="fed-subpanel">
+
+        <div class="section-box">
+            <div class="section-box-header">
+                Contact lists shared with this server
+                <input class="filter-input" data-target="contact-received-container" placeholder="Filter servers…">
+            </div>
+            <div class="section-box-body">
+                <p class="hint" style="margin-top:0">
+                    Each server that shares contacts with you appears here. Map its list to one or more
+                    local groups (or all users). The plugin then keeps an Openfire shared group, named
+                    <code>federation-contacts-&lt;server&gt;</code>, holding those contacts. That puts
+                    them in each chosen user's contact list under the roster group name you pick. If
+                    the server stops sharing someone, they're removed. Removing the mapping deletes the
+                    group, which takes the contacts out of every contact list.
+                </p>
+                <p id="contact-readonly-note" class="hint" style="display:none;color:var(--red-ink)">
+                    The Openfire group provider is read-only (for example LDAP), so the plugin cannot
+                    create groups for received lists.
+                </p>
+                <div id="contact-received-container"><p class="empty">Loading…</p></div>
+            </div>
+        </div>
+
+        </div><!-- /subpanel-users-received -->
+
+        <!-- ·· Connected clients ········································· -->
+        <div id="subpanel-users-clients" class="fed-subpanel">
 
         <div class="section-box">
             <div class="section-box-header">
@@ -839,26 +884,7 @@
             </div>
         </div>
 
-        <div class="section-box">
-            <div class="section-box-header">
-                Bookmarks advertised by peers (XEP-0048)
-                <input class="filter-input" data-target="advertised-bookmarks-container" placeholder="Filter servers…">
-            </div>
-            <div class="section-box-body" id="advertised-bookmarks-container">
-                <p class="empty">Loading…</p>
-            </div>
-        </div>
-
-        <div class="section-box">
-            <div class="section-box-header">
-                Users on peer servers (advertised directory)
-                <input class="filter-input" data-target="remote-users-container" placeholder="Filter…">
-            </div>
-            <div class="section-box-body" id="remote-users-container">
-                <p class="empty">Loading…</p>
-            </div>
-        </div>
-
+        </div><!-- /subpanel-users-clients -->
     </div>
 
     <!-- ── Files panel ───────────────────────────────────────────────────────── -->

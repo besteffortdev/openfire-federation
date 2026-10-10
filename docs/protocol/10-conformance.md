@@ -63,7 +63,7 @@ Add the `fed-file` annotation and `file-request`/`-offer`/`-chunk`/`-error`.
 
 - `mapping-ping` / `mapping-pong` — never answering simply means peers never flag your mappings as
   broken. Costs you diagnostics, breaks nothing.
-- `user-directory` / `bookmark-push` — ignore the actions and no peer notices.
+- `contact-list` / `contact-list-request` — ignore the actions and no peer notices.
 - `peer-disable` — treat an inbound one as a withdrawal you refuse to re-establish automatically.
 - Untrusted-peer mode — if you have no exposure model, omit the `untrusted` attribute and treat all
   peers as trusted. You will be blocked by a peer that considers you untrusted, which is the correct

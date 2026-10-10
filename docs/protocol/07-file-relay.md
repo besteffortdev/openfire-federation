@@ -353,4 +353,4 @@ alone is a far better degraded mode than breaking the link.
 
 ---
 
-Previous: [06-direct-traffic.md](06-direct-traffic.md) · Next: [08-directory.md](08-directory.md)
+Previous: [06-direct-traffic.md](06-direct-traffic.md) · Next: [08-contact-lists.md](08-contact-lists.md)

@@ -1,7 +1,7 @@
 package com.igniterealtime.openfire.plugin.federation.protocol;
 
 import com.igniterealtime.openfire.plugin.federation.FederationManager;
-import com.igniterealtime.openfire.plugin.federation.UserDirectory;
+import com.igniterealtime.openfire.plugin.federation.ContactListManager;
 import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
@@ -56,6 +56,7 @@ import java.util.stream.Collectors;
  *                      all other mapped spokes after injecting locally
  * mapping-ping/pong  → end-to-end probe of an active mapping's path; catches a route
  *                      silently broken mid-way (e.g. an intermediate deny)
+ * contact-list       → the contacts another server shares with us (or relay it on)
  */
 public class FederationIQHandler extends IQHandler {
 
@@ -173,8 +174,11 @@ public class FederationIQHandler extends IQHandler {
             case "direct-forward"      -> handleDirectForward(fromDomain, child);
             case "presence-forward"    -> handlePresenceForward(fromDomain, child);
             case "iq-forward"          -> handleIqForward(fromDomain, child);
-            case "user-directory"      -> handleUserDirectory(fromDomain, child);
-            case "bookmark-push"       -> handleBookmarkPush(fromDomain, child);
+            case "contact-list", "contact-list-request"
+                                       -> handleContactListAction(child.getName(), fromDomain, child);
+            // Retired in 1.10.13 (replaced by contact-list); a peer still on an older build may send them.
+            case "user-directory", "bookmark-push"
+                                       -> Log.debug("Ignoring retired federation action '{}' from {}", child.getName(), fromDomain);
             case "file-request", "file-offer", "file-chunk", "file-error"
                                        -> handleFileRelay(child.getName(), fromDomain, child);
             default -> Log.warn("Unknown federation action '{}' from {}", child.getName(), fromDomain);
@@ -272,8 +276,6 @@ public class FederationIQHandler extends IQHandler {
             manager.solicitRouting(fromDomain);
             manager.resyncMappedDestinations(Set.of(fromDomain));
             manager.resendPendingRequests(fromDomain);
-            manager.publishDirectoryTo(fromDomain);
-            manager.pushBookmarksTo(fromDomain);
         } else if (!isReply) {
             // Steady-state keepalive: send one reply back so the reverse S2S socket —
             // which our own keepalive timer cannot reach (separate per-direction sockets,
@@ -1130,6 +1132,13 @@ public class FederationIQHandler extends IQHandler {
             // Checked ahead of the probe branch too: answering a probe for a user who does not live
             // here would disclose local presence to a peer that addressed someone else's server.
             if (!deliverableHere(pto, "presence-forward", fromDomain)) return;
+            // A probe or subscription request for a user shared with the sender's server: answered by
+            // the plugin, so the user is never prompted to approve a contact the admin shared.
+            if (manager.getContactLists().handleInboundSubscription(pres)) {
+                Log.info("presence-forward: answered {} {} -> {} for a shared contact (from {})",
+                         pres.getType(), pres.getFrom(), pto, fromDomain);
+                return;
+            }
             // A probe for a local user: Openfire's own answer would be routed past the interceptor and
             // never cross the overlay, so answer explicitly with the user's current presence.
             if (pres.getType() == Presence.Type.probe) {
@@ -1374,6 +1383,20 @@ public class FederationIQHandler extends IQHandler {
      * {@code item-not-found} for a node the contact never created, an empty {@code <items/>} for a
      * node that exists but holds nothing, and the item itself otherwise.
      */
+    /**
+     * Answers a PEP items GET that reached us over native S2S from a contact on a server the target
+     * user is shared with (see {@code ContactListManager}). Openfire would refuse it: the contact is
+     * not on the user's roster, so a presence-access node (the avatar) looks private to them. Returns
+     * false, leaving the request to Openfire, for anything else.
+     */
+    boolean answerSharedContactPepFetch(IQ request) {
+        JID from = request.getFrom();
+        JID to   = request.getTo();
+        if (from == null || to == null || !XMPPServer.getInstance().isLocal(to)) return false;
+        if (!manager.getContactLists().isAuthorizedContact(to, from)) return false;
+        return answerPepItemsLocally(request, from.getDomain());
+    }
+
     private boolean answerPepItemsLocally(IQ request, String fromDomain) {
         if (request.getType() != IQ.Type.get) return false;
         Element pubsub = request.getChildElement();
@@ -1493,72 +1516,73 @@ public class FederationIQHandler extends IQHandler {
         return true;
     }
 
-    // ── user-directory (opt-in online-user gossip) ─────────────────────────────
+    // ── contact-list / contact-list-request (per-server contact sharing) ────────
 
-    /** Caches an inbound user-directory and relays it onward (loop-guarded). */
-    private void handleUserDirectory(String fromDomain, Element el) {
+    /**
+     * Relays a {@code contact-list} or {@code contact-list-request} toward its destination, or applies
+     * it when we are the destination. Contact lists never cross an untrusted link: one arriving over
+     * an untrusted link is dropped, and one whose next hop is untrusted is not relayed.
+     */
+    private void handleContactListAction(String element, String fromDomain, Element el) {
+        String destination = el.attributeValue(FederationStanzaFactory.ATTR_DESTINATION);
         String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
         String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
+        if (manager.getPeerRegistry().isUntrusted(fromDomain)) {
+            Log.warn("SECURITY: dropping {} from untrusted peer {} — contact lists never cross an untrusted link",
+                     element, fromDomain);
+            return;
+        }
+        if (destination == null || origin == null || origin.equals(localDomain)) {
+            Log.warn("{} from {} has a missing or invalid origin/destination ({} → {}), dropping",
+                     element, fromDomain, origin, destination);
+            return;
+        }
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
-            Log.debug("user-directory loop detected (via={}), dropping", via);
+            Log.warn("{} loop detected (via={}), dropping", element, via);
             return;
         }
 
-        String sourceDomain = (origin != null) ? origin : fromDomain;
-        if (localDomain.equals(sourceDomain)) {
-            Log.debug("user-directory origin is our own domain, ignoring");
-            return;
-        }
-
-        List<UserDirectory.UserPresence> users = new ArrayList<>();
-        for (Element u : el.elements("user")) {
-            String jid = u.attributeValue("jid");
-            if (jid != null && !jid.isBlank()) {
-                users.add(new UserDirectory.UserPresence(
-                        jid.strip(),
-                        u.attributeValue("show", ""),
-                        u.attributeValue("status", "")));
+        if (!destination.equals(localDomain)) {
+            String nextHop = manager.getRoutingTable().findNextHop(destination).orElse(null);
+            if (nextHop == null) {
+                Log.debug("{}: no route to {}, dropping", element, destination);
+                return;
             }
-        }
-        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
-        manager.handleUserDirectory(fromDomain, sourceDomain, users, newVia);
-        Log.debug("user-directory from {} (source={}) — {} user(s)", fromDomain, sourceDomain, users.size());
-    }
-
-    // ── bookmark-push (XEP-0048 connected-client advertisement) ────────────────
-
-    /** Injects an inbound bookmark-push into local users' storage and relays it onward (loop-guarded). */
-    private void handleBookmarkPush(String fromDomain, Element el) {
-        String origin      = el.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
-        String via         = el.attributeValue(FederationStanzaFactory.ATTR_VIA, "");
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-
-        if (FederationStanzaFactory.viaContains(via, localDomain)) {
-            Log.debug("bookmark-push loop detected (via={}), dropping", via);
-            return;
-        }
-
-        String sourceDomain = (origin != null) ? origin : fromDomain;
-        if (localDomain.equals(sourceDomain)) {
-            Log.debug("bookmark-push origin is our own domain, ignoring");
-            return;
-        }
-
-        List<UserDirectory.UserPresence> users = new ArrayList<>();
-        for (Element u : el.elements("user")) {
-            String jid = u.attributeValue("jid");
-            if (jid != null && !jid.isBlank()) {
-                users.add(new UserDirectory.UserPresence(
-                        jid.strip(),
-                        u.attributeValue("show", ""),
-                        u.attributeValue("status", "")));
+            if (manager.getPeerRegistry().isUntrusted(nextHop)) {
+                Log.warn("SECURITY: not relaying {} from {} toward {} — the next hop {} is untrusted",
+                         element, origin, destination, nextHop);
+                return;
             }
+            String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
+            try {
+                XMPPServer.getInstance().getPacketRouter()
+                          .route(FederationStanzaFactory.relay(nextHop, el, newVia));
+            } catch (Exception e) {
+                Log.warn("Could not relay {} toward {}: {}", element, destination, e.getMessage());
+            }
+            return;
         }
-        String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
-        manager.handleBookmarkPush(fromDomain, sourceDomain, users, newVia);
-        Log.debug("bookmark-push from {} (source={}) — {} user(s)", fromDomain, sourceDomain, users.size());
+
+        if ("contact-list-request".equals(element)) {
+            manager.getContactLists().handleRequest(origin);
+            return;
+        }
+        List<ContactListManager.Contact> contacts = new ArrayList<>();
+        int rejected = 0;
+        for (Element c : el.elements("contact")) {
+            ContactListManager.Contact contact =
+                    ContactListManager.parseContact(origin, c.attributeValue("jid"), c.attributeValue("name"));
+            if (contact == null) { rejected++; continue; }
+            if (contacts.size() >= ContactListManager.MAX_CONTACTS) { rejected++; continue; }
+            contacts.add(contact);
+        }
+        if (rejected > 0) {
+            Log.warn("contact-list from {}: ignored {} entr(ies) — not a bare JID on {}, or past the {}-contact limit",
+                     origin, rejected, origin, ContactListManager.MAX_CONTACTS);
+        }
+        manager.getContactLists().handleContactList(origin, contacts);
     }
 
     private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {

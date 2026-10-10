@@ -48,7 +48,7 @@ The action element's name selects the handler. The complete set:
 | `muc-forward` | [05](05-muc-traffic.md) | routed |
 | `direct-forward`, `presence-forward`, `iq-forward` | [06](06-direct-traffic.md) | routed |
 | `file-request`, `file-offer`, `file-chunk`, `file-error` | [07](07-file-relay.md) | routed |
-| `user-directory`, `bookmark-push` | [08](08-directory.md) | flooded |
+| `contact-list`, `contact-list-request` | [08](08-contact-lists.md) | routed |
 
 An unrecognised action name is logged and ignored. The stanza is still acknowledged. Do not rely on
 an error to tell you a peer did not understand something — see [Acknowledgement](#acknowledgement).
@@ -89,7 +89,7 @@ destination**. When a stanza crosses three servers, the IQ `to` changes at every
 - **Link-local** (`peer-announce`, `routing-update`, `routing-solicit`, `peer-withdraw`,
   `peer-disable`) — no `destination`. They describe the sender's own state to one neighbour and are
   never forwarded. A receiver acts on them and stops.
-- **Flooded** (`room-advertisement`, `user-directory`, `bookmark-push`) — no `destination`, but an
+- **Flooded** (`room-advertisement`) — no `destination`, but an
   `origin` and a `via` trail. A receiver caches the content, then **re-emits it to its own other
   peers**, appending itself to `via`. This is how knowledge spreads to servers you have never heard
   of. Flooding is bounded by the `via` loop check and by policy filters.
@@ -151,7 +151,7 @@ It survives relaying unchanged.
 
 Its precise meaning is per-action and you MUST NOT assume one reading everywhere:
 
-- On a **flooded** action (`room-advertisement`, `user-directory`, `bookmark-push`) it identifies
+- On a **flooded** action (`room-advertisement`) it identifies
   whose content this is. A receiver caches under `origin`, not under the sender.
 - On a **mapping** action it identifies the server that initiated the mapping request.
 - On a **`mapping-ping`/`mapping-pong`** it is the prober, i.e. where the answer must be routed back to.

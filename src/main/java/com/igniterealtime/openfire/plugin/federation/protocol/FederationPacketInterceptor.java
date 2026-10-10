@@ -237,6 +237,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // only show the client a fake error from a perfectly reachable contact.
         handleOverlayBounce(packet);
 
+        // Contact-list sharing: a remote user's probe, subscription request or PEP fetch for a local
+        // user the admin shared with that user's server. Answered by the plugin and never shown to
+        // the local user (the admin already approved the contact by sharing it).
+        if (incoming) answerSharedContact(packet);
+
         // A message annotated with a fed-file share by ANOTHER server, about to be delivered to a
         // local user (native S2S from a direct peer, or a local room's re-broadcast of an overlay
         // share): rewrite its upload URL to our own download endpoint and pull the content.
@@ -666,6 +671,29 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // rewriteInPlace strips the annotation in every case and leaves the URL untouched when the
         // annotating origin is ourselves (our own share echoed back — the original URL is correct).
         manager.getFileRelay().rewriteInPlace(msg, fromDomain);
+    }
+
+    /**
+     * Answers, on a shared local user's behalf, what a contact on a server it is shared with sends
+     * over native S2S: a probe or subscription request (see
+     * {@link com.igniterealtime.openfire.plugin.federation.ContactListManager#handleInboundSubscription})
+     * or a PEP items fetch, which Openfire itself would refuse because the contact is not on the
+     * user's roster. The same requests over the overlay are handled in {@code FederationIQHandler}.
+     */
+    private void answerSharedContact(Packet packet) throws PacketRejectedException {
+        JID from = packet.getFrom();
+        if (from == null || from.getNode() == null || XMPPServer.getInstance().isLocal(from)) return;
+        if (packet instanceof Presence pres) {
+            if (manager.getContactLists().handleInboundSubscription(pres)) {
+                rememberRelayedForBounce(pres);
+                throw new PacketRejectedException("Answered " + pres.getType() + " from shared contact "
+                        + from + " for " + pres.getTo());
+            }
+        } else if (packet instanceof IQ iq && iq.getType() == IQ.Type.get
+                && manager.getIQHandler().answerSharedContactPepFetch(iq)) {
+            rememberRelayedForBounce(iq);
+            throw new PacketRejectedException("Answered PEP fetch from shared contact " + from + " for " + iq.getTo());
+        }
     }
 
     /**

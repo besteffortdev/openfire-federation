@@ -24,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
     bindPeerForm();
     bindRoomDefaultForm();
+    bindContactShareForm();
     bindRoomSearch();
     bindFilters();
     pollLoop();                       // long-poll: renders immediately, then on every change
@@ -98,7 +99,7 @@ function renderAll(data) {
     renderPeers(data.peers || []);
     renderS2SSessions(data.s2sSessions || []);
     renderRouting(data.routing || []);
-    renderUsersTab(data.localUsers || [], data.directory || {}, data.advertisedBookmarks || {});
+    renderUsersTab(data.localUsers || [], data.contactLists || {});
     renderPendingRequests(data.pendingRequests || []);
     renderLocalRooms(localRooms);
     renderRoomDefaults(data.roomDefaults || []);
@@ -114,8 +115,6 @@ function renderAll(data) {
     updateTraversalToggle(data.allowRemoteRoomTraversal);
     updateDirectRelayToggle(data.directMsgRelay);
     updateProbeOnSubscribeToggle(data.probeOnSubscribe);
-    updateDirectoryPublishToggle(data.directoryPublish);
-    updateBookmarkPushToggle(data.bookmarkPush);
     renderFileConfig(data.fileConfig || {});
     applyAllFilters();
 }
@@ -909,28 +908,6 @@ function saveProbeOnSubscribe() {
         });
 }
 
-// ── Security: publish user directory toggle ─────────────────────────────────────
-
-function updateDirectoryPublishToggle(enabled) {
-    const cb = document.getElementById('dirpublish-toggle');
-    const lbl = document.getElementById('dirpublish-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Published to peers' : 'Not published';
-}
-
-function saveDirectoryPublish() {
-    const cb = document.getElementById('dirpublish-toggle');
-    if (!cb) return;
-    const enabled = cb.checked;
-    post({ action: 'set-directory-publish', enabled })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
 function removePeer(domain) {
     if (!confirm('Remove peer ' + domain + '?')) return;
     post({ action: 'remove-peer', domain }).then(refresh);
@@ -1095,104 +1072,325 @@ function allowRoute(peerDomain, destination) {
 
 // ── Users tab ──────────────────────────────────────────────────────────────────
 
-function renderUsersTab(localUsers, directory, advertisedBookmarks) {
-    advertisedBookmarks = advertisedBookmarks || {};
-    // This server's connected clients.
+function renderUsersTab(localUsers, cl) {
+    renderConnectedClients(localUsers);
+    renderShareTargets(cl.shareableServers || [], cl.shareRules || []);
+    renderShareRules(cl.shareRules || []);
+    renderSentLists(cl.sent || []);
+    renderReceivedLists(cl.received || [], cl.localGroups || [], !!cl.groupsReadOnly);
+}
+
+function renderConnectedClients(localUsers) {
     const tbody = document.getElementById('local-users-tbody');
-    if (tbody) {
-        tbody.innerHTML = localUsers.length === 0
-            ? '<tr><td colspan="2" class="empty">No clients connected to this server.</td></tr>'
-            : localUsers.map(u => {
-                const st = u.status ? ` <span style="color:#888">${escHtml(u.status)}</span>` : '';
-                return `
-                <tr>
-                    <td style="font-family:monospace;font-size:12px">${escHtml(u.jid)}</td>
-                    <td>${presenceDot(u.show)}${u.show ? escHtml(u.show) : 'available'}${st}</td>
-                </tr>`;
-            }).join('');
-    }
+    if (!tbody) return;
+    tbody.innerHTML = localUsers.length === 0
+        ? '<tr><td colspan="2" class="empty">No clients connected to this server.</td></tr>'
+        : localUsers.map(u => {
+            const st = u.status ? ` <span style="color:#888">${escHtml(u.status)}</span>` : '';
+            return `
+            <tr>
+                <td style="font-family:monospace;font-size:12px">${escHtml(u.jid)}</td>
+                <td>${presenceDot(u.show)}${u.show ? escHtml(u.show) : 'available'}${st}</td>
+            </tr>`;
+        }).join('');
+}
 
-    // Connected clients each peer has advertised to us as XEP-0048 bookmarks (injected into our
-    // local users' bookmark storage), grouped by origin server.
-    const bm = document.getElementById('advertised-bookmarks-container');
-    if (bm) {
-        const bmServers = Object.keys(advertisedBookmarks).filter(s => (advertisedBookmarks[s] || []).length > 0).sort();
-        bm.innerHTML = bmServers.length === 0
-            ? '<p class="empty">No peers are advertising bookmarks yet. A peer must enable bookmark '
-              + 'auto-push (or click "Push bookmarks to peers") for its connected clients to appear here. '
-              + 'These are injected into your local users\' bookmark storage as <code>&lt;url&gt;</code> bookmarks.</p>'
-            : bmServers.map(srv => {
-                const jids = advertisedBookmarks[srv] || [];
-                const items = jids.map(j =>
-                    `<span style="display:inline-block;margin:2px 14px 2px 0;font-family:monospace;font-size:12px">${escHtml(j)}</span>`
-                ).join('');
-                return `
-                <div class="peer-section">
-                    <div class="peer-section-header" style="cursor:default">
-                        <strong>${escHtml(srv)}</strong>
-                        <span class="peer-room-count">${jids.length} client(s)</span>
-                    </div>
-                    <div class="peer-section-body" style="padding:10px 14px">${items}</div>
-                </div>`;
-            }).join('');
-    }
+// A contact as "Name <jid>" (or just the JID when its server gave no name).
+function contactChip(c) {
+    const label = c.name
+        ? `${escHtml(c.name)} <span style="color:#888">&lt;${escHtml(c.jid)}&gt;</span>`
+        : escHtml(c.jid);
+    return `<span style="display:inline-block;margin:2px 14px 2px 0;font-size:12px">${label}</span>`;
+}
 
-    // Users advertised by peer servers (the directory gossip), grouped by origin server.
-    const container = document.getElementById('remote-users-container');
-    if (!container) return;
-    const servers = Object.keys(directory).filter(s => (directory[s] || []).length > 0).sort();
-    if (servers.length === 0) {
-        container.innerHTML = '<p class="empty">No peers are publishing their users yet. A peer must enable '
-            + '"Publish my user directory to peers" for its online users to appear here.</p>';
+function contactChips(contacts, count) {
+    if (!count) return '<span class="hint">No contacts.</span>';
+    const more = count > contacts.length ? `<span class="hint">… and ${count - contacts.length} more</span>` : '';
+    return contacts.map(contactChip).join('') + more;
+}
+
+// ── Users tab: share my contacts ───────────────────────────────────────────────
+
+let principals = { users: [], groups: [] };
+
+function loadPrincipals() {
+    return fetch(API_URL + '?action=principals', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(p => { principals = p || { users: [], groups: [] }; fillShareNameOptions(); })
+        .catch(err => console.error('principals:', err));
+}
+
+function fillShareNameOptions() {
+    const dl = document.getElementById('cs-name-options');
+    const kind = document.getElementById('cs-kind');
+    if (!dl || !kind) return;
+    dl.innerHTML = kind.value === 'group'
+        ? (principals.groups || []).map(g => `<option value="${escHtml(g)}"></option>`).join('')
+        : (principals.users || []).map(u =>
+            `<option value="${escHtml(u.username)}">${escHtml(u.name || '')}</option>`).join('');
+}
+
+// Target checkboxes: re-rendered only when the server list changes, keeping what is ticked.
+let shareTargetsKey = null;
+function renderShareTargets(servers) {
+    const box = document.getElementById('cs-targets');
+    if (!box) return;
+    const key = servers.join(',');
+    if (key === shareTargetsKey) return;
+    shareTargetsKey = key;
+    const checked = new Set([...box.querySelectorAll('input:checked')].map(i => i.value));
+    box.innerHTML = servers.length === 0
+        ? '<span class="hint">No server is reachable over a trusted path yet.</span>'
+        : servers.map(srv => `
+            <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:inherit">
+                <input type="checkbox" value="${escHtml(srv)}" ${checked.has(srv) ? 'checked' : ''}> ${escHtml(srv)}
+            </label>`).join('');
+}
+
+function renderShareRules(rules) {
+    const tbody = document.getElementById('contact-share-tbody');
+    if (!tbody) return;
+    if (!rules.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">Nothing shared — other servers receive no contacts from this server.</td></tr>';
         return;
     }
-    container.innerHTML = servers.map(srv => {
-        const users = directory[srv] || [];
-        const items = users.map(u => {
-            const st = u.status ? ` <span style="color:#888">(${escHtml(u.status)})</span>` : '';
-            return `<span style="display:inline-block;margin:2px 14px 2px 0;font-family:monospace;font-size:12px">`
-                 + `${presenceDot(u.show)}${escHtml(u.jid)}${st}</span>`;
-        }).join('');
+    tbody.innerHTML = rules.map(r => {
+        const k = jsArg(r.kind), n = jsArg(r.name);
+        return `<tr>
+            <td>${r.kind === 'group' ? 'Group' : 'User'}</td>
+            <td><code>${escHtml(r.name)}</code></td>
+            <td>${escHtml(r.targets.join(', '))}</td>
+            <td style="text-align:right">
+                <button class="btn btn-small" onclick="editContactShare('${k}','${n}')">Edit</button>
+                <button class="btn btn-small btn-danger" onclick="deleteContactShare('${k}','${n}')">Stop sharing</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function renderSentLists(sent) {
+    const el = document.getElementById('contact-sent-container');
+    if (!el) return;
+    if (!sent.length) {
+        el.innerHTML = '<p class="empty">No server receives a contact list from this server yet.</p>';
+        return;
+    }
+    el.innerHTML = sent.map(t => {
+        const state = !t.reachable
+            ? '<span class="status-dot grey"></span> Unreachable — sent when it is back'
+            : t.delivered
+                ? '<span class="status-dot green"></span> Up to date'
+                : '<span class="status-dot orange"></span> Sending…';
         return `
         <div class="peer-section">
             <div class="peer-section-header" style="cursor:default">
-                <strong>${escHtml(srv)}</strong>
-                <span class="peer-room-count">${users.length} user(s)</span>
+                <strong>${escHtml(t.target)}</strong>
+                <span class="peer-room-count">${t.count} contact(s)</span>
+                <span class="hint" style="margin-left:auto">${state}</span>
             </div>
-            <div class="peer-section-body" style="padding:10px 14px">${items}</div>
+            <div class="peer-section-body" style="padding:10px 14px">${contactChips(t.contacts, t.count)}</div>
         </div>`;
     }).join('');
 }
 
-// ── Users tab: bookmark push controls ──────────────────────────────────────────
-
-function updateBookmarkPushToggle(enabled) {
-    const cb = document.getElementById('bookmarkpush-toggle');
-    const lbl = document.getElementById('bookmarkpush-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Advertised to peers' : 'Not advertised';
-}
-
-function saveBookmarkPush() {
-    const cb = document.getElementById('bookmarkpush-toggle');
-    if (!cb) return;
-    const enabled = cb.checked;
-    post({ action: 'set-bookmark-push', enabled })
-        .then(result => {
+function bindContactShareForm() {
+    const form = document.getElementById('form-contact-share');
+    if (!form) return;
+    document.getElementById('cs-kind').addEventListener('change', fillShareNameOptions);
+    loadPrincipals();
+    form.addEventListener('submit', e => {
+        e.preventDefault();
+        const kind = document.getElementById('cs-kind').value;
+        const name = document.getElementById('cs-name').value.trim();
+        const targets = [...document.querySelectorAll('#cs-targets input:checked')].map(i => i.value);
+        if (!name) return;
+        if (!targets.length) { alert('Choose at least one server to share with.'); return; }
+        post({ action: 'save-contact-share', kind, name, targets: targets.join(',') }).then(result => {
             if (result && result.ok) {
-                flashSaved('Saved ✓');
+                document.getElementById('cs-name').value = '';
+                document.querySelectorAll('#cs-targets input').forEach(i => { i.checked = false; });
+                flashSaved('Shared ✓');
                 refresh();
+            } else if (result && result.error) {
+                alert(result.error);
+            }
+        });
+    });
+}
+
+// Load a share back into the form; saving replaces it (same kind + name).
+function editContactShare(kind, name) {
+    const r = ((lastData.contactLists || {}).shareRules || []).find(x => x.kind === kind && x.name === name);
+    if (!r) return;
+    document.getElementById('cs-kind').value = r.kind;
+    fillShareNameOptions();
+    document.getElementById('cs-name').value = r.name;
+    document.querySelectorAll('#cs-targets input').forEach(i => { i.checked = r.targets.includes(i.value); });
+    document.getElementById('cs-name').focus();
+}
+
+function deleteContactShare(kind, name) {
+    if (!confirm('Stop sharing ' + kind + ' "' + name + '"? Servers that received it will remove these contacts.')) return;
+    post({ action: 'delete-contact-share', kind, name }).then(result => {
+        if (result && result.ok) { flashSaved('Sharing stopped ✓'); refresh(); }
+    });
+}
+
+function resendContactLists() {
+    post({ action: 'resend-contact-lists' }).then(result => {
+        if (result && result.ok) { flashSaved('Re-sent ✓'); refresh(); }
+    });
+}
+
+// ── Users tab: received contact lists ──────────────────────────────────────────
+
+// Unsaved mapping-form edits per origin, so a re-render (any status change) doesn't wipe them.
+const contactMapEdits = {};
+
+function renderReceivedLists(received, localGroups, readOnly) {
+    const note = document.getElementById('contact-readonly-note');
+    if (note) note.style.display = readOnly ? '' : 'none';
+    const el = document.getElementById('contact-received-container');
+    if (!el) return;
+    if (!received.length) {
+        el.innerHTML = '<p class="empty">No server shares contacts with this server yet.</p>';
+        return;
+    }
+    const focus = rememberFocus(el);
+    el.innerHTML = received.map(r => renderReceivedList(r, localGroups, readOnly)).join('');
+    restoreFocus(focus);
+}
+
+function renderReceivedList(r, localGroups, readOnly) {
+    const o = r.origin, oj = jsArg(o), id = jidToElemId(o);
+    const m = r.mapping;
+    const edit = contactMapEdits[o];
+    const display = edit ? edit.displayName : (m ? m.displayName : o);
+    const groups = new Set(edit ? edit.groups : (m ? m.groups : []));
+    const everybody = groups.has('*');
+
+    const received = r.receivedAt
+        ? 'received ' + new Date(r.receivedAt).toLocaleString()
+        : 'not received since restart';
+    const status = m
+        ? `<span class="status-dot green"></span> Mapped — Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
+          + (m.groups.includes('*') ? 'all users' : escHtml(m.groups.join(', ')))
+          + ` as <strong>${escHtml(m.displayName)}</strong>`
+        : '<span class="status-dot grey"></span> Not mapped — no local user sees these contacts yet.';
+    const error = r.error ? `<p class="hint" style="color:var(--red-ink);margin:6px 0 0">${escHtml(r.error)}</p>` : '';
+
+    const groupBoxes = localGroups.length === 0
+        ? '<span class="hint">No local groups — create one in Openfire, or show the list to all users.</span>'
+        : localGroups.map(g => `
+            <label style="display:flex;align-items:center;gap:4px;font-size:13px">
+                <input type="checkbox" class="cm-group" value="${escHtml(g)}" ${groups.has(g) ? 'checked' : ''}
+                       ${everybody ? 'disabled' : ''} onchange="captureContactMapEdit('${oj}')"> ${escHtml(g)}
+            </label>`).join('');
+
+    return `
+    <div class="peer-section" id="cm-${id}">
+        <div class="peer-section-header" style="cursor:default">
+            <span class="status-dot ${r.reachable ? 'green' : 'grey'}" title="${r.reachable ? 'reachable' : 'unreachable'}"></span>
+            <strong>${escHtml(o)}</strong>
+            <span class="peer-room-count">${r.count} contact(s)</span>
+            <span class="hint" style="margin-left:auto">${received}</span>
+        </div>
+        <div class="peer-section-body" style="padding:12px 14px">
+            <div style="font-size:13px">${status}</div>
+            ${error}
+            <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:12px">
+                <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
+                    Roster group name
+                    <input type="text" id="cm-name-${id}" value="${escHtml(display)}" style="margin-top:3px;min-width:180px"
+                           oninput="captureContactMapEdit('${oj}')" ${readOnly ? 'disabled' : ''}>
+                </label>
+                <div style="display:flex;flex-direction:column;font-size:12px;color:#555">
+                    Show to
+                    <div style="margin-top:3px;display:flex;flex-wrap:wrap;gap:4px 14px;max-width:560px">
+                        <label style="display:flex;align-items:center;gap:4px;font-size:13px">
+                            <input type="checkbox" class="cm-all" ${everybody ? 'checked' : ''}
+                                   onchange="captureContactMapEdit('${oj}')"> <strong>All users</strong>
+                        </label>
+                        ${groupBoxes}
+                    </div>
+                </div>
+                <button class="btn btn-primary btn-small" onclick="saveContactMapping('${oj}')" ${readOnly ? 'disabled' : ''}>
+                    ${m ? 'Update mapping' : 'Map'}
+                </button>
+                ${m ? `<button class="btn btn-small btn-danger" onclick="removeContactMapping('${oj}')">Remove mapping</button>` : ''}
+                ${edit ? `<button class="btn btn-small" onclick="discardContactMapEdit('${oj}')">Discard changes</button>` : ''}
+            </div>
+            <div style="margin-top:12px">${contactChips(r.contacts, r.count)}</div>
+        </div>
+    </div>`;
+}
+
+function readContactMapForm(origin) {
+    const id = jidToElemId(origin);
+    const card = document.getElementById('cm-' + id);
+    if (!card) return null;
+    const all = card.querySelector('.cm-all');
+    const groups = all && all.checked
+        ? ['*']
+        : [...card.querySelectorAll('.cm-group:checked')].map(i => i.value);
+    return { displayName: document.getElementById('cm-name-' + id).value, groups };
+}
+
+function captureContactMapEdit(origin) {
+    const f = readContactMapForm(origin);
+    if (!f) return;
+    contactMapEdits[origin] = f;
+    // "All users" disables the per-group boxes; reflect that right away.
+    const card = document.getElementById('cm-' + jidToElemId(origin));
+    const all = card.querySelector('.cm-all').checked;
+    card.querySelectorAll('.cm-group').forEach(i => { i.disabled = all; });
+}
+
+function discardContactMapEdit(origin) {
+    delete contactMapEdits[origin];
+    refresh();
+}
+
+function saveContactMapping(origin) {
+    const f = readContactMapForm(origin);
+    if (!f) return;
+    if (!f.groups.length) { alert('Choose at least one group, or All users.'); return; }
+    post({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n') })
+        .then(result => {
+            if (result && result.ok) {
+                delete contactMapEdits[origin];
+                flashSaved('Mapping saved ✓');
+                refresh();
+            } else if (result && result.error) {
+                alert(result.error);
             }
         });
 }
 
-function pushBookmarks() {
-    post({ action: 'push-bookmarks' })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Pushed ✓');
-            }
-        });
+function removeContactMapping(origin) {
+    if (!confirm('Remove the mapping for ' + origin + '? Its contacts will be removed from every local contact list.')) return;
+    post({ action: 'unmap-contact-list', origin }).then(result => {
+        if (result && result.ok) {
+            delete contactMapEdits[origin];
+            flashSaved('Mapping removed ✓');
+            refresh();
+        }
+    });
+}
+
+// Keeps keyboard focus (and caret) on an input across an innerHTML re-render of its container.
+function rememberFocus(container) {
+    const a = document.activeElement;
+    if (!a || !a.id || !container.contains(a)) return null;
+    return { id: a.id, start: a.selectionStart, end: a.selectionEnd };
+}
+
+function restoreFocus(f) {
+    if (!f) return;
+    const el = document.getElementById(f.id);
+    if (!el) return;
+    el.focus();
+    try { if (f.start != null) el.setSelectionRange(f.start, f.end); } catch (e) { /* not a text input */ }
 }
 
 // ── Room default-settings rules (Rooms tab) ────────────────────────────────────

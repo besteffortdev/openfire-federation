@@ -192,6 +192,11 @@ public class FederationRoutingTable {
         return Optional.ofNullable(table.get(destination)).map(RouteEntry::nextHop);
     }
 
+    /** The route to {@code destination}, or empty if unreachable. */
+    public Optional<RouteEntry> getRoute(String destination) {
+        return Optional.ofNullable(table.get(destination));
+    }
+
     public boolean isReachable(String destination) {
         return table.containsKey(destination);
     }

@@ -6,7 +6,7 @@ import org.dom4j.Element;
 import org.jivesoftware.openfire.RoutingTable;
 import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.session.ClientSession;
-import com.igniterealtime.openfire.plugin.federation.UserDirectory;
+import com.igniterealtime.openfire.plugin.federation.ContactListManager;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Message;
@@ -29,6 +29,7 @@ import java.util.List;
  *   room-advertisement  — list of rooms the sender has tagged as federatable
  *   room-mapping        — bilateral room pairing confirmation
  *   muc-forward         — a MUC packet being relayed through the overlay
+ *   contact-list        — the contacts one server shares with another
  */
 public final class FederationStanzaFactory {
 
@@ -434,50 +435,37 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
-    // ── user-directory (opt-in online-user gossip) ──────────────────────────────
+    // ── contact-list (per-server contact sharing) ────────────────────────────────
 
     /**
-     * Advertises a list of user JIDs reachable on {@code originDomain}.  Gossiped exactly
-     * like a room-advertisement: an {@code origin} attribute and a {@code via} trail let it
-     * relay multi-hop without looping; an empty list is a withdrawal (clear this origin).
+     * The full list of contacts {@code origin} shares with {@code destination}, routed hop-by-hop
+     * to that one server (never flooded). Each send replaces the previous list; an empty list
+     * withdraws it.
      */
-    public static IQ userDirectory(String toDomain, Collection<UserDirectory.UserPresence> users,
-                                   String originDomain, String via) {
-        IQ iq = base(toDomain);
+    public static IQ contactList(String nextHop, String destination, String origin, String via,
+                                 Collection<ContactListManager.Contact> contacts) {
+        IQ iq = base(nextHop);
         Element fed = iq.setChildElement(ELEMENT, NS);
-        Element dir = fed.addElement("user-directory");
-        if (originDomain != null)              dir.addAttribute(ATTR_ORIGIN, originDomain);
-        if (via != null && !via.isEmpty())     dir.addAttribute(ATTR_VIA, via);
-        for (UserDirectory.UserPresence u : users) {
-            Element e = dir.addElement("user");
-            e.addAttribute("jid", u.jid());
-            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show", u.show());
-            if (u.status() != null && !u.status().isEmpty()) e.addAttribute("status", u.status());
+        Element list = fed.addElement("contact-list");
+        list.addAttribute(ATTR_DESTINATION, destination);
+        list.addAttribute(ATTR_ORIGIN, origin);
+        if (via != null && !via.isEmpty()) list.addAttribute(ATTR_VIA, via);
+        for (ContactListManager.Contact c : contacts) {
+            Element e = list.addElement("contact");
+            e.addAttribute("jid", c.jid());
+            if (c.name() != null && !c.name().isEmpty()) e.addAttribute("name", c.name());
         }
         return iq;
     }
 
-    // ── bookmark-push (XEP-0048 connected-client advertisement) ─────────────────
-
-    /**
-     * Advertises the connected clients of {@code originDomain} so the receiver can inject them as
-     * XEP-0048 {@code <url>} bookmarks into its local users' storage. Gossiped exactly like a
-     * user-directory: an {@code origin} attribute and a {@code via} trail let it relay multi-hop
-     * without looping; an empty list is a withdrawal (remove this origin's injected bookmarks).
-     */
-    public static IQ bookmarkPush(String toDomain, Collection<UserDirectory.UserPresence> users,
-                                  String originDomain, String via) {
-        IQ iq = base(toDomain);
+    /** Asks {@code destination} to re-send the contact list it shares with {@code origin} (us). */
+    public static IQ contactListRequest(String nextHop, String destination, String origin, String via) {
+        IQ iq = base(nextHop);
         Element fed = iq.setChildElement(ELEMENT, NS);
-        Element push = fed.addElement("bookmark-push");
-        if (originDomain != null)           push.addAttribute(ATTR_ORIGIN, originDomain);
-        if (via != null && !via.isEmpty())  push.addAttribute(ATTR_VIA, via);
-        for (UserDirectory.UserPresence u : users) {
-            Element e = push.addElement("user");
-            e.addAttribute("jid", u.jid());
-            if (u.show()   != null && !u.show().isEmpty())   e.addAttribute("show", u.show());
-            if (u.status() != null && !u.status().isEmpty()) e.addAttribute("status", u.status());
-        }
+        Element req = fed.addElement("contact-list-request");
+        req.addAttribute(ATTR_DESTINATION, destination);
+        req.addAttribute(ATTR_ORIGIN, origin);
+        if (via != null && !via.isEmpty()) req.addAttribute(ATTR_VIA, via);
         return iq;
     }
 
@@ -562,9 +550,14 @@ public final class FederationStanzaFactory {
      * intermediate organisation forwards bytes without ever materialising the file.
      */
     public static IQ fileRelay(String nextHop, Element fileElement, String newVia) {
+        return relay(nextHop, fileElement, newVia);
+    }
+
+    /** Re-emits an unchanged destination-routed element toward the next hop with an updated {@code via} trail. */
+    public static IQ relay(String nextHop, Element element, String newVia) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement(ELEMENT, NS);
-        Element copy = fileElement.createCopy();
+        Element copy = element.createCopy();
         copy.addAttribute(ATTR_VIA, newVia);
         fed.add(copy);
         return iq;
