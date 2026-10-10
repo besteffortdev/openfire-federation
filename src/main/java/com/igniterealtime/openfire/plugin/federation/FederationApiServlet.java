@@ -144,6 +144,7 @@ public class FederationApiServlet extends HttpServlet {
              .append("\"certPinned\":").append(p.getPinnedCertFp() != null).append(",")
              .append("\"certMismatch\":").append(p.isCertMismatch()).append(",")
              .append("\"contactListsAllowed\":").append(p.isContactListsAllowed()).append(",")
+             .append("\"contactListsRefused\":").append(p.isContactListsRefused()).append(",")
              .append("\"exposedServers\":");
             strings(b, p.getExposedServers());
 
@@ -505,6 +506,7 @@ public class FederationApiServlet extends HttpServlet {
             b.append("{\"origin\":\"").append(esc(o))
              .append("\",\"reachable\":").append(cl.canRequestFrom(o))
              .append(",\"receivedAt\":").append(list == null ? "null" : String.valueOf(list.receivedAt()))
+             .append(",\"crossedUntrusted\":").append(list != null && list.crossedUntrusted())
              .append(",\"count\":").append(list == null ? 0 : list.contacts().size())
              .append(",\"groupName\":\"").append(esc(ContactListManager.groupNameFor(o)))
              .append("\",\"error\":\"").append(esc(errors.getOrDefault(o, "")))
@@ -667,6 +669,14 @@ public class FederationApiServlet extends HttpServlet {
                 mgr.getPeerRegistry().setContactListsAllowed(d, Boolean.parseBoolean(enabled.strip()));
                 // Servers newly reachable across this link get their list (and are asked for theirs) now.
                 mgr.getContactLists().resendAll();
+                return OK;
+            }
+            case "set-peer-contact-lists-refused": {
+                String d = domainParam(req, "domain");
+                String refused = req.getParameter("refused");
+                if (d == null || refused == null) return required("domain", "refused");
+                if (!mgr.getPeerRegistry().contains(d)) return error("not a configured peer");
+                mgr.getPeerRegistry().setContactListsRefused(d, Boolean.parseBoolean(refused.strip()));
                 return OK;
             }
             case "deny-route": case "allow-route": {

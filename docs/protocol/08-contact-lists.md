@@ -62,6 +62,7 @@ still holds the old list.
 ```
 if destination or origin is missing, or origin == our own domain → drop
 if the sending link is UNTRUSTED:
+    if contact-list and lists from this link are refused here → drop
     if origin is not the sender or a server routed through it → drop, log SECURITY
     if (destination, or our own domain when we are it) is not exposed to the sender → drop, log SECURITY
 if via contains our own domain                  → drop (loop)
@@ -72,9 +73,13 @@ if destination != our own domain:
            allowed on that link here)           → drop, log SECURITY
     relay to next with via + our own domain
     stop
-contact-list-request → send our list for `origin` (empty if nothing is shared with it)
+contact-list-request → send our list for `origin` (empty if nothing is shared with it),
+                       at most once per 30 s per `origin` here
 contact-list:
     keep only bare JIDs whose domain is `origin`; cap the count (5000 here)
+    if `origin` is not mapped here:
+        empty → forget any stored list; stop
+        over the unmapped budget (here 32 servers, 50 000 contacts in all) → drop
     replace the stored list for `origin` (empty = withdrawn)
 ```
 
@@ -99,6 +104,21 @@ rule as the 1:1 forwards ([09](09-validation.md)):
 So a list crosses an untrusted link when the admin on the sending side of that link allows it. A
 sender whose route crosses an untrusted link further away cannot see those checks. Its list is
 dropped (and logged) there if they fail.
+
+The receiving side MAY still refuse. This implementation gives each untrusted peer a *refuse contact
+lists* flag, off by default, that drops every `contact-list` arriving over that link, including
+lists only passing through toward a server behind this one.
+
+**Why the receiver bounds what it keeps.** An untrusted peer can announce any number of servers
+behind it, and each passes the origin check. A receiver that kept every list it was sent could be
+made to hold an unbounded amount. A list nobody mapped is not worth much, so this implementation
+keeps a bounded number of them and forgets one when its origin's route goes away (the origin
+re-sends when it comes back). A mapped list is always kept: the admin chose that origin.
+
+**A list that crossed an untrusted link could have been altered.** The untrusted peer on the far
+side of that link can claim any server behind it as `origin`, so it can also rewrite a list from one
+of them, within that server's own domain. This implementation marks such a list on the admin page
+before it is mapped.
 
 **A server may only share its own users.** A `contact` whose domain is not `origin` is dropped, so a
 server cannot insert another server's users into your rosters.

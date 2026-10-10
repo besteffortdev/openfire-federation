@@ -317,6 +317,12 @@ function renderPeerDetailRow(p) {
                                    onchange="setPeerContactLists('${dom}', this.checked)">
                             <span><strong>Send shared contact lists to ${dom}</strong><br>
                                 <small>Lists from this server and the exposed servers can cross this link. Nothing is needed on ${dom}'s side to receive them.</small></span>
+                        </label>
+                        <label class="exposed-room" style="margin-top:6px;align-items:flex-start">
+                            <input type="checkbox" ${p.contactListsRefused ? 'checked' : ''}
+                                   onchange="setPeerContactListsRefused('${dom}', this.checked)">
+                            <span><strong>Refuse contact lists from ${dom}</strong><br>
+                                <small>Drops every list arriving over this link, including lists for servers behind this one.</small></span>
                         </label>` : '';
 
     // ── Inbound: what this peer advertises through to us, each deniable per-link. ──
@@ -412,6 +418,15 @@ function setPeerContactLists(domain, enabled) {
     post({ action: 'set-peer-contact-lists', domain, enabled }).then(result => {
         if (result && result.ok) {
             flashSaved(enabled ? 'Contact lists allowed ✓' : 'Contact lists blocked ✓');
+            refresh();
+        }
+    });
+}
+
+function setPeerContactListsRefused(domain, refused) {
+    post({ action: 'set-peer-contact-lists-refused', domain, refused }).then(result => {
+        if (result && result.ok) {
+            flashSaved(refused ? 'Contact lists from ' + domain + ' refused ✓' : 'Contact lists from ' + domain + ' accepted ✓');
             refresh();
         }
     });
@@ -1227,7 +1242,7 @@ function renderShareDetailRow(group, targets, hidden) {
         const pending = shareable.includes(s) ? ''
             : '<span class="badge badge-out" title="no usable route right now — sent when it is back">pending</span>';
         const edge = viaUntrusted.includes(s)
-            ? '<span class="badge badge-untrusted" title="reached across an untrusted link — the admins on both sides of it must allow contact lists on that link">via untrusted link</span>'
+            ? '<span class="badge badge-untrusted" title="reached across an untrusted link — the server sending across it must allow sending contact lists on that link">via untrusted link</span>'
             : '';
         return `
             <label class="exposed-room">
@@ -1368,6 +1383,9 @@ function renderReceivedList(r, localGroups, readOnly) {
         ? 'received ' + new Date(r.receivedAt).toLocaleString()
         : 'not received since restart';
     const mapInfo = m ? '<span class="peer-map-count">mapped</span>' : '';
+    const untrustedBadge = r.crossedUntrusted
+        ? '<span class="badge badge-untrusted" title="An untrusted server relayed this list and could have altered it. '
+          + 'Check the contacts before mapping it.">via untrusted link</span>' : '';
     const status = m
         ? `Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
           + (m.groups.includes('*') ? 'all users' : escHtml(m.groups.join(', ')))
@@ -1397,6 +1415,7 @@ function renderReceivedList(r, localGroups, readOnly) {
             <strong>${escHtml(o)}</strong>
             <span class="peer-room-count">${r.count} contact(s)</span>
             ${mapInfo}
+            ${untrustedBadge}
             <span class="hint" style="margin-left:auto">${received}</span>
         </div>
         <div class="peer-section-body" id="origin-body-${id}" style="${collapsed ? 'display:none' : ''}">

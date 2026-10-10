@@ -1540,9 +1540,16 @@ public class FederationIQHandler extends IQHandler {
                      element, fromDomain, origin, destination);
             return;
         }
-        // Arriving over an untrusted link needs no per-link flag: that flag gates sending, and the
-        // receiving admin still decides what a list does by mapping it. The exposure model applies.
-        if (manager.getPeerRegistry().isUntrusted(fromDomain)) {
+        // Arriving over an untrusted link needs no opt-in: the per-link flag gates sending, and the
+        // receiving admin still decides what a list does by mapping it. The exposure model applies,
+        // and an admin who does not trust the neighbour can refuse its lists outright.
+        boolean fromUntrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
+        if (fromUntrusted) {
+            if ("contact-list".equals(element) && manager.getPeerRegistry().isContactListsRefused(fromDomain)) {
+                Log.debug("Refusing contact-list from untrusted peer {} (origin {}) — refused on that link here",
+                          fromDomain, origin);
+                return;
+            }
             if (!claimedOriginOk(fromDomain, origin, element)) return;
             if (!oneToOneExposureOk(fromDomain, destination, localDomain, element)) return;
         }
@@ -1595,7 +1602,8 @@ public class FederationIQHandler extends IQHandler {
             Log.warn("contact-list from {}: ignored {} entr(ies) — not a bare JID on {}, or past the {}-contact limit",
                      origin, rejected, origin, ContactListManager.MAX_CONTACTS);
         }
-        manager.getContactLists().handleContactList(origin, contacts);
+        boolean crossedUntrusted = fromUntrusted || manager.getContactLists().crossesUntrusted(origin);
+        manager.getContactLists().handleContactList(origin, contacts, crossedUntrusted);
     }
 
     private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {

@@ -29,7 +29,8 @@ public class PeerRegistry {
     private static final String PROP_EXPOSED_LEGACY = "federation.peer.exposed.";
     private static final String PROP_CERTFP     = "federation.peer.certfp.";    // + domain → sha256 hex of pinned cert
     private static final String PROP_DENIED_RT  = "federation.peer.deniedroutes."; // + domain → csv of denied destinations
-    private static final String PROP_CONTACT_LISTS = "federation.peer.contactlists."; // + domain → true (lists may cross)
+    private static final String PROP_CONTACT_LISTS = "federation.peer.contactlists."; // + domain → true (lists may be sent across)
+    private static final String PROP_CONTACT_LISTS_REFUSED = "federation.peer.contactlistsrefused."; // + domain → true (lists from it refused)
 
     private final ConcurrentHashMap<String, PeerServer> peers = new ConcurrentHashMap<>();
 
@@ -62,6 +63,7 @@ public class PeerRegistry {
                         peer.setUntrusted(true);
                         peer.setExposedServers(parseCsv(JiveGlobals.getProperty(PROP_EXPOSED_SRV + domain, "")));
                         peer.setContactListsAllowed(JiveGlobals.getBooleanProperty(PROP_CONTACT_LISTS + domain, false));
+                        peer.setContactListsRefused(JiveGlobals.getBooleanProperty(PROP_CONTACT_LISTS_REFUSED + domain, false));
                         Log.info("Loaded untrusted peer {} with {} exposed server(s)",
                                  domain, peer.getExposedServers().size());
                     }
@@ -111,6 +113,7 @@ public class PeerRegistry {
             JiveGlobals.deleteProperty(PROP_CERTFP + domain);
             JiveGlobals.deleteProperty(PROP_DENIED_RT + domain);
             JiveGlobals.deleteProperty(PROP_CONTACT_LISTS + domain);
+            JiveGlobals.deleteProperty(PROP_CONTACT_LISTS_REFUSED + domain);
             persist();
         }
         return removed;
@@ -160,6 +163,27 @@ public class PeerRegistry {
             JiveGlobals.setProperty(PROP_CONTACT_LISTS + domain, "true");
         } else {
             JiveGlobals.deleteProperty(PROP_CONTACT_LISTS + domain);
+        }
+    }
+
+    /**
+     * Whether contact lists arriving over the untrusted link from {@code domain} are refused. False for
+     * an unknown peer; ignored for a trusted one.
+     */
+    public boolean isContactListsRefused(String domain) {
+        PeerServer peer = peers.get(domain);
+        return peer != null && peer.isContactListsRefused();
+    }
+
+    /** Refuses (or accepts again) contact lists arriving from {@code domain} and persists it. No-op if unknown. */
+    public void setContactListsRefused(String domain, boolean refused) {
+        PeerServer peer = peers.get(domain);
+        if (peer == null) return;
+        peer.setContactListsRefused(refused);
+        if (refused) {
+            JiveGlobals.setProperty(PROP_CONTACT_LISTS_REFUSED + domain, "true");
+        } else {
+            JiveGlobals.deleteProperty(PROP_CONTACT_LISTS_REFUSED + domain);
         }
     }
 

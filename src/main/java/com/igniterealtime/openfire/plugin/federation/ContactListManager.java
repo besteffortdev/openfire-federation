@@ -57,7 +57,12 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * <p>Presence is one-way: sharing alice with server B lets B's mapped users see alice; alice sees
  * B's users only if B shares them back. A contact list crosses an untrusted link only when the
- * admin on each side allowed contact lists on that link and its exposed-server settings permit it.
+ * admin on the sending side of it allowed sending contact lists there and its exposed-server
+ * settings permit it. The receiving side may refuse lists from that link.
+ *
+ * <p>Lists nobody mapped are bounded ({@link #MAX_UNMAPPED_LISTS}, {@link #MAX_UNMAPPED_CONTACTS})
+ * and forgotten when their server becomes unreachable: an untrusted peer can announce any number
+ * of servers behind it, and each could otherwise park a full list here.
  *
  * <p>Persistence: share rules and mappings in JiveGlobals (rewritten wholesale — both sets are
  * small). Received lists are in memory: the advertising server re-sends whenever the route comes
@@ -92,6 +97,15 @@ public class ContactListManager {
     /** Longest display name accepted for a contact. */
     private static final int MAX_NAME = 128;
 
+    /** Most lists kept from servers nobody mapped yet; a list from one more such server is dropped. */
+    static final int MAX_UNMAPPED_LISTS = 32;
+    /** Most contacts kept across all unmapped lists together. */
+    static final int MAX_UNMAPPED_CONTACTS = 50_000;
+    /** A server's contact-list-request is answered at most this often. */
+    private static final long REQUEST_COOLDOWN_MS = 30_000L;
+    /** A received list is logged at INFO at most this often per origin; refusals at most this often overall. */
+    private static final long LOG_EVERY_MS = 60_000L;
+
     /** Re-send every list this often even when nothing changed — covers a lost IQ. */
     private static final long RESEND_EVERY_MS = 10 * 60_000L;
 
@@ -116,8 +130,11 @@ public class ContactListManager {
         public boolean everybody() { return groups.contains(EVERYBODY); }
     }
 
-    /** A list some server shared with us, as last received. */
-    public record ReceivedList(List<Contact> contacts, long receivedAt) {}
+    /**
+     * A list some server shared with us, as last received. {@code crossedUntrusted} is true when it
+     * reached us across an untrusted link, where the peer on the far side could have altered it.
+     */
+    public record ReceivedList(List<Contact> contacts, long receivedAt, boolean crossedUntrusted) {}
 
     private final FederationManager manager;
 
@@ -136,7 +153,17 @@ public class ContactListManager {
     private Set<String> originsUpLastTick = Set.of();
     private long lastFullResend = System.currentTimeMillis();
 
-    /** Origins we registered a {@link UserNameManager} provider for. */
+    /** requester domain → when its last contact-list-request was answered. */
+    private final Map<String, Long> requestAnsweredAt = new ConcurrentHashMap<>();
+    /** origin → when a list from it was last logged at INFO. */
+    private final Map<String, Long> loggedAt = new ConcurrentHashMap<>();
+    private volatile long overflowLoggedAt = 0;
+    /** Guards the unmapped-list budget across concurrent receipts. */
+    private final Object receiveLock = new Object();
+    /** Origins with a group sync queued and not yet started (a burst of lists collapses into one). */
+    private final Set<String> pendingSyncs = ConcurrentHashMap.newKeySet();
+
+    /** Mapped origins we registered a {@link UserNameManager} provider for. */
     private final Set<String> nameProviders = ConcurrentHashMap.newKeySet();
 
     /** Last problem applying a mapping, per origin, for the admin page. */
@@ -196,7 +223,10 @@ public class ContactListManager {
         authorized = computeAuthorization();
         Log.info("Loaded {} contact-share rule(s) and {} contact-list mapping(s)", rules.size(), mappings.size());
         // Re-apply sharing settings (an admin may have edited the group by hand while we were down).
-        for (String origin : mappings.keySet()) syncGroupAsync(origin);
+        for (String origin : mappings.keySet()) {
+            registerNameProvider(origin);
+            syncGroupAsync(origin);
+        }
     }
 
     public void stop() {
@@ -323,6 +353,7 @@ public class ContactListManager {
         // Receiving side: solicit a fresh list from an origin that just came (back) into reach. This is
         // what clears a list the origin withdrew while we could not hear it (e.g. it restarted after
         // the admin stopped sharing with us, so it has no record that we still hold the old list).
+        pruneUnmappedLists();
         Set<String> origins = new HashSet<>(mappings.keySet());
         origins.addAll(received.keySet());
         Set<String> originsUp = new HashSet<>();
@@ -379,9 +410,21 @@ public class ContactListManager {
         }
     }
 
-    /** A server asked for its list (it just regained a route to us, or restarted). */
+    /**
+     * A server asked for its list (it just regained a route to us, or restarted). Answered at most
+     * once per {@link #REQUEST_COOLDOWN_MS} per requester: a request is tiny and the answer can be a
+     * full list, and changes are sent anyway without being asked.
+     */
     public synchronized void handleRequest(String requester) {
         if (!canExchangeWith(requester)) return;
+        long now = System.currentTimeMillis();
+        Long last = requestAnsweredAt.get(requester);
+        if (last != null && now - last < REQUEST_COOLDOWN_MS) {
+            Log.debug("contact-list: ignoring a repeated request from {} (answered {} ms ago)", requester, now - last);
+            return;
+        }
+        requestAnsweredAt.values().removeIf(t -> now - t >= REQUEST_COOLDOWN_MS);
+        requestAnsweredAt.put(requester, now);
         boolean configured = getShareRules().stream().anyMatch(r -> r.targets().contains(requester));
         send(requester, configured ? computeSnapshot(requester) : List.of());
         if (!configured) sent.remove(requester);
@@ -473,17 +516,79 @@ public class ContactListManager {
 
     // ── Receiving ───────────────────────────────────────────────────────────────
 
-    /** Records the list {@code origin} shares with us (empty = withdrawn) and applies it to its group. */
-    public void handleContactList(String origin, List<Contact> contacts) {
+    /**
+     * Records the list {@code origin} shares with us (empty = withdrawn) and applies it to its group.
+     * A list from a server nobody mapped is kept only within the unmapped budget, and an empty one is
+     * simply forgotten.
+     */
+    public void handleContactList(String origin, List<Contact> contacts, boolean crossedUntrusted) {
         List<Contact> sorted = new ArrayList<>(contacts);
         sorted.sort((a, b) -> a.jid().compareTo(b.jid()));
-        ReceivedList prev = received.get(origin);
-        received.put(origin, new ReceivedList(List.copyOf(sorted), System.currentTimeMillis()));
-        registerNameProvider(origin);
-        if (prev != null && prev.contacts().equals(sorted) && !mappings.containsKey(origin)) return;
-        Log.info("contact-list: {} shares {} contact(s) with us{}", origin, sorted.size(),
-                 mappings.containsKey(origin) ? "" : " (not mapped)");
-        syncGroupAsync(origin);
+        boolean mapped = mappings.containsKey(origin);
+        ReceivedList prev;
+        synchronized (receiveLock) {
+            prev = received.get(origin);
+            if (!mapped) {
+                if (sorted.isEmpty()) {
+                    if (prev != null) {
+                        received.remove(origin);
+                        loggedAt.remove(origin);
+                        Log.info("contact-list: {} withdrew its list (not mapped)", origin);
+                    }
+                    return;
+                }
+                if (!unmappedBudgetAllows(origin, sorted.size())) {
+                    long now = System.currentTimeMillis();
+                    if (now - overflowLoggedAt >= LOG_EVERY_MS) {
+                        overflowLoggedAt = now;
+                        Log.warn("contact-list: not keeping the list from {} ({} contact(s)) — lists nobody mapped "
+                               + "are limited to {} servers and {} contacts in all. Further refusals are logged "
+                               + "at most once a minute.", origin, sorted.size(), MAX_UNMAPPED_LISTS,
+                                 MAX_UNMAPPED_CONTACTS);
+                    }
+                    return;
+                }
+            }
+            received.put(origin, new ReceivedList(List.copyOf(sorted), System.currentTimeMillis(), crossedUntrusted));
+        }
+        boolean changed = prev == null || !prev.contacts().equals(sorted);
+        if (changed) {
+            long now = System.currentTimeMillis();
+            Long last = loggedAt.get(origin);
+            if (last == null || now - last >= LOG_EVERY_MS) {
+                loggedAt.put(origin, now);
+                Log.info("contact-list: {} shares {} contact(s) with us{}{}", origin, sorted.size(),
+                         mapped ? "" : " (not mapped)", crossedUntrusted ? " — arrived across an untrusted link" : "");
+            }
+        }
+        // An unmapped origin has no group (unmapping deletes it), so there is nothing to apply.
+        if (mapped) syncGroupAsync(origin);
+    }
+
+    /** Whether one more unmapped list of {@code size} contacts from {@code origin} fits the budget. */
+    private boolean unmappedBudgetAllows(String origin, int size) {
+        int lists = 0;
+        long total = 0;
+        for (Map.Entry<String, ReceivedList> e : received.entrySet()) {
+            if (e.getKey().equals(origin) || mappings.containsKey(e.getKey())) continue;
+            lists++;
+            total += e.getValue().contacts().size();
+        }
+        return lists < MAX_UNMAPPED_LISTS && total + size <= MAX_UNMAPPED_CONTACTS;
+    }
+
+    /** Forgets unmapped lists from servers we no longer have a route to. They re-send when they return. */
+    private void pruneUnmappedLists() {
+        synchronized (receiveLock) {
+            for (String origin : new ArrayList<>(received.keySet())) {
+                if (mappings.containsKey(origin)) continue;
+                if (manager.getRoutingTable().getRoute(origin).isEmpty()) {
+                    received.remove(origin);
+                    loggedAt.remove(origin);
+                    Log.debug("contact-list: forgot the unmapped list from {} (no route)", origin);
+                }
+            }
+        }
     }
 
     /** Lists received from other servers, by origin. */
@@ -507,6 +612,7 @@ public class ContactListManager {
         List<String> g = groups.contains(EVERYBODY) ? List.of(EVERYBODY) : List.copyOf(new LinkedHashSet<>(groups));
         mappings.put(o, new ListMapping(o, display, g));
         persistMappings();
+        registerNameProvider(o);
         Log.info("Contact list from {} mapped as '{}' for {}", o, display, g);
         syncGroupAsync(o);
     }
@@ -517,6 +623,7 @@ public class ContactListManager {
         mappings.remove(origin.strip());
         mappingErrors.remove(origin.strip());
         persistMappings();
+        if (nameProviders.remove(origin.strip())) UserNameManager.removeUserNameProvider(origin.strip());
         Log.info("Contact list from {} unmapped", origin);
         syncGroupAsync(origin.strip());
     }
@@ -547,8 +654,10 @@ public class ContactListManager {
     }
 
     private void syncGroupAsync(String origin) {
+        if (!pendingSyncs.add(origin)) return;   // one already queued will read the latest state
         try {
             executor.execute(() -> {
+                pendingSyncs.remove(origin);
                 try {
                     syncGroup(origin);
                 } catch (Exception e) {
