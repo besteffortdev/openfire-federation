@@ -1793,7 +1793,7 @@ public class FileRelayManager {
         return clean.length() > 200 ? clean.substring(clean.length() - 200) : clean;
     }
 
-    private static boolean isHexId(String id) {
+    static boolean isHexId(String id) {
         if (id == null || id.length() != 64) return false;
         for (int i = 0; i < id.length(); i++) {
             char c = id.charAt(i);

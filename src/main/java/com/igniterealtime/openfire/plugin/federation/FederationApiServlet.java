@@ -988,12 +988,12 @@ public class FederationApiServlet extends HttpServlet {
     private static final String OK = "{\"ok\":true}";
 
     /** {@code {"ok":true,"<key>":<value>}} — for numbers and booleans, which need no quoting. */
-    private static String ok(String key, Object value) {
+    static String ok(String key, Object value) {
         return "{\"ok\":true,\"" + key + "\":" + value + "}";
     }
 
     /** {@code {"ok":true,"<key>":"<value>"}}, with the value JSON-escaped. */
-    private static String okText(String key, String value) {
+    static String okText(String key, String value) {
         return "{\"ok\":true,\"" + key + "\":\"" + esc(value) + "\"}";
     }
 
@@ -1001,17 +1001,17 @@ public class FederationApiServlet extends HttpServlet {
      * {@code {"error":"<message>"}}, with the message JSON-escaped — so a message may safely quote
      * admin- or peer-supplied text (a domain, a path, a filesystem error) without breaking the reply.
      */
-    private static String error(String message) {
+    static String error(String message) {
         return "{\"error\":\"" + esc(message) + "\"}";
     }
 
     /** The missing-parameter reply: {@code required("a", "b")} → {@code {"error":"a and b required"}}. */
-    private static String required(String... names) {
+    static String required(String... names) {
         return error(String.join(" and ", names) + " required");
     }
 
     /** True when {@code reply} reports success — the gate for a side effect that must not run on error. */
-    private static boolean isOk(String reply) {
+    static boolean isOk(String reply) {
         return reply.startsWith("{\"ok\":true");
     }
 
@@ -1109,7 +1109,7 @@ public class FederationApiServlet extends HttpServlet {
             && c.getValue().equals(param);
     }
 
-    private static String esc(String s) {
+    static String esc(String s) {
         if (s == null) return "";
         StringBuilder b = new StringBuilder(s.length() + 8);
         for (int i = 0; i < s.length(); i++) {
@@ -1139,7 +1139,7 @@ public class FederationApiServlet extends HttpServlet {
      * quotes, whitespace, and angle brackets — which could break the status JSON or the admin UI's
      * inline handlers if persisted and rendered — are rejected. Not a full hostname validation.
      */
-    private static boolean isPlausibleDomain(String d) {
+    static boolean isPlausibleDomain(String d) {
         if (d == null || d.isEmpty() || d.length() > 253) return false;
         for (int i = 0; i < d.length(); i++) {
             char c = d.charAt(i);
