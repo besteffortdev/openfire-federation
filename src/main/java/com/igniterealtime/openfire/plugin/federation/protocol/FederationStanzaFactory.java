@@ -60,6 +60,17 @@ public final class FederationStanzaFactory {
     public static final String ATTR_VIA = "via";
     /** routing-update entry flag: the route crosses an untrusted edge (see RouteEntry#edge). */
     public static final String ATTR_EDGE = "edge";
+    /**
+     * muc-forward: comma-separated servers whose copy of the room already has the payload and has sent
+     * it on to its own mappings — the originating server, then each hub that fanned it out. Unlike
+     * {@link #ATTR_VIA}, which a hub resets so relays on the next leg are not blocked, this trail is
+     * never reset, so it is what stops a payload circling a ring or mesh of mapped rooms. Kept per
+     * server, not per room, like the rest of the fan-out rules. Absent from peers before 1.11.2,
+     * which neither send nor carry it.
+     */
+    public static final String ATTR_HUBS = "hubs";
+    /** Most entries a {@link #ATTR_HUBS} trail may carry; a longer one is a loop that escaped, or abuse. */
+    public static final int MAX_HUBS = 32;
 
     /** Room mapping: the peer's side of the pairing. */
     public static final String ATTR_REMOTE = "remote";
@@ -367,6 +378,21 @@ public final class FederationStanzaFactory {
                                 String viaTrail,
                                 String srcMapped,
                                 Packet payload) {
+        // Every caller of this form originates the payload, so the hub trail starts at its sender.
+        return mucForward(nextHop, finalDestination, targetRoom, viaTrail, srcMapped, srcMapped, payload);
+    }
+
+    /**
+     * {@link #mucForward(String, String, String, String, String, Packet)} carrying an explicit
+     * {@link #ATTR_HUBS} trail: a relay passes the one it received, a hub its own appended to it.
+     */
+    public static IQ mucForward(String nextHop,
+                                String finalDestination,
+                                String targetRoom,
+                                String viaTrail,
+                                String srcMapped,
+                                String hubs,
+                                Packet payload) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement(ELEMENT, NS);
         Element fwd = fed.addElement("muc-forward");
@@ -374,6 +400,7 @@ public final class FederationStanzaFactory {
         if (targetRoom != null) fwd.addAttribute("targetRoom", targetRoom);
         fwd.addAttribute(ATTR_VIA, viaTrail);
         if (srcMapped != null) fwd.addAttribute("src", srcMapped);
+        if (hubs != null && !hubs.isEmpty()) fwd.addAttribute(ATTR_HUBS, hubs);
         fwd.add(payload.getElement().createCopy());
         return iq;
     }
@@ -622,6 +649,20 @@ public final class FederationStanzaFactory {
             if (domain.equals(d.strip())) return true;
         }
         return false;
+    }
+
+    /** {@code trail} with {@code domain} appended, unless it is already an element of it. */
+    public static String appendToTrail(String trail, String domain) {
+        if (trail == null || trail.isEmpty()) return domain;
+        return viaContains(trail, domain) ? trail : trail + "," + domain;
+    }
+
+    /** How many entries the comma-separated {@code trail} holds. */
+    public static int trailLength(String trail) {
+        if (trail == null || trail.isEmpty()) return 0;
+        int n = 0;
+        for (String d : trail.split(",")) if (!d.isBlank()) n++;
+        return n;
     }
 
     private static final String NS_ORIGIN_ELEMENT = "fed-origin";

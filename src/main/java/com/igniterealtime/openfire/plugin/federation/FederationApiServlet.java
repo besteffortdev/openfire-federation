@@ -5,6 +5,7 @@ import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
+import com.igniterealtime.openfire.plugin.federation.protocol.RedundantArrivals;
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -97,14 +98,17 @@ public class FederationApiServlet extends HttpServlet {
     }
 
     /** SHA-256 (hex, truncated) of the status JSON with clock-derived fields blanked. */
-    private static String fingerprint(String json) {
+    static String fingerprint(String json) {
         // Blank the fields that advance on their own without a real state change: probe age/RTT,
-        // and nextRetryAt (an UNREACHABLE peer's back-off pushes this forward every few seconds).
+        // nextRetryAt (an UNREACHABLE peer's back-off pushes this forward every few seconds), and a
+        // mapping's duplicate count and ages (a meshed room drops copies on every message; the
+        // duplicates flag beside them still moves when a warning appears or clears).
         // The page re-derives all of these locally from absolute timestamps (see tickClocks), and a
         // genuine transition still moves an un-blanked field (e.g. the peer's status), so stripping
         // these only stops a held long-poll from returning — and the whole page re-rendering — on a
         // change no admin would notice.
-        String stable = json.replaceAll("\"(?:pongAgeSecs|pingMs|nextRetryAt)\":-?\\d+", "");
+        String stable = json.replaceAll(
+                "\"(?:pongAgeSecs|pingMs|nextRetryAt|dupCount|dupSinceAgeSecs|dupLastAgeSecs)\":-?\\d+", "");
         try {
             byte[] d = MessageDigest.getInstance("SHA-256")
                     .digest(stable.getBytes(StandardCharsets.UTF_8));
@@ -239,6 +243,11 @@ public class FederationApiServlet extends HttpServlet {
                 boolean connected = mgr.getRoutingTable().isReachable(m.get("remoteDomain")) && !pathBroken;
                 boolean routeMissing = !connected && !pathBroken
                         && mgr.getPeerRegistry().getPeer(m.get("remoteDomain")).isEmpty();
+                // Copies the room already had, dropped on arrival through this mapping: the rooms are
+                // mapped in a ring or mesh. The flag is what wakes a held poll; count and ages are not.
+                RedundantArrivals.Summary dups =
+                        mgr.getRedundantArrivals().recent(str(room.get("jid")), m.get("remoteDomain"));
+                long now = System.currentTimeMillis();
                 mb.append("{")
                   .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
                   .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\",")
@@ -247,7 +256,11 @@ public class FederationApiServlet extends HttpServlet {
                   .append("\"routeMissing\":").append(routeMissing).append(",")
                   .append("\"pathBroken\":").append(pathBroken).append(",")
                   .append("\"pingMs\":").append(mgr.getMappingPingRttMs(m.get("remoteDomain"))).append(",")
-                  .append("\"pongAgeSecs\":").append(mgr.getMappingPongAgeSecs(m.get("remoteDomain")))
+                  .append("\"pongAgeSecs\":").append(mgr.getMappingPongAgeSecs(m.get("remoteDomain"))).append(",")
+                  .append("\"duplicates\":").append(dups != null).append(",")
+                  .append("\"dupCount\":").append(dups == null ? 0 : dups.count()).append(",")
+                  .append("\"dupSinceAgeSecs\":").append(dups == null ? -1 : (now - dups.firstAt()) / 1000).append(",")
+                  .append("\"dupLastAgeSecs\":").append(dups == null ? -1 : (now - dups.lastAt()) / 1000)
                   .append("}");
             });
             b.append("}");
@@ -988,12 +1001,12 @@ public class FederationApiServlet extends HttpServlet {
     private static final String OK = "{\"ok\":true}";
 
     /** {@code {"ok":true,"<key>":<value>}} — for numbers and booleans, which need no quoting. */
-    private static String ok(String key, Object value) {
+    static String ok(String key, Object value) {
         return "{\"ok\":true,\"" + key + "\":" + value + "}";
     }
 
     /** {@code {"ok":true,"<key>":"<value>"}}, with the value JSON-escaped. */
-    private static String okText(String key, String value) {
+    static String okText(String key, String value) {
         return "{\"ok\":true,\"" + key + "\":\"" + esc(value) + "\"}";
     }
 
@@ -1001,17 +1014,17 @@ public class FederationApiServlet extends HttpServlet {
      * {@code {"error":"<message>"}}, with the message JSON-escaped — so a message may safely quote
      * admin- or peer-supplied text (a domain, a path, a filesystem error) without breaking the reply.
      */
-    private static String error(String message) {
+    static String error(String message) {
         return "{\"error\":\"" + esc(message) + "\"}";
     }
 
     /** The missing-parameter reply: {@code required("a", "b")} → {@code {"error":"a and b required"}}. */
-    private static String required(String... names) {
+    static String required(String... names) {
         return error(String.join(" and ", names) + " required");
     }
 
     /** True when {@code reply} reports success — the gate for a side effect that must not run on error. */
-    private static boolean isOk(String reply) {
+    static boolean isOk(String reply) {
         return reply.startsWith("{\"ok\":true");
     }
 
@@ -1109,7 +1122,7 @@ public class FederationApiServlet extends HttpServlet {
             && c.getValue().equals(param);
     }
 
-    private static String esc(String s) {
+    static String esc(String s) {
         if (s == null) return "";
         StringBuilder b = new StringBuilder(s.length() + 8);
         for (int i = 0; i < s.length(); i++) {
@@ -1139,7 +1152,7 @@ public class FederationApiServlet extends HttpServlet {
      * quotes, whitespace, and angle brackets — which could break the status JSON or the admin UI's
      * inline handlers if persisted and rendered — are rejected. Not a full hostname validation.
      */
-    private static boolean isPlausibleDomain(String d) {
+    static boolean isPlausibleDomain(String d) {
         if (d == null || d.isEmpty() || d.length() > 253) return false;
         for (int i = 0; i < d.length(); i++) {
             char c = d.charAt(i);

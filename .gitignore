@@ -15,4 +15,5 @@ downloads/
 *.apk
 test/
 docs/takchat-xmpp-behavior.md
+/test/
 

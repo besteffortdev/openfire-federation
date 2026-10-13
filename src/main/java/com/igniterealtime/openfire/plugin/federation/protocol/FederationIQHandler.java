@@ -880,10 +880,16 @@ public class FederationIQHandler extends IQHandler {
         // Used as the occupant's arrivedVia so a mapping-disable evicts exactly its arrivals.
         // Older peers omit it — fall back to the immediate sender so behaviour degrades safely.
         String src         = el.attributeValue("src", fromDomain);
+        String hubs        = el.attributeValue(FederationStanzaFactory.ATTR_HUBS, "");
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
 
         if (FederationStanzaFactory.viaContains(via, localDomain)) {
             Log.warn("muc-forward loop detected (via={}), dropping", via);
+            return;
+        }
+        if (FederationStanzaFactory.trailLength(hubs) > FederationStanzaFactory.MAX_HUBS) {
+            Log.warn("muc-forward from {} names more than {} hubs, dropping", fromDomain,
+                     FederationStanzaFactory.MAX_HUBS);
             return;
         }
 
@@ -948,9 +954,23 @@ public class FederationIQHandler extends IQHandler {
             // sends only along its own ACTIVE mappings (the hub stamps itself on fan-out), so src
             // names the far end of exactly one of our mappings for this room.
             if (!mappedToEntry(targetRoom, src, fromDomain, payloadEl)) return;
-            injectLocally(payloadEl, via, targetRoom, fromDomain, src);
-            // Hub behavior: fan out to all other mapped spokes.
-            fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via);
+            // Our copy of the room already has this payload and sent it on: it went round a ring or
+            // mesh of mappings and came back. Neither deliver it again nor send it round again.
+            if (FederationStanzaFactory.viaContains(hubs, localDomain)) {
+                Log.debug("muc-forward: already a hub for this {} (hubs={}), dropping",
+                          payloadEl.getName(), hubs);
+                manager.getRedundantArrivals().record(targetRoom, src);
+                return;
+            }
+            // Hub behavior: fan out to all other mapped spokes — only what this room took as new. A
+            // copy of a message it already has arrived by a second path, and the first one fanned out.
+            // src is the far end of the mapping it came in through (mappedToEntry checked that).
+            Arrival arrival = injectLocally(payloadEl, via, targetRoom, fromDomain, src);
+            if (arrival == Arrival.NEW) {
+                fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via, hubs);
+            } else if (arrival == Arrival.DUPLICATE) {
+                manager.getRedundantArrivals().record(targetRoom, src);
+            }
         } else {
             // We are an intermediate hop — forward to the next hop.
             String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
@@ -958,6 +978,7 @@ public class FederationIQHandler extends IQHandler {
             // If we also have a spoke mapping whose remote room is targetRoom, inject locally now.
             // We won't receive a hub fanOut because our domain will be in the via trail.
             // Same authorization gate: only inject into a federation-enabled local room.
+            boolean hubHere = false;
             if (targetRoom != null) {
                 RoomMapping ownMapping = manager.getRoomManager().getMappingForRemote(targetRoom);
                 // Only an ACTIVE mapping consents to traffic. getMappingForRemote returns a mapping in
@@ -970,9 +991,25 @@ public class FederationIQHandler extends IQHandler {
                         && ownMapping.remoteDomain().equals(finalDest)
                         && untrustedAllowsServer(fromDomain, localDomain)
                         && isFederatedLocalRoom(ownMapping.localRoomJid())) {
-                    injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain, src);
+                    // Arriving on our mapping with finalDest, so a copy dropped here is counted on it.
+                    Arrival arrival = FederationStanzaFactory.viaContains(hubs, localDomain)
+                            ? Arrival.DUPLICATE
+                            : injectLocally(payloadEl, via, ownMapping.localRoomJid(), fromDomain, src);
+                    if (arrival == Arrival.NEW) {
+                        // Our room took it as new, so our other spokes get it from us, as from any hub. A
+                        // later copy would now be dropped as a duplicate, so nothing else would send it on.
+                        // finalDest is getting it from the relay below: listing it as a hub keeps the
+                        // fan-out from sending it there twice.
+                        fanOutToOtherMappings(fromDomain, payloadEl, ownMapping.localRoomJid(), via,
+                                              FederationStanzaFactory.appendToTrail(hubs, finalDest));
+                        hubHere = true;
+                    } else if (arrival == Arrival.DUPLICATE) {
+                        manager.getRedundantArrivals().record(ownMapping.localRoomJid(), finalDest);
+                    }
                 }
             }
+            // The copy relayed on names us as a hub once we have fanned it out, so it is not sent back.
+            String relayHubs = hubHere ? FederationStanzaFactory.appendToTrail(hubs, localDomain) : hubs;
 
             manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
                 nextHop -> {
@@ -982,7 +1019,7 @@ public class FederationIQHandler extends IQHandler {
                         // mapped server this traffic enters through, not us (a mid-path relay).
                         XMPPServer.getInstance().getPacketRouter()
                                   .route(FederationStanzaFactory.mucForward(
-                                      nextHop, finalDest, targetRoom, newVia, src, embedded));
+                                      nextHop, finalDest, targetRoom, newVia, src, relayHubs, embedded));
                     } catch (Exception e) {
                         Log.warn("Could not relay muc-forward toward {}: {}", finalDest, e.getMessage());
                     }
@@ -1621,16 +1658,31 @@ public class FederationIQHandler extends IQHandler {
         manager.getContactLists().handleContactList(origin, contacts, crossedUntrusted);
     }
 
-    private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {
+    /** What a forwarded packet turned out to be for the local room it was injected into. */
+    private enum Arrival {
+        /** New here, including when delivery failed, so that a fault here never stops other spokes getting it. */
+        NEW,
+        /** A second copy of something the room already has: it reached the room by more than one path. */
+        DUPLICATE,
+        /** One of our own coming back round. */
+        OWN
+    }
+
+    /**
+     * Delivers a forwarded MUC packet into the local room. Only a {@link Arrival#NEW} one is sent on to
+     * the room's other mappings.
+     */
+    private Arrival injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {
         try {
             switch (payloadEl.getName()) {
-                case "message"  -> injectMessage(payloadEl, targetRoom, fromDomain, src);
+                case "message"  -> { return injectMessage(payloadEl, targetRoom, fromDomain, src); }
                 case "presence" -> injectPresence(payloadEl, targetRoom, fromDomain, src);
                 default -> Log.warn("injectLocally: unexpected payload type '{}'", payloadEl.getName());
             }
         } catch (Exception e) {
             Log.warn("Failed to inject forwarded MUC packet: {}", e.getMessage(), e);
         }
+        return Arrival.NEW;
     }
 
     // ── file relay (transparent HTTP-upload federation) ────────────────────────
@@ -1673,11 +1725,12 @@ public class FederationIQHandler extends IQHandler {
 
     /**
      * Relays the incoming payload to every other mapped spoke, skipping the
-     * original sender and any domain already in the via trail.  This is what
-     * makes a hub server automatically bridge messages between all its spokes.
+     * original sender, any domain already in the via trail, and any server already
+     * in the hub trail.  This is what makes a hub server automatically bridge
+     * messages between all its spokes.
      */
     private void fanOutToOtherMappings(String fromDomain, Element payloadEl,
-                                       String targetRoom, String viaTrail) {
+                                       String targetRoom, String viaTrail, String hubs) {
         if (targetRoom == null) { Log.debug("fanOut: skip — null targetRoom (from={})", fromDomain); return; }
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(targetRoom);
         if (mappings.size() <= 1) {
@@ -1693,6 +1746,8 @@ public class FederationIQHandler extends IQHandler {
         // Servers already in the incoming via are excluded at the hub level: they either
         // already processed the packet (relay-injection) or are the source.
         String newVia = localDomain;
+        // The hub trail is NOT reset: it is what stops the payload circling back through a ring.
+        String newHubs = FederationStanzaFactory.appendToTrail(hubs, localDomain);
         Set<String> viaServers = viaTrail.isEmpty() ? Collections.emptySet()
             : new HashSet<>(Arrays.asList(viaTrail.split(",")));
 
@@ -1707,17 +1762,10 @@ public class FederationIQHandler extends IQHandler {
                   mappings.stream().map(RoomMapping::remoteDomain).toList());
 
         for (RoomMapping m : mappings) {
-            if (m.remoteDomain().equals(fromDomain)) {
-                Log.debug("fanOut: skip {} — is direct sender", m.remoteDomain());
-                continue;   // skip direct sender
-            }
-            if (viaServers.contains(m.remoteDomain())) {
-                Log.debug("fanOut: skip {} — in via trail [{}]", m.remoteDomain(), viaTrail);
-                continue; // skip source + relay-injected servers
-            }
-            if (m.remoteDomain().equals(payloadHome)) {
-                Log.debug("fanOut: skip {} — is payload home", m.remoteDomain());
-                continue;  // never echo a user back to their home
+            String skip = RoomFanOut.skipReason(m.remoteDomain(), fromDomain, viaServers, hubs, payloadHome);
+            if (skip != null) {
+                Log.debug("fanOut: skip {} — {} (via=[{}], hubs=[{}])", m.remoteDomain(), skip, viaTrail, hubs);
+                continue;
             }
 
             String nextHop = manager.getRoutingTable()
@@ -1729,7 +1777,7 @@ public class FederationIQHandler extends IQHandler {
                 // spoke through US — stamp src with our own domain, not the original source.
                 XMPPServer.getInstance().getPacketRouter()
                           .route(FederationStanzaFactory.mucForward(
-                              nextHop, m.remoteDomain(), m.remoteRoomJid(), newVia, localDomain, embedded));
+                              nextHop, m.remoteDomain(), m.remoteRoomJid(), newVia, localDomain, newHubs, embedded));
                 Log.debug("fanOut: relayed from {} to {} via {}",
                           fromDomain, m.remoteDomain(), nextHop);
             } catch (Exception e) {
@@ -1742,18 +1790,20 @@ public class FederationIQHandler extends IQHandler {
     /**
      * Delivers a forwarded groupchat message directly to each occupant of the
      * target room, bypassing MUC's non-occupant check entirely.
+     *
+     * @return whether the message is new here, a second copy of one the room already has, or one of our
+     *         own users' looped back; only a new one is fanned out
      */
-    private void injectMessage(Element msgEl, String targetRoom, String fromDomain, String src) {
+    private Arrival injectMessage(Element msgEl, String targetRoom, String fromDomain, String src) {
         MUCRoom room = findLocalRoom(targetRoom);
         if (room == null) {
             Log.warn("injectMessage: room {} not found locally", targetRoom);
-            return;
+            return Arrival.NEW;
         }
 
         Element moderatedRetract = RoomModeration.moderatedRetract(msgEl);
         if (moderatedRetract != null) {
-            injectModeration(msgEl, moderatedRetract, room);
-            return;
+            return injectModeration(msgEl, moderatedRetract, room);
         }
 
         JID targetJID      = new JID(targetRoom);
@@ -1764,7 +1814,20 @@ public class FederationIQHandler extends IQHandler {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         if (localDomain.equals(originOf(senderNick, localDomain))) {
             Log.debug("injectMessage: dropping self-echo of local user {} into {}", senderNick, targetRoom);
-            return;
+            return Arrival.OWN;
+        }
+
+        // In a ring or mesh of mapped rooms the same message arrives once per path. The room it was
+        // posted to and the id that room gave it name it on every path, so a second copy is dropped
+        // here, before it reaches occupants, history or the file relay. A message whose origin gave it
+        // no usable id cannot be told apart; the hub trail still stops it circling.
+        String roomJid    = room.getJID().toBareJID();
+        String originRoom = bareJidOf(msgEl.attributeValue("to"));
+        String originId   = originStanzaId(msgEl, originRoom, roomJid);
+        if (originId != null && !manager.getRoomMessageIds().firstArrival(roomJid, originRoom, originId)) {
+            Log.debug("injectMessage: {} already has message {} from {}, dropping the copy from {}",
+                      roomJid, originId, originRoom, fromDomain);
+            return Arrival.DUPLICATE;
         }
 
         // A file share rides in with a fed-file annotation: deliver a copy whose URL points at
@@ -1804,10 +1867,11 @@ public class FederationIQHandler extends IQHandler {
         Collection<MUCOccupant> occupants = room.getOccupants();
         if (occupants.isEmpty()) {
             bufferPendingDelivery(targetRoom, deliverEl, virtualFrom);
-            return;
+            return Arrival.NEW;
         }
         deliverToOccupants(deliverEl, virtualFrom, occupants);
         Log.debug("injectMessage: delivered to {} occupant(s) in {}", occupants.size(), targetRoom);
+        return Arrival.NEW;
     }
 
     /**
@@ -1833,14 +1897,8 @@ public class FederationIQHandler extends IQHandler {
     private void stampRoomIdentity(Element msgEl, MUCRoom room, String senderNick) {
         String roomJid = room.getJID().toBareJID();
         String originRoom = bareJidOf(msgEl.attributeValue("to"));
-        String id = null;
+        String id = originStanzaId(msgEl, originRoom, roomJid);
         for (Element sid : msgEl.elements(QName.get("stanza-id", NS_STANZA_ID))) {
-            String candidate = sid.attributeValue("id");
-            if (id == null && originRoom != null && !originRoom.equals(roomJid)
-                    && originRoom.equals(bareJidOf(sid.attributeValue("by")))
-                    && candidate != null && REUSABLE_STANZA_ID.matcher(candidate).matches()) {
-                id = candidate;
-            }
             msgEl.remove(sid);
         }
         // Remembered with its origin so a moderation from that room can find it (see injectModeration).
@@ -1868,6 +1926,22 @@ public class FederationIQHandler extends IQHandler {
     }
 
     /**
+     * The stanza-id the origin room gave {@code msgEl}: one whose {@code by} is {@code originRoom}, the
+     * room it was sent to, and that is fit to reuse. Null if there is none, or the origin is this room.
+     */
+    private static String originStanzaId(Element msgEl, String originRoom, String roomJid) {
+        if (originRoom == null || originRoom.equals(roomJid)) return null;
+        for (Element sid : msgEl.elements(QName.get("stanza-id", NS_STANZA_ID))) {
+            String candidate = sid.attributeValue("id");
+            if (originRoom.equals(bareJidOf(sid.attributeValue("by")))
+                    && candidate != null && REUSABLE_STANZA_ID.matcher(candidate).matches()) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Applies a moderation (XEP-0425) relayed from the room {@code msgEl} names in {@code from}/{@code to}.
      * It is applied only to a message that came from that same room and whose author belongs to that
      * room's server: the author's own server may remove its users' messages everywhere, and nobody else
@@ -1876,8 +1950,11 @@ public class FederationIQHandler extends IQHandler {
      *
      * <p>The room's occupants get the announcement from this room's bare JID with the id this room gave
      * the message, as from a local moderator, and it is kept for {@link #replayModerations}.
+     *
+     * @return {@link Arrival#DUPLICATE} if this room already applied it, {@link Arrival#OWN} if it is our own
+     *         room's coming back; otherwise new, so a server that cannot apply it still passes it on
      */
-    private void injectModeration(Element msgEl, Element retract, MUCRoom room) {
+    private Arrival injectModeration(Element msgEl, Element retract, MUCRoom room) {
         String roomJid    = room.getJID().toBareJID();
         String originRoom = bareJidOf(msgEl.attributeValue("to"));
         String targetId   = retract.attributeValue("id");
@@ -1887,28 +1964,28 @@ public class FederationIQHandler extends IQHandler {
                 || !originRoom.equals(msgEl.attributeValue("from"))) {
             Log.warn("SECURITY: dropping a moderation for {} that does not come from its origin room "
                    + "(from={}, to={})", roomJid, msgEl.attributeValue("from"), msgEl.attributeValue("to"));
-            return;
+            return Arrival.NEW;
         }
         if (RoomModeration.belongsToRoomServer(localDomain, originRoom)) {
             Log.debug("injectModeration: dropping an echo of our own room {}'s moderation", originRoom);
-            return;
+            return Arrival.OWN;
         }
         var ids = manager.getRoomMessageIds();
         String localId = ids.localIdOf(roomJid, originRoom, targetId);
         if (localId == null) {
             Log.info("Not applying a moderation from {} in {}: message {} is not one this room received "
                    + "from there, or is too old to be remembered", originRoom, roomJid, targetId);
-            return;
+            return Arrival.NEW;
         }
         String author = ids.originOf(roomJid, localId).author();
         if (!RoomModeration.belongsToRoomServer(author, originRoom)) {
             Log.warn("SECURITY: refusing a moderation from {} in {}: message {} was written by {}, who is "
                    + "not a user of that room's server", originRoom, roomJid, targetId, author);
-            return;
+            return Arrival.NEW;
         }
         if (!ids.markModerated(roomJid, localId)) {
             Log.debug("injectModeration: {} in {} already moderated", localId, roomJid);
-            return;
+            return Arrival.DUPLICATE;
         }
 
         // by names the moderator's virtual occupant here, the same "user@home" nick their messages use.
@@ -1934,6 +2011,7 @@ public class FederationIQHandler extends IQHandler {
         Log.info("Applying a moderation from {} in {}: message {} by {}", originRoom, roomJid, localId, author);
         // An empty room needs no buffering: whoever joins next gets it from replayModerations.
         deliverToOccupants(announcement, roomJid, room.getOccupants());
+        return Arrival.NEW;
     }
 
     /**

@@ -31,7 +31,8 @@
 
             font-family: inherit;
             color: var(--fg);
-            max-width: 1240px;
+            max-width: 80%;
+            margin: 0 auto;
         }
         #fed-root *, #fed-root *::before, #fed-root *::after { box-sizing: border-box; }
 
@@ -236,11 +237,19 @@
         /* ══ Mapping rows ════════════════════════════════════════════ */
         .mapping-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
         .mapping-row:last-child { margin-bottom: 0; }
+        /* A room mapping: its own line, then any warning on a line of its own underneath. */
+        .mapping-row-stack { flex-direction: column; align-items: flex-start; gap: 4px; }
+        .mapping-row-line  { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
         .mapping-state        { font-size: 11px; font-weight: 700; margin-left: 2px; }
         .mapping-connected    { color: var(--green-ink); }
         .mapping-disconnected { color: var(--red); }
         .mapping-ping         { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums;
                                 border: 1px solid var(--line); border-radius: 9px; padding: 0 6px; cursor: default; }
+        /* Same red as the Unmap button (.btn-danger), so a room loop is noticed. */
+        .mapping-dup          { display: inline-block; font-size: 12px; font-weight: 600; color: var(--red-ink);
+                                background: var(--red-soft); border: 1px solid #fbcfca; border-radius: 5px;
+                                padding: 2px 9px; font-variant-numeric: tabular-nums; cursor: help; }
+        .room-dup             { margin-top: 5px; }
 
         /* ══ Collapsible peer sections ═══════════════════════════════ */
         .peer-section {

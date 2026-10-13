@@ -87,7 +87,13 @@ public class FederationRoutingTable {
      */
     public Set<String> updateFromPeer(String fromPeer, List<RouteEntry> peerTable,
                                       java.util.function.Predicate<String> untrusted) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        return updateFromPeer(XMPPServer.getInstance().getServerInfo().getXMPPDomain(),
+                              fromPeer, peerTable, untrusted);
+    }
+
+    /** {@link #updateFromPeer(String, List, java.util.function.Predicate)} with the local domain supplied. */
+    Set<String> updateFromPeer(String localDomain, String fromPeer, List<RouteEntry> peerTable,
+                               java.util.function.Predicate<String> untrusted) {
         Set<String> changed = new HashSet<>();
         Set<String> learnedSet = routesLearnedFrom.computeIfAbsent(fromPeer, k -> ConcurrentHashMap.newKeySet());
         Set<String> inUpdate = new HashSet<>();

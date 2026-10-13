@@ -167,7 +167,7 @@ These are not style. Each has a specific, checkable code consequence.
 | **ACM 1.3 — Be honest and trustworthy** | The UI must never claim something the code did not do. A file shown as "scanned" must have been scanned. | **PASS** — this is exactly why the `stage` column was added in 1.10.2: "scanned" was ambiguous about *which end*. |
 | **ACM 1.6 — Respect privacy** | Do not log message bodies or user content. Log metadata, ids and sizes. | **PASS** — file names and ids are logged; bodies are not. |
 | **ACM 1.7 — Honor confidentiality** | Internal infrastructure detail must not ship in artifacts. | **GAP** — real domain present in `src/main/resources/readme.html`, which ships inside the plugin jar. Mitigated by building releases from the sanitized clone; the durable fix is to sanitize the source. |
-| **ACM 2.5 / SE 3.10 — Adequate testing and thorough evaluation** | Automated tests proportionate to risk. | **GAP — the largest one.** No `src/test` at all across ~12.8k lines. Refactor verification here is static (diffing action labels, JSON keys, emitted strings) because nothing can be executed. |
+| **ACM 2.5 / SE 3.10 — Adequate testing and thorough evaluation** | Automated tests proportionate to risk. | **PARTIAL — started in 1.11.1.** `mvn -o test` now runs 66 tests across 8 classes: room fan-out on rings and meshes and its duplicate warning (1.11.2), the routing table's trust and metric rules, the admin feed's JSON escaping, the spool's transfer-id and file-name gates, room-default globs, and `LogSafe` (ported from the sister repos). Each rule was checked by mutation: breaking it fails a test. Still untested: the IQ handler, the packet interceptor and the file-relay state machine, which is where the 1.10.6 defects were. |
 | **SE 3.11 — Adequate documentation, including known limitations** | Document what does *not* work, not only what does. | **PASS** — `docs/` plus in-code "known gap" notes. |
 | **SE 6.07 / 8.02 — Be accurate about your software** | Release notes state what was verified and what was not. | **PASS** — "not live-tested" is recorded rather than glossed. |
 
@@ -208,12 +208,20 @@ Ordered by (fault-proneness × effort). Nothing here is a live defect; these are
 
 **Remaining:**
 
-14. **Add a test source root** (ACM 2.5 / SE 3.10) — blocked offline: JUnit 5 is not in the local `~/.m2`, and adding it needs network access that the `mvn -o` fleet builds deliberately avoid. Highest value once unblocked; start with `FederationApiServlet`'s reply helpers and `FederationRoutingTable`'s Bellman-Ford. The 1.10.6 items above are a sharper argument for it than the compliance gaps were: every one of them is a state-machine or trust-boundary bug that a unit test would have caught and a code read did not.
+14. ~~Add a test source root~~ (ACM 2.5 / SE 3.10) — **started in 1.11.1.** The
+    offline blocker is gone: JUnit 5.10.2 and surefire 3.2.5 are in `~/.m2` from the sister builds. Two
+    things had to change besides the pom. `.gitignore`'s `test/` (meant for the top-level Python
+    `test/`) also matched `src/test/`, so it is now anchored as `/test/`. And `updateFromPeer` gained a
+    package-private overload that takes the local domain, because `XMPPServer` cannot be stood up in a
+    unit test. See section F for what is covered.
+15. **Extend tests to the state machines** — `deliverableHere`, the file-relay transfer lifecycle and
+    the `file-error` abort path. These are the 1.10.6 defect sites and need either seams like the one
+    above or a fake `XMPPServer`.
 
-### How 1.10.4 was verified, given there are no tests
+### How 1.10.4 was verified, before there were tests
 
-Worth recording, because it is the pattern to reuse until item 8 is unblocked. The pre-change tree
-was built in a throwaway `git worktree` alongside the new one, and every string constant in the
+Worth recording, because it is the pattern to reuse for anything the tests do not reach yet
+(item 15). The pre-change tree was built in a throwaway `git worktree` alongside the new one, and every string constant in the
 five affected classes compared between the two:
 
 - `FederationStanzaFactory`, `FederationIQHandler`, `FederationPacketInterceptor` and

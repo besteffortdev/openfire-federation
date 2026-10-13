@@ -38,7 +38,8 @@ Consequences you must design around:
     <muc-forward destination='beta.example'
                  targetRoom='chat@conference.beta.example'
                  via=''
-                 src='alpha.example'>
+                 src='alpha.example'
+                 hubs='alpha.example'>
       <message type='groupchat'
                from='amy@alpha.example/phone'
                to='chat@conference.alpha.example'>
@@ -58,6 +59,7 @@ Consequences you must design around:
 | `targetRoom` | effectively | The room JID **on the destination server** to inject into. Absent disables injection and fan-out entirely. |
 | `via` | yes | Loop trail. Sent as `via=''` on first emission. |
 | `src` | no | The **mapped server this traffic enters the destination through** — see below. Absent falls back to the sending domain. |
+| `hubs` | no | Servers whose copy of the room already has the payload and sent it on to their own mappings: the originating server, then each hub. **Appended, never reset.** See [Rings and meshes](#rings-and-meshes). Absent = empty. At most 32 entries. (Since 1.11.2.) |
 
 The payload is the first child element and MUST be a `<message/>` or a `<presence/>`.
 
@@ -121,6 +123,7 @@ forwarded refused messages and joins.)
 
 ```
 if via contains our own domain                     → drop (loop)
+if hubs has more than 32 entries                   → drop
 if no payload child                                → drop
 if payloadOriginOk fails                           → drop (09-validation)
 if sender is untrusted AND src is neither the sender
@@ -134,16 +137,21 @@ if destination is absent or ours:
     if targetRoom is not a federation-enabled local room       → drop, log SECURITY
     if targetRoom has NO ACTIVE mapping                        → drop, log SECURITY
     if targetRoom has no ACTIVE mapping whose remote domain == src → drop, log SECURITY
+    if hubs contains our own domain                            → drop (been round)
     inject into targetRoom
-    fan out to every other ACTIVE mapping on that room
+    if the room took it as new (not a duplicate, not a self-echo):
+        fan out to every other ACTIVE mapping on that room
 else:
     ── WE ARE A RELAY ──
     newVia := via + our own domain
     if we have an ACTIVE mapping whose REMOTE room == targetRoom,
        whose remote domain == destination, whose local room is federation-enabled,
+       hubs does not contain our own domain,
        and (sender trusted OR our own domain is exposed to it):
         inject into that local room too          ← see below
-    relay toward destination, preserving src, with newVia
+        if it took it as new: fan out to that room's other mappings, as a hub,
+                              listing destination as a hub too; add our domain to hubs
+    relay toward destination, preserving src and hubs, with newVia
 ```
 
 ### Two authorisation gates, both required
@@ -165,6 +173,11 @@ hole:
 A server can be both a transit hop for a destination further along *and* a mapped participant in the
 same room. It injects locally on the way through, because it will not receive the hub's fan-out later —
 its own domain will already be in the `via` trail by then.
+
+Having taken the payload, it is also a hub for its own other mappings on that room, and fans out to
+them. Before 1.11.2 it did not, and those spokes relied on a second copy arriving later; that copy is
+now dropped as a duplicate, so the relay must send it on itself. It lists `destination` in the hub
+trail of what it fans out, since the copy it relays is already on its way there.
 
 The mapping consulted here is keyed by **remote** room JID (`targetRoom` names a room elsewhere), and
 it must be ACTIVE and its local side federation-enabled.
@@ -407,10 +420,12 @@ skip a mapping if:
     its remote domain == the sender             (do not echo back)
     its remote domain is in the INCOMING via    (already processed, or is the source)
     its remote domain == the payload's home     (never echo a user to their own server)
+    its remote domain is in the INCOMING hubs   (already has it, and sent it on)
 
 for each surviving mapping:
     via  := OUR OWN DOMAIN ONLY        ← reset, not appended
     src  := OUR OWN DOMAIN             ← we are the mapped server for this spoke
+    hubs := INCOMING hubs + OUR DOMAIN ← appended, never reset
     targetRoom := that mapping's remote room
     relay toward that mapping's remote domain
 ```
@@ -424,6 +439,29 @@ multi-hop paths at all.
 The cost is that the reset trail no longer protects against a downstream relay sending the payload
 back toward its origin — which is precisely why **the payload's home domain is skipped explicitly**,
 and why the self-echo guard exists as a second line of defence. Implement both.
+
+### Rings and meshes
+
+Neither guard is enough once rooms are mapped in a cycle that does not pass through the author's home.
+In a full mesh of four (alpha, beta, gamma, delta, each mapped to every other), a message from alpha
+reaches beta, which fans out to gamma and delta; gamma fans out to delta, delta to beta, beta to gamma
+again, and it circles indefinitely. A ring of four does stop, because every path ends at alpha, but the
+message goes both ways round and arrives twice. Two rules, since 1.11.2:
+
+- **Drop a second copy of a message.** The room it was posted to and the stanza-id that room gave it
+  (the `<stanza-id/>` whose `by` is the payload's `to`) name one message on every path. Remember, per
+  local room, which (origin room, origin id) pairs have arrived (this implementation keeps the last
+  2000); deliver only the first, and **do not fan out** a copy you dropped. Make check-and-record
+  atomic: two copies can arrive together. A copy of a message that is new is delivered as before; a
+  stanza-id reused by a *different* message is still replaced with a fresh one.
+- **Carry a hub trail.** `hubs` names every server whose copy of the room already has the payload and
+  sent it on. A hub appends itself and skips those already listed; a destination that finds itself
+  listed drops the payload. Unlike `via` it is never reset, so it ends the cycle for everything —
+  including presences and messages from a server with stanza-ids switched off, which carry no id to
+  match. It is per server, like every other fan-out rule here.
+
+Between them a message reaches each copy of the room exactly once on a ring or mesh, and a presence
+always stops, though a mesh can still deliver it to a room more than once.
 
 ## Occupant list synchronisation
 

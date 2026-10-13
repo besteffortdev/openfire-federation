@@ -1650,6 +1650,10 @@ function tickClocks() {
         const secs = Math.max(0, Math.round((Date.now() - parseInt(el.dataset.pongAt, 10)) / 1000));
         el.textContent = `ping ${el.dataset.rtt} · ${pingAgeText(secs)}`;
     });
+    document.querySelectorAll('.mapping-dup[data-dup-at]').forEach(el => {
+        const secs = Math.max(0, Math.round((Date.now() - parseInt(el.dataset.dupAt, 10)) / 1000));
+        el.textContent = dupChipText(parseInt(el.dataset.dupCount, 10), secs);
+    });
 }
 
 // ── Room search ───────────────────────────────────────────────────────────────
@@ -1773,7 +1777,7 @@ function renderLocalRooms(rooms) {
         }
         let row = `
         <tr data-jid="${escHtml(r.jid)}" style="${visible}">
-            <td><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small></td>
+            <td><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small>${renderRoomDuplicates(r)}</td>
             <td>${escHtml(r.description || '—')}</td>
             <td>${occCell}</td>
             <td>
@@ -1847,13 +1851,65 @@ function renderMappingPing(m, dom) {
     return '';
 }
 
+/** "1h ago"-style age, readable from seconds to days. */
+function dupAgeText(secs) {
+    if (secs < 120) return `${secs}s ago`;
+    if (secs < 7200) return `${Math.round(secs / 60)}m ago`;
+    return `${Math.round(secs / 3600)}h ago`;
+}
+
+/**
+ * Room-level warning, under the room's address so it is seen without expanding the room: copies of
+ * traffic the room already had are arriving through its mappings, i.e. the rooms are mapped in a loop.
+ * Totals every mapping; the tooltip names the ones bringing the copies in.
+ */
+function renderRoomDuplicates(r) {
+    const looped = (r.mappings || []).filter(m => m.state === 'ACTIVE' && m.duplicates);
+    if (looped.length === 0) return '';
+    const count = looped.reduce((n, m) => n + m.dupCount, 0);
+    const lastAgeSecs = Math.min(...looped.map(m => m.dupLastAgeSecs));
+    const lastAt = Date.now() - lastAgeSecs * 1000;
+    const through = looped
+        .map(m => `  • ${escHtml(m.remoteRoomJid)}: ${m.dupCount} cop${m.dupCount === 1 ? 'y' : 'ies'}`)
+        .join('&#10;');
+    const title = `There seems to be a room loop. This room is reached by more than one path, so copies of `
+        + `messages it already has keep arriving and are dropped. Nothing is lost, but every message also `
+        + `travels the extra paths.&#10;&#10;`
+        + `Look at this room's mappings (open it with ▸): the ones marked ⚠ are bringing the copies in.`
+        + `&#10;${through}&#10;&#10;`
+        + `Remove one of those mappings to break the loop. This warning clears 24 hours after the last copy.`;
+    return `<div class="room-dup"><span class="mapping-dup" data-dup-at="${lastAt}" data-dup-count="${count}" `
+        + `title="${title}">${dupChipText(count, lastAgeSecs)}</span></div>`;
+}
+
+/**
+ * Warning chip for a mapping that is bringing in copies the room already has: its mappings form a
+ * ring or mesh, so the room is reached by more than one path and the copies are dropped on arrival.
+ */
+function renderMappingDuplicates(m) {
+    if (m.state !== 'ACTIVE' || !m.duplicates) return '';
+    const lastAt = Date.now() - m.dupLastAgeSecs * 1000;
+    const copies = m.dupCount === 1 ? '1 copy' : `${m.dupCount} copies`;
+    const title = `There seems to be a room loop through this mapping. ${copies} of messages or presences `
+        + `this room already had arrived through it from ${escHtml(m.remoteDomain)} and were dropped, the first `
+        + `${dupAgeText(m.dupSinceAgeSecs)}. Nothing is lost, but every message also travels the extra path.`
+        + `&#10;&#10;Look at this room's mappings: removing this one, or another mapping in the loop, breaks it. `
+        + `This warning clears 24 hours after the last copy is dropped.`;
+    return ` <span class="mapping-dup" data-dup-at="${lastAt}" data-dup-count="${m.dupCount}" title="${title}">`
+        + `${dupChipText(m.dupCount, m.dupLastAgeSecs)}</span>`;
+}
+
+function dupChipText(count, lastAgeSecs) {
+    return `⚠ ${count} duplicate${count === 1 ? '' : 's'} dropped · ${dupAgeText(lastAgeSecs)}`;
+}
+
 /** Renders one mapping row with a state badge and the buttons valid for that state. */
 function renderMappingRow(localJid, m) {
     const dom = jsArg(m.remoteDomain);
     const lj = jsArg(localJid);
     const target = `<span class="badge badge-fed" title="${dom}">${escHtml(m.remoteRoomJid)}</span>`;
     const unmap = `<button class="btn-small btn-danger" onclick="unmapRoom('${lj}','${dom}')">Unmap</button>`;
-    let badge, buttons;
+    let badge, buttons, warning = '';
     switch (m.state) {
         case 'ACTIVE':
             badge = (m.connected === false)
@@ -1864,6 +1920,7 @@ function renderMappingRow(localJid, m) {
                     : `<span class="mapping-state mapping-disconnected" title="Route to ${dom} is down">⚠ disconnected</span>`)
                 : `<span class="mapping-state mapping-connected">● active</span>`;
             badge += ` ${renderMappingPing(m, dom)}`;
+            warning = renderMappingDuplicates(m);
             buttons = `<button class="btn-small btn-warn" onclick="mappingAction('disable-mapping','${lj}','${dom}')">Disable</button> ${unmap}`;
             break;
         case 'PENDING_OUT':
@@ -1891,7 +1948,11 @@ function renderMappingRow(localJid, m) {
             badge = `<span class="mapping-state">${escHtml(m.state || '')}</span>`;
             buttons = unmap;
     }
-    return `<div class="mapping-row">${target} ${badge} ${buttons}</div>`;
+    // Two lines: the mapping itself, then any warning under its room badge, so both stay visible.
+    return `<div class="mapping-row mapping-row-stack">
+                <div class="mapping-row-line">${target} ${badge} ${buttons}</div>
+                ${warning ? `<div class="mapping-row-line">${warning}</div>` : ''}
+            </div>`;
 }
 
 /** Generic mapping lifecycle action. When reRequest is true, re-sends the original map request. */

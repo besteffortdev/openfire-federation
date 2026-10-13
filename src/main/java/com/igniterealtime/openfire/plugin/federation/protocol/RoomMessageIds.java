@@ -21,6 +21,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *       posted to, the id that room gave it, and its author. A moderation (XEP-0425) crosses the
  *       federation only for a message its author's own server can moderate, and this is how both
  *       sides tell. See {@link RoomModeration}.</li>
+ *   <li><b>Arrivals.</b> When rooms are mapped in a ring or a mesh, one message reaches a room once per
+ *       path. Its origin room and the id that room gave it name it on every path, so every copy after
+ *       the first is recognised and neither delivered nor fanned out again.</li>
  * </ul>
  */
 public final class RoomMessageIds {
@@ -40,6 +43,7 @@ public final class RoomMessageIds {
     private final Map<String, Long> accepted = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Origin>> seen = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Boolean>> moderated = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Boolean>> arrived = new ConcurrentHashMap<>();
 
     /** Records that {@code roomJid} accepted and broadcast the message identified by {@code key}. */
     public void markAccepted(String roomJid, String key) {
@@ -87,6 +91,15 @@ public final class RoomMessageIds {
             }
         }
         return null;
+    }
+
+    /**
+     * True the first time a relayed copy of the message {@code originRoom} knows as {@code originId}
+     * reaches {@code roomJid}, among its last {@link #SEEN_PER_ROOM}. Atomic, so two copies arriving
+     * together over different paths cannot both be taken for the first.
+     */
+    public boolean firstArrival(String roomJid, String originRoom, String originId) {
+        return lru(arrived, roomJid).putIfAbsent(originRoom + '\n' + originId, Boolean.TRUE) == null;
     }
 
     /** True the first time a moderation of {@code stanzaId} in {@code roomJid} is seen (bounded). */
