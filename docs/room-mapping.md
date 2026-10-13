@@ -49,8 +49,9 @@ if (finalDest == null || localDomain.equals(finalDest)) {
     // We are the destination — inject into the local MUC room.
     if (!isFederatedLocalRoom(targetRoom)) { /* SECURITY: drop */ return; }
     if (manager.getRoomManager().getMappingsForLocal(targetRoom).isEmpty()) { /* SECURITY: drop */ return; }
-    injectLocally(payloadEl, via, targetRoom, fromDomain, src);
-    fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via);   // hub behaviour
+    if (viaContains(hubs, localDomain)) return;                     // been round a ring/mesh
+    if (injectLocally(payloadEl, via, targetRoom, fromDomain, src))  // false for a duplicate
+        fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via, hubs);   // hub behaviour
 } else {
     // We are an intermediate hop — forward toward the next hop.
     String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
@@ -97,19 +98,37 @@ A server mapped to *several* rooms for the same local room is a **hub**. After i
 to every *other* spoke, so servers that can't see each other still share a room through the hub:
 
 ```java
+String newHubs = FederationStanzaFactory.appendToTrail(hubs, localDomain);   // appended, never reset
 for (RoomMapping m : mappings) {
-    if (m.remoteDomain().equals(fromDomain))      continue; // skip direct sender
-    if (viaServers.contains(m.remoteDomain()))    continue; // skip source + already-relayed
-    if (m.remoteDomain().equals(payloadHome))     continue; // never echo a user back home
+    // skips: the direct sender, the incoming via, the payload's home, and servers already in hubs
+    if (RoomFanOut.skipReason(m.remoteDomain(), fromDomain, viaServers, hubs, payloadHome) != null) continue;
     String nextHop = manager.getRoutingTable().findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
     // We are the hub, so occupants enter the spoke through US — stamp src with our own domain.
-    route(mucForward(nextHop, m.remoteDomain(), m.remoteRoomJid(), /*newVia=*/localDomain, localDomain, embedded));
+    route(mucForward(nextHop, m.remoteDomain(), m.remoteRoomJid(), /*newVia=*/localDomain, localDomain, newHubs, embedded));
 }
 ```
 
 The hub **resets** the `via` trail to just itself so downstream relays aren't blocked by the inbound trail —
 and because that removes the trail's loop protection, it explicitly skips the payload's **home domain** so a
 user's own presence never loops back to them.
+
+That alone does not stop rooms mapped in a **ring or mesh**: a payload can circle a cycle that never passes
+through its home. Since 1.11.2 two more rules apply (spec: [05 § Rings and meshes](protocol/05-muc-traffic.md#rings-and-meshes)):
+
+- **Duplicates are dropped.** `injectMessage` recognises a second copy of a message by the room it was posted
+  to and the stanza-id that room gave it (`RoomMessageIds.firstArrival`), delivers only the first, and returns
+  false so the copy is not fanned out again.
+- **A hub trail is carried.** The `hubs` attribute lists every server that already has the payload and sent it
+  on. It is appended to, never reset; a hub skips the servers listed (`RoomFanOut.skipReason`), and a
+  destination listed in it drops the payload. This also stops presences, which have no id to match.
+
+Either drop is counted against the mapping the copy arrived through (`RedundantArrivals`). The Rooms tab shows a
+red **⚠ N duplicates dropped** warning in two places: under the room's address in the room list, totalled over its
+mappings, and on its own line under each mapping that brought copies in. Hovering either one explains that there
+seems to be a room loop and to look at the mappings; the room-level one lists them. Nothing is lost; it says the
+room is reached by more than one path, so every message also travels the redundant ones. The warning clears 24
+hours after the last dropped copy, so removing the redundant mapping makes it go away. Counts are in memory and
+reset on restart.
 
 ## Teardown: no stale ghosts
 

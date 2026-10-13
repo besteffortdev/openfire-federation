@@ -59,6 +59,17 @@ class FederationApiServletTest {
     }
 
     @Test
+    @DisplayName("a held poll wakes when a duplicate warning appears, not on every dropped copy")
+    void fingerprintIgnoresDuplicateCountsButNotTheFlag() {
+        String quiet = "{\"mappings\":[{\"duplicates\":true,\"dupCount\":3,\"dupSinceAgeSecs\":90,\"dupLastAgeSecs\":2}]}";
+        String busier = "{\"mappings\":[{\"duplicates\":true,\"dupCount\":41,\"dupSinceAgeSecs\":95,\"dupLastAgeSecs\":0}]}";
+        String cleared = "{\"mappings\":[{\"duplicates\":false,\"dupCount\":0,\"dupSinceAgeSecs\":-1,\"dupLastAgeSecs\":-1}]}";
+
+        assertEquals(FederationApiServlet.fingerprint(quiet), FederationApiServlet.fingerprint(busier));
+        assertFalse(FederationApiServlet.fingerprint(quiet).equals(FederationApiServlet.fingerprint(cleared)));
+    }
+
+    @Test
     @DisplayName("an admin-entered peer domain is lowercase host characters only")
     void plausiblePeerDomain() {
         assertTrue(FederationApiServlet.isPlausibleDomain("2501"));

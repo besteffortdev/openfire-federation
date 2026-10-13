@@ -86,6 +86,8 @@ Note the two loop guards that `via` cannot provide, both in [05](05-muc-traffic.
   old trail. The payload's home domain is skipped explicitly instead.
 - The **self-echo guard** at injection catches the rest: never inject a user whose home domain is your
   own.
+- On a ring or mesh of mapped rooms neither is enough. The `hubs` trail, which is never reset, and the
+  duplicate check on (origin room, origin stanza-id) stop it. See [05 § Rings and meshes](05-muc-traffic.md#rings-and-meshes).
 
 ## 3. Payload origin — the `from`-spoofing gate
 
@@ -542,6 +544,8 @@ minute. This implementation's values:
 | `contact-list-request` answers | one per 30 s per requesting server |
 | File transfers tracked at once | 512 |
 | Domains remembered as answering mapping probes | 1024, only ones we route to; pongs for an unprobed domain are ignored |
+| `hubs` on one `muc-forward` | 32 entries; a longer trail is dropped |
+| Message arrivals remembered per mapped room | 2000 (origin room, origin stanza-id) pairs |
 
 The untrusted route bound is what keeps the rest small: most caches are keyed by origin server, and
 an untrusted peer can only claim origins it has a route for.
@@ -555,6 +559,8 @@ an untrusted peer can only claim origins it has a route for.
 | Sender identity | every action | drop |
 | Peer allowlist | every action | drop |
 | `via` loop guard | every action carrying `via` | drop |
+| `hubs` trail | `muc-forward` | drop if it names us; skip listed servers on fan-out |
+| Duplicate message | `muc-forward` message injection | drop; do not fan out |
 | Payload origin | `muc-forward`, `direct-`/`presence-`/`iq-forward` | drop |
 | Claimed origin | ads, mapping actions, unmap, probes, `muc-forward` `src` (untrusted) | drop |
 | Untrusted exposure | mapping actions, probes, `muc-forward`, `file-*`, 1:1 forwards | drop |

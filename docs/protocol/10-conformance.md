@@ -90,6 +90,10 @@ Ordered by how expensive the mistake is to find later.
 - [ ] Split `via` on `,` and compare elements — never `contains()`
 - [ ] Reset the trail on hub fan-out, and skip the payload's home domain explicitly
 - [ ] Never inject a user whose home domain is your own
+- [ ] Carry `hubs`: seed it with your domain when you originate, append yourself on fan-out, preserve it
+      when relaying; drop a `muc-forward` that names you, and skip listed servers on fan-out
+- [ ] Deliver a message once per (origin room, origin stanza-id), atomically, and never fan out a
+      duplicate
 
 **Mapping**
 - [ ] Invert `local`/`remote` on receipt
@@ -332,6 +336,7 @@ ones fall back to a documented default. The consequences that actually bite:
 | `untrusted` on `peer-announce` | treated as trusted | Safe. A pre-trust peer federates as trusted with anyone who also considers it trusted. |
 | `visibleto` on `<room/>` | parsed as **empty set** = visible to nobody | **Your rooms reach direct peers and stop.** Always emit it; use `*` if you have no ACL model. |
 | `src` on `muc-forward` | falls back to the sending domain | Direct links unaffected. **Across a relay, traffic is dropped** since 1.10.8: injection requires an active mapping with `src`, and the relay is not the mapped server. Always emit it. |
+| `hubs` on `muc-forward` | empty trail | A pre-1.11.2 hub neither checks nor carries it, so the trail restarts after it. Rooms mapped in a ring or mesh can still loop through older servers; the duplicate check on a newer server still drops repeat copies of a message there. Upgrade every server on a cycle. |
 | `edge` on routing `<entry/>` | treated as clean | A peer that never emits it is fine on a tree. One that **strips** it while re-advertising a route learned across an untrusted edge can make that route look clean, so it can win over the edge route it came from — a routing loop on a cyclic mesh. Propagate it. |
 | `token` on mapping lifecycle | empty stored token accepts anything | A peer that *has* a stored token rejects your untokened disable/enable/unmap. Mint tokens. |
 | `mapping-ping` support | never answers | Never flagged as broken; a domain must have provably answered once to be eligible for the verdict. |
