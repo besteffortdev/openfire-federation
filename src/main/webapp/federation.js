@@ -2,11 +2,6 @@
 
 const API_URL = 'api';
 
-let roomFilter = '';
-
-// Tracks which peer sections are manually collapsed across refreshes.
-const collapsedPeers = new Set();
-
 // Latest status payload, so per-peer server editors can be built from the peer's exposableServers.
 let lastData = {};
 // Untrusted peers whose exposed-server editor is expanded (persisted across refreshes).
@@ -24,9 +19,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
     bindPeerForm();
     bindRoomDefaultForm();
-    bindContactSharing();
-    bindRoomSearch();
     bindFilters();
+    bindTableSorting();
+    watchRenders();
     pollLoop();                       // long-poll: renders immediately, then on every change
     setInterval(tickClocks, 1000);    // advances countdowns/probe ages between data updates
 });
@@ -105,18 +100,10 @@ function renderAll(data) {
     renderRoomDefaults(data.roomDefaults || []);
     renderRemoteRooms(data.remoteRooms || {}, localRooms, mappings);
     updateStatusBadge(data.peers || []);
-    updateKeepaliveInput(data.keepaliveSeconds);
-    updateReconnectInput(data.reconnectSeconds);
-    updateMappingPingInput(data.mappingPingSeconds);
-    updateFilesSettings(data);
+    updateSettings(data);
     renderAvScanLog(data.avScanLog || []);
     renderRejectedFiles(data.rejectedFiles || []);
-    updateAllowlistToggle(data.peerAllowlist);
-    updateTraversalToggle(data.allowRemoteRoomTraversal);
-    updateDirectRelayToggle(data.directMsgRelay);
-    updateProbeOnSubscribeToggle(data.probeOnSubscribe);
     renderFileConfig(data.fileConfig || {});
-    applyAllFilters();
 }
 
 // ── Status badge ──────────────────────────────────────────────────────────────
@@ -144,13 +131,11 @@ function bindPeerForm() {
         const domain = domainField.value.trim();
         if (!domain) return;
         const untrusted = untrustedCb ? untrustedCb.checked : false;
-        post({ action: 'add-peer', domain, untrusted })
-            .then(() => {
-                domainField.value = '';
-                if (untrustedCb) untrustedCb.checked = false;
-                flashSaved('Peer added ✓');
-                refresh();
-            });
+        save({ action: 'add-peer', domain, untrusted }, 'Peer added').then(result => {
+            if (!result || !result.ok) return;
+            domainField.value = '';
+            if (untrustedCb) untrustedCb.checked = false;
+        });
     });
 }
 
@@ -217,9 +202,9 @@ function renderPeers(peers) {
 
         let row = `
         <tr>
-            <td>${dom}${untrustedBadge}${certBadge}</td>
-            <td><span class="status-dot ${statusClass(p.status)}"></span> ${statusLabel}</td>
-            <td>${p.lastSeen ? new Date(p.lastSeen).toLocaleString() : '—'}</td>
+            <td data-sort="${escHtml(p.domain)}">${dom}${untrustedBadge}${certBadge}</td>
+            <td data-sort="${escHtml(p.status)}"><span class="status-dot ${statusClass(p.status)}"></span> ${statusLabel}</td>
+            <td data-sort="${p.lastSeen || ''}">${p.lastSeen ? new Date(p.lastSeen).toLocaleString() : '—'}</td>
             <td class="room-detail-cell">
                 <span class="room-detail-sum">${sumParts.join(' · ')}</span>
                 <button class="room-expand-btn ${expanded ? 'open' : ''}"
@@ -230,7 +215,7 @@ function renderPeers(peers) {
 
         if (p.certMismatch) {
             row += `
-        <tr class="exposed-editor-row">
+        <tr class="detail-row exposed-editor-row">
             <td colspan="4" style="color:#58151c">
                 ⚠ <strong>${dom}</strong> presented a different S2S certificate than the
                 one pinned on first contact — this can mean a server was re-created, or an impersonation
@@ -304,7 +289,6 @@ function renderPeerDetailRow(p) {
         outbound = `${list}
             <div style="margin-top:8px">
                 <button class="btn-small btn-primary" onclick="saveExposedServers('${dom}')">Save</button>
-                <span id="exposed-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:8px">Saved ✓</span>
             </div>`;
     } else {
         outbound = '<p class="empty" style="margin:4px 0">Trusted — this peer sees the full topology and all federated rooms.</p>';
@@ -347,7 +331,7 @@ function renderPeerDetailRow(p) {
         : advRows + deniedRows;
 
     return `
-        <tr class="exposed-editor-row room-detail-row">
+        <tr class="detail-row exposed-editor-row room-detail-row">
             <td colspan="4">
                 <div class="exposed-cols">
                     <div class="exposed-col" style="flex:0 0 200px">
@@ -380,20 +364,12 @@ function renderPeerDetailRow(p) {
 
 /** Snapshots the current checkbox state for a peer into editedExposed (survives refresh). */
 function captureExposedEdits(domain) {
-    const boxes = document.querySelectorAll(`.exposed-cb[data-domain="${cssEscape(domain)}"]`);
-    if (boxes.length === 0) return;   // editor not in DOM right now
-    const set = new Set();
-    boxes.forEach(b => { if (b.checked) set.add(b.value); });
-    editedExposed[domain] = set;
+    const set = captureChecks(`.exposed-cb[data-domain="${cssEscape(domain)}"]`);
+    if (set) editedExposed[domain] = set;
 }
 
 function togglePeerRooms(domain) {
-    if (expandedPeerRooms.has(domain)) {
-        captureExposedEdits(domain);
-        expandedPeerRooms.delete(domain);
-    } else {
-        expandedPeerRooms.add(domain);
-    }
+    toggleExpanded(expandedPeerRooms, domain, captureExposedEdits);
     renderPeers(lastData.peers || []);
 }
 
@@ -401,48 +377,35 @@ function setUntrusted(domain, untrusted) {
     if (untrusted && !confirm('Mark ' + domain + ' as untrusted?\n\n'
         + 'It will immediately stop receiving routing updates and room advertisements. '
         + 'Use the peer\'s settings panel (expand arrow) to choose exactly which servers it may see.')) return;
-    post({ action: 'set-untrusted', domain, untrusted }).then(() => {
-        if (!untrusted) delete editedExposed[domain];   // exposure list no longer applies
-        refresh();
-    });
+    save({ action: 'set-untrusted', domain, untrusted }, untrusted ? 'Marked untrusted' : 'Marked trusted')
+        .then(result => {
+            if (result && result.ok && !untrusted) delete editedExposed[domain];   // exposure list no longer applies
+        });
 }
 
 function acceptCert(domain) {
     if (!confirm('Trust the new S2S certificate for ' + domain + '?\n\n'
         + 'Only do this if you know the server was legitimately re-created or its certificate '
         + 'was renewed. The new certificate will be pinned and the alert cleared.')) return;
-    post({ action: 'accept-cert', domain }).then(refresh);
+    save({ action: 'accept-cert', domain }, 'Certificate trusted');
 }
 
 function setPeerContactLists(domain, enabled) {
-    post({ action: 'set-peer-contact-lists', domain, enabled }).then(result => {
-        if (result && result.ok) {
-            flashSaved(enabled ? 'Contact lists allowed ✓' : 'Contact lists blocked ✓');
-            refresh();
-        }
-    });
+    save({ action: 'set-peer-contact-lists', domain, enabled },
+         enabled ? 'Contact lists allowed' : 'Contact lists blocked');
 }
 
 function setPeerContactListsRefused(domain, refused) {
-    post({ action: 'set-peer-contact-lists-refused', domain, refused }).then(result => {
-        if (result && result.ok) {
-            flashSaved(refused ? 'Contact lists from ' + domain + ' refused ✓' : 'Contact lists from ' + domain + ' accepted ✓');
-            refresh();
-        }
-    });
+    save({ action: 'set-peer-contact-lists-refused', domain, refused },
+         'Contact lists from ' + domain + (refused ? ' refused' : ' accepted'));
 }
 
 function saveExposedServers(domain) {
     captureExposedEdits(domain);
     const set = editedExposed[domain] || new Set();
-    post({ action: 'set-exposed-servers', domain, servers: Array.from(set).join(',') })
-        .then(result => {
-            if (result && result.ok) {
-                delete editedExposed[domain];   // persisted set is now authoritative
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
+    save({ action: 'set-exposed-servers', domain, servers: Array.from(set).join(',') }).then(result => {
+        if (result && result.ok) delete editedExposed[domain];   // persisted set is now authoritative
+    });
 }
 
 /** Minimal CSS.escape fallback for attribute selectors (domains are simple, but be safe). */
@@ -451,7 +414,7 @@ function cssEscape(s) {
 }
 
 function retryPeer(domain) {
-    post({ action: 'retry-peer', domain }).then(refresh);
+    save({ action: 'retry-peer', domain }, 'Retry requested');
 }
 
 function disablePeer(domain) {
@@ -459,11 +422,11 @@ function disablePeer(domain) {
         + 'This tears down the connection like removing it, but the remote is told '
         + 'and cannot re-enable it from their side — even by deleting and re-adding it. '
         + 'Only you can re-enable it here.')) return;
-    post({ action: 'disable-peer', domain }).then(refresh);
+    save({ action: 'disable-peer', domain }, 'Peer disabled');
 }
 
 function enablePeer(domain) {
-    post({ action: 'enable-peer', domain }).then(refresh);
+    save({ action: 'enable-peer', domain }, 'Peer enabled');
 }
 
 // ── S2S sessions ──────────────────────────────────────────────────────────────
@@ -514,9 +477,9 @@ function renderS2SSessions(sessions) {
 
         return `
         <tr>
-            <td><strong>${escHtml(domain)}</strong>${fedBadge}</td>
+            <td data-sort="${escHtml(domain)}"><strong>${escHtml(domain)}</strong>${fedBadge}</td>
             <td>${dirBadges}</td>
-            <td class="ts">${new Date(earliest).toLocaleString()}</td>
+            <td class="ts" data-sort="${earliest}">${new Date(earliest).toLocaleString()}</td>
             <td>${tlsBadge}</td>
             <td style="white-space:nowrap">${addPeerBtn}${killBtns}</td>
         </tr>`;
@@ -529,8 +492,7 @@ function addPeerFromSession(domain) {
     if (!confirm('Add ' + domain + ' as a federation peer?'
         + (untrusted ? '\n\nIt is under a different parent domain, so it will be added as UNTRUSTED '
                      + '(it sees nothing until you expose servers to it).' : ''))) return;
-    post({ action: 'add-peer', domain, untrusted })
-        .then(() => { flashSaved('Peer added ✓'); refresh(); });
+    save({ action: 'add-peer', domain, untrusted }, 'Peer added');
 }
 
 // ── Config file (openfire.xml) ──────────────────────────────────────────────────
@@ -560,132 +522,112 @@ function renderFileConfig(fc) {
 }
 
 function reloadFedConfig() {
-    post({ action: 'reload-fed-config' })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Reloaded: +' + result.peersAdded + ' peer(s), ' + result.roomsUpdated
-                          + ' room(s), ' + result.mappingsRequested + ' mapping(s)');
-                refresh();
-            } else if (result && result.error) {
-                alert(result.error);
-            }
-        });
+    save({ action: 'reload-fed-config' },
+         result => 'Reloaded: +' + result.peersAdded + ' peer(s), ' + result.roomsUpdated
+                   + ' room(s), ' + result.mappingsRequested + ' mapping(s)');
 }
 
-// ── Connection settings ───────────────────────────────────────────────────────
+// ── Settings (Settings and Files tabs) ─────────────────────────────────────────
+//
+// Each entry ties one control in index.html (by id) to one field of the status payload.
+// updateSettings() fills the controls on every render, except the one being edited; a toggle
+// saves on change and every other field through its Save button, both via saveSetting(id).
+//   key      status field             def    value shown when the field is absent
+//   action   admin action to post     param  name the value is posted under (toggles: enabled)
+//   check    value -> true, or the message to show instead of saving
+//   states   [off, on] text for a toggle's "…-state" label
+//   confirmOn  question asked before a toggle is turned on
+// A field whose def is a number is read as an integer, any other field as trimmed text.
+const SETTINGS = {
+    'keepalive-input': {
+        key: 'keepaliveSeconds', def: 240, action: 'set-keepalive', param: 'seconds',
+        check: v => v >= 30 || 'Keepalive interval must be at least 30 seconds.' },
+    'reconnect-input': {
+        key: 'reconnectSeconds', def: 30, action: 'set-reconnect', param: 'seconds',
+        check: v => v >= 5 || 'Reconnect interval must be at least 5 seconds.' },
+    'mapping-ping-input': {
+        key: 'mappingPingSeconds', def: 30, action: 'set-mapping-ping', param: 'seconds',
+        check: v => v === 0 || v >= 15 || 'Mapping probe interval must be 0 (probe off) or at least 15 seconds.' },
+    'allowlist-toggle': {
+        key: 'peerAllowlist', action: 'set-allowlist', states: ['Open federation', 'Approved peers only'],
+        confirmOn: 'Restrict federation to approved peers?\n\n'
+                 + 'Only peers added on this page will be able to federate; any other server is rejected. '
+                 + 'Your existing peers stay approved.' },
+    'traversal-toggle': {
+        key: 'allowRemoteRoomTraversal', action: 'set-allow-traversal', states: ['Mapping required', 'Remote rooms reachable'] },
+    'directrelay-toggle': {
+        key: 'directMsgRelay', action: 'set-direct-relay', states: ['Native S2S', 'Relayed over federation'] },
+    'probesub-toggle': {
+        key: 'probeOnSubscribe', action: 'set-probe-on-subscribe', states: ['Native S2S', 'Probed over federation'] },
+    'files-toggle': {
+        key: 'filesEnabled', action: 'set-files-enabled', states: ['Off', 'Federated'] },
+    'files-maxsize-input': {
+        key: 'filesMaxSizeMB', def: 25, action: 'set-files-max-size', param: 'mb',
+        check: v => v >= 1 || 'Maximum file size must be at least 1 MB.' },
+    'files-retention-input': {
+        key: 'filesRetentionDays', def: 90, action: 'set-files-retention', param: 'days',
+        check: v => v >= 1 || 'File retention must be at least 1 day.' },
+    'files-log-retention-input': {
+        key: 'filesLogRetentionDays', def: 180, action: 'set-files-log-retention', param: 'days',
+        check: v => v >= 1 || 'Activity log retention must be at least 1 day.' },
+    'files-storagedir-input': {
+        key: 'filesStorageDir', def: '/var/lib/openfire/federation-files', action: 'set-files-storage-dir', param: 'dir',
+        check: v => !v ? 'Storage directory cannot be empty.'
+                  : /^(\/|[A-Za-z]:[\\/])/.test(v) || 'Please enter a full path, e.g. /var/lib/openfire/federation-files.' },
+    'files-extensions-input': {
+        key: 'filesAllowedExtensions', def: '', action: 'set-files-allowed-extensions', param: 'extensions' },
+    'files-av-toggle': {
+        key: 'filesAvEnabled', action: 'set-files-av-enabled', states: ['Off', 'Scanning'] },
+    'files-av-host-input': {
+        key: 'filesAvHost', def: 'clamav', action: 'set-files-av-host', param: 'host',
+        check: v => !!v || 'ClamAV host cannot be empty.' },
+    'files-av-port-input': {
+        key: 'filesAvPort', def: 3310, action: 'set-files-av-port', param: 'port',
+        check: v => (v >= 1 && v <= 65535) || 'ClamAV port must be between 1 and 65535.' },
+};
 
-function updateKeepaliveInput(seconds) {
-    const inp = document.getElementById('keepalive-input');
-    // Don't overwrite while the user is actively editing the field.
-    if (inp && document.activeElement !== inp) {
-        inp.value = seconds != null ? seconds : 240;
-    }
-}
-
-function saveKeepalive() {
-    const inp = document.getElementById('keepalive-input');
-    const seconds = parseInt(inp ? inp.value : '', 10);
-    if (isNaN(seconds) || seconds < 30) {
-        alert('Keepalive interval must be at least 30 seconds.');
-        return;
-    }
-    post({ action: 'set-keepalive', seconds })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-function updateReconnectInput(seconds) {
-    const inp = document.getElementById('reconnect-input');
-    if (inp && document.activeElement !== inp) {
-        inp.value = seconds != null ? seconds : 30;
-    }
-}
-
-function saveReconnect() {
-    const inp = document.getElementById('reconnect-input');
-    const seconds = parseInt(inp ? inp.value : '', 10);
-    if (isNaN(seconds) || seconds < 5) {
-        alert('Reconnect interval must be at least 5 seconds.');
-        return;
-    }
-    post({ action: 'set-reconnect', seconds })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-function updateMappingPingInput(seconds) {
-    const inp = document.getElementById('mapping-ping-input');
-    if (inp && document.activeElement !== inp) {
-        inp.value = seconds != null ? seconds : 30;
-    }
-}
-
-function saveMappingPing() {
-    const inp = document.getElementById('mapping-ping-input');
-    const seconds = parseInt(inp ? inp.value : '', 10);
-    if (isNaN(seconds) || seconds < 0 || (seconds > 0 && seconds < 15)) {
-        alert('Mapping probe interval must be 0 (probe off) or at least 15 seconds.');
-        return;
-    }
-    post({ action: 'set-mapping-ping', seconds })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-// ── File sharing settings ─────────────────────────────────────────────────────
-
-function updateFilesSettings(data) {
-    const cb  = document.getElementById('files-toggle');
-    const lbl = document.getElementById('files-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!data.filesEnabled;
-    if (lbl) lbl.textContent = data.filesEnabled ? 'Federated' : 'Off';
-
-    const sizeInp = document.getElementById('files-maxsize-input');
-    if (sizeInp && document.activeElement !== sizeInp) {
-        sizeInp.value = data.filesMaxSizeMB != null ? data.filesMaxSizeMB : 25;
-    }
-    const retInp = document.getElementById('files-retention-input');
-    if (retInp && document.activeElement !== retInp) {
-        retInp.value = data.filesRetentionDays != null ? data.filesRetentionDays : 90;
-    }
-    const logRetInp = document.getElementById('files-log-retention-input');
-    if (logRetInp && document.activeElement !== logRetInp) {
-        logRetInp.value = data.filesLogRetentionDays != null ? data.filesLogRetentionDays : 180;
-    }
-    const dirInp = document.getElementById('files-storagedir-input');
-    if (dirInp && document.activeElement !== dirInp) {
-        dirInp.value = data.filesStorageDir != null ? data.filesStorageDir : '/var/lib/openfire/federation-files';
-    }
-    const extInp = document.getElementById('files-extensions-input');
-    if (extInp && document.activeElement !== extInp) {
-        extInp.value = data.filesAllowedExtensions != null ? data.filesAllowedExtensions : '';
-    }
-    const avCb  = document.getElementById('files-av-toggle');
-    const avLbl = document.getElementById('files-av-state');
-    if (avCb && document.activeElement !== avCb) avCb.checked = !!data.filesAvEnabled;
-    if (avLbl) avLbl.textContent = data.filesAvEnabled ? 'Scanning' : 'Off';
-
-    const avHostInp = document.getElementById('files-av-host-input');
-    if (avHostInp && document.activeElement !== avHostInp) {
-        avHostInp.value = data.filesAvHost != null ? data.filesAvHost : 'clamav';
-    }
-    const avPortInp = document.getElementById('files-av-port-input');
-    if (avPortInp && document.activeElement !== avPortInp) {
-        avPortInp.value = data.filesAvPort != null ? data.filesAvPort : 3310;
+function updateSettings(data) {
+    for (const [id, s] of Object.entries(SETTINGS)) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        const v = data[s.key] != null ? data[s.key] : s.def;
+        const editing = document.activeElement === el;   // don't overwrite what the admin is typing
+        if (s.states) {
+            if (!editing) el.checked = !!v;
+            const lbl = document.getElementById(id.replace(/-toggle$/, '-state'));
+            if (lbl) lbl.textContent = s.states[v ? 1 : 0];
+        } else if (!editing) {
+            el.value = v;
+        }
     }
     updateFilesLogPaths(data.filesScanLogPath, data.filesRejectionLogPath);
+}
+
+/** A setting's current control value, or null (after telling the admin why) when it is invalid. */
+function settingValue(id) {
+    const s = SETTINGS[id];
+    const el = document.getElementById(id);
+    if (!el) return null;
+    const v = s.states ? el.checked
+            : typeof s.def === 'number' ? parseInt(el.value, 10)
+            : el.value.trim();
+    const verdict = s.check ? s.check(v) : true;
+    if (verdict !== true) {
+        alert(verdict);
+        return null;
+    }
+    return v;
+}
+
+function saveSetting(id) {
+    const s = SETTINGS[id];
+    const v = settingValue(id);
+    if (v === null) return;
+    if (s.confirmOn && v && !confirm(s.confirmOn)) {
+        document.getElementById(id).checked = false;
+        return;
+    }
+    save({ action: s.action, [s.param || 'enabled']: v });
 }
 
 // Where the activity logs actually live on disk, so an operator can find, tail or archive them
@@ -701,52 +643,22 @@ function updateFilesLogPaths(scanPath, rejectionPath) {
     }
 }
 
-function saveFilesAllowedExtensions() {
-    const inp = document.getElementById('files-extensions-input');
-    const extensions = (inp ? inp.value : '').trim();
-    post({ action: 'set-files-allowed-extensions', extensions })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-function saveFilesAvEnabled() {
-    const cb = document.getElementById('files-av-toggle');
-    if (!cb) return;
-    post({ action: 'set-files-av-enabled', enabled: cb.checked })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
+/** Host and port are two settings behind one Save button: both are checked before either is sent. */
 function saveFilesAvEndpoint() {
-    const hostInp = document.getElementById('files-av-host-input');
-    const portInp = document.getElementById('files-av-port-input');
-    const host = (hostInp ? hostInp.value : '').trim();
-    const port = parseInt(portInp ? portInp.value : '', 10);
-    if (!host) {
-        alert('ClamAV host cannot be empty.');
-        return;
+    const ids = ['files-av-host-input', 'files-av-port-input'];
+    const values = [];
+    for (const id of ids) {
+        const v = settingValue(id);
+        if (v === null) return;
+        values.push(v);
     }
-    if (isNaN(port) || port < 1 || port > 65535) {
-        alert('ClamAV port must be between 1 and 65535.');
-        return;
-    }
-    Promise.all([
-        post({ action: 'set-files-av-host', host }),
-        post({ action: 'set-files-av-port', port })
-    ]).then(results => {
-        if (results.every(r => r && r.ok)) {
-            flashSaved('Saved ✓');
+    Promise.all(ids.map((id, i) => post({ action: SETTINGS[id].action, [SETTINGS[id].param]: values[i] })))
+        .then(results => {
+            const failed = results.find(r => !r || !r.ok);
+            if (!failed) flashSaved('Saved');
+            else if (failed.error) alert(failed.error);
             refresh();
-        }
-    });
+        });
 }
 
 function testFilesAvConnection() {
@@ -759,192 +671,14 @@ function testFilesAvConnection() {
         });
 }
 
-function saveFilesEnabled() {
-    const cb = document.getElementById('files-toggle');
-    if (!cb) return;
-    post({ action: 'set-files-enabled', enabled: cb.checked })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-function saveFilesMaxSize() {
-    const inp = document.getElementById('files-maxsize-input');
-    const mb = parseInt(inp ? inp.value : '', 10);
-    if (isNaN(mb) || mb < 1) {
-        alert('Maximum file size must be at least 1 MB.');
-        return;
-    }
-    post({ action: 'set-files-max-size', mb })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-function saveFilesRetention() {
-    const inp = document.getElementById('files-retention-input');
-    const days = parseInt(inp ? inp.value : '', 10);
-    if (isNaN(days) || days < 1) {
-        alert('File retention must be at least 1 day.');
-        return;
-    }
-    post({ action: 'set-files-retention', days })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-function saveFilesLogRetention() {
-    const inp = document.getElementById('files-log-retention-input');
-    const days = parseInt(inp ? inp.value : '', 10);
-    if (isNaN(days) || days < 1) {
-        alert('Activity log retention must be at least 1 day.');
-        return;
-    }
-    post({ action: 'set-files-log-retention', days })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-function saveFilesStorageDir() {
-    const inp = document.getElementById('files-storagedir-input');
-    const dir = (inp ? inp.value : '').trim();
-    if (!dir) {
-        alert('Storage directory cannot be empty.');
-        return;
-    }
-    if (!/^(\/|[A-Za-z]:[\\/])/.test(dir)) {
-        alert('Please enter a full path, e.g. /var/lib/openfire/federation-files.');
-        return;
-    }
-    post({ action: 'set-files-storage-dir', dir })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            } else if (result && result.error) {
-                alert(result.error);
-                refresh();
-            }
-        });
-}
-
 function killSession(domain, direction) {
     if (!confirm('Close ' + direction + ' S2S session with ' + domain + '?')) return;
-    post({ action: 'kill-session', domain, direction }).then(refresh);
-}
-
-// ── Security: peer allowlist toggle ────────────────────────────────────────────
-
-function updateAllowlistToggle(enabled) {
-    const cb = document.getElementById('allowlist-toggle');
-    const lbl = document.getElementById('allowlist-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Approved peers only' : 'Open federation';
-}
-
-function saveAllowlist() {
-    const cb = document.getElementById('allowlist-toggle');
-    if (!cb) return;
-    const enabled = cb.checked;
-    if (enabled && !confirm(
-        'Restrict federation to approved peers?\n\n' +
-        'Only peers added on this page will be able to federate; any other server is rejected. ' +
-        'Your existing peers stay approved.')) {
-        cb.checked = false;
-        return;
-    }
-    post({ action: 'set-allowlist', enabled })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-// ── Security: remote-room traversal (allow direct S2S room access) toggle ───────
-
-function updateTraversalToggle(enabled) {
-    const cb = document.getElementById('traversal-toggle');
-    const lbl = document.getElementById('traversal-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Remote rooms reachable' : 'Mapping required';
-}
-
-function saveTraversal() {
-    const cb = document.getElementById('traversal-toggle');
-    if (!cb) return;
-    const enabled = cb.checked;
-    post({ action: 'set-allow-traversal', enabled })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-// ── Security: 1:1 message relay toggle ──────────────────────────────────────────
-
-function updateDirectRelayToggle(enabled) {
-    const cb = document.getElementById('directrelay-toggle');
-    const lbl = document.getElementById('directrelay-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Relayed over federation' : 'Native S2S';
-}
-
-function saveDirectRelay() {
-    const cb = document.getElementById('directrelay-toggle');
-    if (!cb) return;
-    const enabled = cb.checked;
-    post({ action: 'set-direct-relay', enabled })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
-}
-
-// ── Presence: probe federated contacts on subscription ──────────────────────────
-
-function updateProbeOnSubscribeToggle(enabled) {
-    const cb = document.getElementById('probesub-toggle');
-    const lbl = document.getElementById('probesub-state');
-    if (cb && document.activeElement !== cb) cb.checked = !!enabled;
-    if (lbl) lbl.textContent = enabled ? 'Probed over federation' : 'Native S2S';
-}
-
-function saveProbeOnSubscribe() {
-    const cb = document.getElementById('probesub-toggle');
-    if (!cb) return;
-    const enabled = cb.checked;
-    post({ action: 'set-probe-on-subscribe', enabled })
-        .then(result => {
-            if (result && result.ok) {
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
+    save({ action: 'kill-session', domain, direction }, 'Session closed');
 }
 
 function removePeer(domain) {
     if (!confirm('Remove peer ' + domain + '?')) return;
-    post({ action: 'remove-peer', domain }).then(refresh);
+    save({ action: 'remove-peer', domain }, 'Peer removed');
 }
 
 function statusClass(s) {
@@ -976,7 +710,7 @@ function renderRouting(entries) {
             <td><s>${escHtml(r.destination)}</s></td>
             <td>${escHtml(r.nextHop)}</td>
             <td>—</td>
-            <td><span class="badge badge-untrusted" title="Advertisements of this destination from ${escHtml(r.nextHop)} are refused — even if it is withdrawn and offered again">denied</span></td>
+            <td data-sort=""><span class="badge badge-untrusted" title="Advertisements of this destination from ${escHtml(r.nextHop)} are refused — even if it is withdrawn and offered again">denied</span></td>
             <td><button class="btn-small btn-primary"
                         onclick="allowRoute('${jsArg(r.nextHop)}','${jsArg(r.destination)}')">Allow</button></td>
         </tr>`;
@@ -992,7 +726,7 @@ function renderRouting(entries) {
             <td>${escHtml(r.destination)}</td>
             <td>${escHtml(r.nextHop)}</td>
             <td>${r.hops}</td>
-            <td class="ts">${new Date(r.updatedAt).toLocaleTimeString()}</td>
+            <td class="ts" data-sort="${r.updatedAt}">${new Date(r.updatedAt).toLocaleTimeString()}</td>
             <td>${denyBtn}</td>
         </tr>`;
     }).join('');
@@ -1026,9 +760,9 @@ function renderAvScanLog(entries) {
         const stageBadge = e.stage === 'egress' ? 'badge-out' : 'badge-in';
         return `
         <tr>
-            <td class="ts">${new Date(e.when).toLocaleString()}</td>
+            <td class="ts" data-sort="${e.when}">${new Date(e.when).toLocaleString()}</td>
             <td>${escHtml(e.name)}</td>
-            <td>${fmtBytes(e.size)}</td>
+            <td data-sort="${Number(e.size) || 0}">${fmtBytes(e.size)}</td>
             <td>${escHtml(e.origin)}</td>
             <td><span class="badge ${stageBadge}">${stageLabel}</span></td>
             <td><span class="badge ${badgeClass}">${label}</span></td>
@@ -1068,9 +802,9 @@ function renderRejectedFiles(entries) {
         const stageBadge = e.stage === 'egress' ? 'badge-out' : 'badge-in';
         return `
         <tr>
-            <td class="ts">${new Date(e.when).toLocaleString()}</td>
+            <td class="ts" data-sort="${e.when}">${new Date(e.when).toLocaleString()}</td>
             <td>${escHtml(e.name)}</td>
-            <td>${e.size > 0 ? fmtBytes(e.size) : '—'}</td>
+            <td data-sort="${e.size > 0 ? e.size : ''}">${e.size > 0 ? fmtBytes(e.size) : '—'}</td>
             <td>${escHtml(e.origin)}</td>
             <td><span class="badge ${stageBadge}">${stageLabel}</span></td>
             <td><span class="badge ${reasonBadge}">${escHtml(reasonLabel)}</span></td>
@@ -1086,22 +820,12 @@ function denyRoute(peerDomain, destination) {
         + ' advertises it — the entry stays in this table as disabled, and the deny is '
         + 'remembered even if the route is withdrawn and comes back. A route to the same '
         + 'destination via another peer is not affected. Use Allow to lift it.')) return;
-    post({ action: 'deny-route', domain: peerDomain, destination })
-        .then(result => {
-            if (result && result.error) alert(result.error);
-            else flashSaved('Route denied ✓');
-            refresh();
-        });
+    save({ action: 'deny-route', domain: peerDomain, destination }, 'Route denied');
 }
 
 /** Lifts a route deny; the peer is asked to re-advertise so the route re-appears. */
 function allowRoute(peerDomain, destination) {
-    post({ action: 'allow-route', domain: peerDomain, destination })
-        .then(result => {
-            if (result && result.error) alert(result.error);
-            else flashSaved('Route allowed ✓');
-            refresh();
-        });
+    save({ action: 'allow-route', domain: peerDomain, destination }, 'Route allowed');
 }
 
 // ── Users tab ──────────────────────────────────────────────────────────────────
@@ -1168,24 +892,8 @@ function reapplyChecklistFilters() {
 
 // ── Users tab: local groups (share side) ───────────────────────────────────────
 
-let groupFilter = '';
 const expandedShares = new Set();   // groups whose settings panel is open
 const editedShares = {};            // group -> Set of ticked servers not saved yet
-
-function bindContactSharing() {
-    document.getElementById('group-search').addEventListener('input', e => {
-        groupFilter = e.target.value.toLowerCase();
-        applyGroupFilter();
-    });
-}
-
-function applyGroupFilter() {
-    // Settings rows carry data-parent-group and follow their group row.
-    document.querySelectorAll('#local-groups-tbody tr[data-group], #local-groups-tbody tr[data-parent-group]').forEach(row => {
-        const g = (row.dataset.group || row.dataset.parentGroup || '').toLowerCase();
-        row.style.display = g.includes(groupFilter) ? '' : 'none';
-    });
-}
 
 function renderLocalGroups() {
     const tbody = document.getElementById('local-groups-tbody');
@@ -1207,14 +915,13 @@ function renderLocalGroups() {
         const rule = rules.find(r => r.group === g);
         const targets = rule ? rule.targets : [];
         const expanded = expandedShares.has(g);
-        const hidden = g.toLowerCase().includes(groupFilter) ? '' : 'display:none';
         const sum = targets.length ? escHtml(targets.length <= 2 ? targets.join(', ') : targets.length + ' servers')
                                    : 'not shared';
         const missing = (cl.localGroups || []).includes(g) ? ''
             : ' <span class="badge badge-tls" title="Openfire no longer has this group">missing</span>';
         let row = `
-        <tr data-group="${escHtml(g)}" style="${hidden}">
-            <td><strong>${escHtml(g)}</strong>${missing}</td>
+        <tr>
+            <td data-sort="${escHtml(g)}"><strong>${escHtml(g)}</strong>${missing}</td>
             <td class="room-detail-cell">
                 <span class="room-detail-sum">${sum}</span>
                 <button class="room-expand-btn ${expanded ? 'open' : ''}"
@@ -1222,14 +929,14 @@ function renderLocalGroups() {
                         onclick="toggleShareDetail('${jsArg(g)}')">▸</button>
             </td>
         </tr>`;
-        if (expanded) row += renderShareDetailRow(g, targets, hidden);
+        if (expanded) row += renderShareDetailRow(g, targets);
         return row;
     }).join('');
     reapplyChecklistFilters();
     restoreFocus(focus);
 }
 
-function renderShareDetailRow(group, targets, hidden) {
+function renderShareDetailRow(group, targets) {
     const id = 'share-' + jidToElemId(group);
     const cur = editedShares[group] || new Set(targets);
     const cl = lastData.contactLists || {};
@@ -1252,7 +959,7 @@ function renderShareDetailRow(group, targets, hidden) {
             </label>`;
     }).join('');
     return `
-    <tr class="exposed-editor-row room-detail-row" data-parent-group="${escHtml(group)}" style="${hidden}">
+    <tr class="detail-row exposed-editor-row room-detail-row">
         <td colspan="2">
             <div class="exposed-cols">
                 <div class="exposed-col">
@@ -1273,16 +980,12 @@ function renderShareDetailRow(group, targets, hidden) {
 }
 
 function captureShareEdits(group) {
-    const boxes = document.querySelectorAll(`.share-cb[data-group="${cssEscape(group)}"]`);
-    if (boxes.length === 0) return;
-    const set = editedShares[group] || new Set();
-    boxes.forEach(b => { if (b.checked) set.add(b.value); else set.delete(b.value); });
-    editedShares[group] = set;
+    const set = captureChecks(`.share-cb[data-group="${cssEscape(group)}"]`, editedShares[group]);
+    if (set) editedShares[group] = set;
 }
 
 function toggleShareDetail(group) {
-    if (expandedShares.has(group)) { captureShareEdits(group); expandedShares.delete(group); }
-    else expandedShares.add(group);
+    toggleExpanded(expandedShares, group, captureShareEdits);
     renderLocalGroups();
 }
 
@@ -1290,15 +993,8 @@ function saveShare(group) {
     captureShareEdits(group);
     const targets = Array.from(editedShares[group] || []);
     const action = targets.length ? 'save-contact-share' : 'delete-contact-share';
-    post({ action, group, targets: targets.join(',') }).then(result => {
-        if (result && result.ok) {
-            delete editedShares[group];
-            flashSaved(targets.length ? 'Shared ✓' : 'Sharing stopped ✓');
-            refresh();
-        } else if (result && result.error) {
-            alert(result.error);
-        }
-    });
+    save({ action, group, targets: targets.join(',') }, targets.length ? 'Shared' : 'Sharing stopped')
+        .then(result => { if (result && result.ok) delete editedShares[group]; });
 }
 
 // ── Users tab: what each server receives ───────────────────────────────────────
@@ -1318,27 +1014,21 @@ function renderSentLists(sent) {
                 : t.crossesUntrusted
                     ? '<span class="status-dot orange"></span> Sent — crosses an untrusted link; arrives only if that link allows contact lists'
                     : '<span class="status-dot green"></span> Up to date';
-        return `
-        <div class="peer-section">
-            <div class="peer-section-header" style="cursor:default">
-                <strong>${escHtml(t.target)}</strong>
+        return card({
+            header: `<strong>${escHtml(t.target)}</strong>
                 <span class="peer-room-count">${t.count} contact(s)</span>
-                <span class="hint" style="margin-left:auto">${state}</span>
-            </div>
-            <div class="peer-section-body" style="padding:10px 14px">${contactChips(t.contacts, t.count)}</div>
-        </div>`;
+                <span class="hint" style="margin-left:auto">${state}</span>`,
+            body: `<div style="padding:10px 14px">${contactChips(t.contacts, t.count)}</div>`,
+        });
     }).join('');
 }
 
 function resendContactLists() {
-    post({ action: 'resend-contact-lists' }).then(result => {
-        if (result && result.ok) { flashSaved('Re-sent ✓'); refresh(); }
-    });
+    save({ action: 'resend-contact-lists' }, 'Re-sent');
 }
 
 // ── Users tab: contact lists received from peers ───────────────────────────────
 
-const collapsedOrigins = new Set();
 // Unsaved mapping-form edits per origin, so a re-render (any status change) doesn't wipe them.
 const contactMapEdits = {};
 
@@ -1365,7 +1055,6 @@ function renderReceivedList(r, localGroups, readOnly) {
     const display = edit ? edit.displayName : (m ? m.displayName : o);
     const groups = new Set(edit ? edit.groups : (m ? m.groups : []));
     const everybody = groups.has('*');
-    const collapsed = collapsedOrigins.has(o);
 
     const received = r.receivedAt
         ? 'received ' + new Date(r.receivedAt).toLocaleString()
@@ -1395,18 +1084,15 @@ function renderReceivedList(r, localGroups, readOnly) {
           + (r.count > r.contacts.length
               ? `<tr><td colspan="2" class="hint">… and ${r.count - r.contacts.length} more</td></tr>` : '');
 
-    return `
-    <div class="peer-section" id="cm-${id}">
-        <div class="peer-section-header" onclick="toggleOrigin('${oj}')">
-            <span class="peer-collapse-icon" id="origin-icon-${id}">${collapsed ? '▶' : '▼'}</span>
-            <span class="status-dot ${r.reachable ? 'green' : 'grey'}" title="${r.reachable ? 'reachable' : 'unreachable'}"></span>
+    return card({
+        list: 'contact-received', key: o, id: 'cm-' + id,
+        header: `<span class="status-dot ${r.reachable ? 'green' : 'grey'}" title="${r.reachable ? 'reachable' : 'unreachable'}"></span>
             <strong>${escHtml(o)}</strong>
             <span class="peer-room-count">${r.count} contact(s)</span>
             ${mapInfo}
             ${untrustedBadge}
-            <span class="hint" style="margin-left:auto">${received}</span>
-        </div>
-        <div class="peer-section-body" id="origin-body-${id}" style="${collapsed ? 'display:none' : ''}">
+            <span class="hint" style="margin-left:auto">${received}</span>`,
+        body: `
             <div class="exposed-cols" style="padding:12px 14px;align-items:flex-start">
                 <div class="exposed-col" style="flex:0 0 300px">
                     <div class="exposed-col-h">Mapping
@@ -1428,7 +1114,7 @@ function renderReceivedList(r, localGroups, readOnly) {
                     <div style="margin-top:8px">
                         <button class="btn-small btn-primary" onclick="saveContactMapping('${oj}')" ${readOnly ? 'disabled' : ''}>
                             ${m ? 'Save' : 'Map'}</button>
-                        ${edit ? `<button class="btn-small" style="margin-left:4px;background:#e2e3e5;color:#383d41"
+                        ${edit ? `<button class="btn-small btn-ghost" style="margin-left:4px"
                                           onclick="discardContactMapEdit('${oj}')">Discard</button>` : ''}
                     </div>
                 </div>
@@ -1443,20 +1129,11 @@ function renderReceivedList(r, localGroups, readOnly) {
                         </table>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>`;
+            </div>`,
+    });
 }
 
-function toggleOrigin(origin) {
-    const wasCollapsed = collapsedOrigins.has(origin);
-    if (wasCollapsed) collapsedOrigins.delete(origin); else collapsedOrigins.add(origin);
-    const id = jidToElemId(origin);
-    const body = document.getElementById('origin-body-' + id);
-    const icon = document.getElementById('origin-icon-' + id);
-    if (body) body.style.display = wasCollapsed ? '' : 'none';
-    if (icon) icon.textContent = wasCollapsed ? '▼' : '▶';
-}
+
 
 function readContactMapForm(origin) {
     const id = jidToElemId(origin);
@@ -1493,16 +1170,9 @@ function saveContactMapping(origin) {
         alert('Choose at least one group, or Show to all users.');
         return;
     }
-    post({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n') })
-        .then(result => {
-            if (result && result.ok) {
-                delete contactMapEdits[origin];
-                flashSaved('Mapping saved ✓');
-                refresh();
-            } else if (result && result.error) {
-                alert(result.error);
-            }
-        });
+    save({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n') },
+         'Mapping saved')
+        .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
 }
 
 function lastMappingOf(origin) {
@@ -1512,13 +1182,8 @@ function lastMappingOf(origin) {
 }
 
 function unmapContactList(origin) {
-    post({ action: 'unmap-contact-list', origin }).then(result => {
-        if (result && result.ok) {
-            delete contactMapEdits[origin];
-            flashSaved('Mapping removed ✓');
-            refresh();
-        }
-    });
+    save({ action: 'unmap-contact-list', origin }, 'Mapping removed')
+        .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
 }
 
 // ── Room default-settings rules (Rooms tab) ────────────────────────────────────
@@ -1540,11 +1205,11 @@ function renderRoomDefaults(rules) {
         const pj = jsArg(r.pattern);
         return `<tr>
             <td><code>${p}</code></td>
-            <td>${yn(r.federated)}</td>
-            <td>${yn(r.autoAccept)}</td>
+            <td data-sort="${r.federated ? 1 : 0}">${yn(r.federated)}</td>
+            <td data-sort="${r.autoAccept ? 1 : 0}">${yn(r.autoAccept)}</td>
             <td>${escHtml(vis)}</td>
-            <td>${yn(r.autoMap)}</td>
-            <td>${yn(r.filesEnabled)}</td>
+            <td data-sort="${r.autoMap ? 1 : 0}">${yn(r.autoMap)}</td>
+            <td data-sort="${r.filesEnabled ? 1 : 0}">${yn(r.filesEnabled)}</td>
             <td style="text-align:right">
                 <button class="btn btn-small" onclick="editRoomDefault('${pj}')">Edit</button>
                 <button class="btn btn-small btn-danger" onclick="deleteRoomDefault('${pj}')">Delete</button>
@@ -1560,7 +1225,7 @@ function bindRoomDefaultForm() {
         e.preventDefault();
         const pattern = document.getElementById('rd-pattern').value.trim();
         if (!pattern) return;
-        post({
+        save({
             action:     'save-room-default',
             pattern,
             federated:   document.getElementById('rd-federated').checked,
@@ -1568,19 +1233,14 @@ function bindRoomDefaultForm() {
             autoMap:     document.getElementById('rd-automap').checked,
             filesEnabled: document.getElementById('rd-files').checked,
             visible:     document.getElementById('rd-visible').value.trim()
-        }).then(result => {
-            if (result && result.ok) {
-                document.getElementById('rd-pattern').value = '';
-                document.getElementById('rd-visible').value = '';
-                document.getElementById('rd-federated').checked = true;
-                document.getElementById('rd-autoaccept').checked = false;
-                document.getElementById('rd-automap').checked = false;
-                document.getElementById('rd-files').checked = true;
-                flashSaved('Rule saved ✓');
-                refresh();
-            } else if (result && result.error) {
-                alert(result.error);
-            }
+        }, 'Rule saved').then(result => {
+            if (!result || !result.ok) return;
+            document.getElementById('rd-pattern').value = '';
+            document.getElementById('rd-visible').value = '';
+            document.getElementById('rd-federated').checked = true;
+            document.getElementById('rd-autoaccept').checked = false;
+            document.getElementById('rd-automap').checked = false;
+            document.getElementById('rd-files').checked = true;
         });
     });
 }
@@ -1601,19 +1261,12 @@ function editRoomDefault(pattern) {
 
 function deleteRoomDefault(pattern) {
     if (!confirm('Delete the rule for "' + pattern + '"?')) return;
-    post({ action: 'delete-room-default', pattern }).then(result => {
-        if (result && result.ok) { flashSaved('Rule deleted ✓'); refresh(); }
-    });
+    save({ action: 'delete-room-default', pattern }, 'Rule deleted');
 }
 
 function applyRoomDefaultsNow() {
     if (!confirm('Apply the default-settings rules to every existing room now?')) return;
-    post({ action: 'apply-room-defaults-now' }).then(result => {
-        if (result && result.ok) {
-            flashSaved('Applied to ' + (result.applied || 0) + ' room(s) ✓');
-            refresh();
-        }
-    });
+    save({ action: 'apply-room-defaults-now' }, result => 'Applied to ' + (result.applied || 0) + ' room(s)');
 }
 
 // A small colored presence dot. show: '' (available), away/xa, dnd, chat; 'offline' = grey.
@@ -1656,19 +1309,6 @@ function tickClocks() {
     });
 }
 
-// ── Room search ───────────────────────────────────────────────────────────────
-
-function bindRoomSearch() {
-    document.getElementById('room-search').addEventListener('input', e => {
-        roomFilter = e.target.value.toLowerCase();
-        // Detail rows (settings panel, occupants) carry data-parent-jid and follow their room row.
-        document.querySelectorAll('#local-rooms-tbody tr[data-jid], #local-rooms-tbody tr[data-parent-jid]').forEach(row => {
-            const jid = row.dataset.jid || row.dataset.parentJid;
-            row.style.display = jid.toLowerCase().includes(roomFilter) ? '' : 'none';
-        });
-    });
-}
-
 // ── Generic list filtering + live counts ──────────────────────────────────────
 //
 // Any `.filter-input[data-target]` filters the rows of the table tbody (or the
@@ -1686,6 +1326,20 @@ function bindFilters() {
             applyAllFilters();
         });
     });
+}
+
+/**
+ * Renders rebuild rows and cards wholesale, so after any DOM change re-apply the active filters,
+ * counts and sorts. Runs before the browser paints, so a rebuilt list never flashes unfiltered;
+ * the changes it makes itself are dropped (takeRecords) so they don't trigger it again.
+ */
+function watchRenders() {
+    const observer = new MutationObserver(() => {
+        applyAllFilters();
+        sortAllTables();
+        observer.takeRecords();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
 }
 
 /** Re-applies every active filter and refreshes every count chip. Cheap; safe to call each poll. */
@@ -1710,14 +1364,12 @@ function applyAllFilters() {
     });
 }
 
-/** Filters top-level rows of a tbody; detail rows (editors/occupants) follow their parent. */
+/** Filters top-level rows of a tbody; a `.detail-row` (editor, occupants) follows the row above it. */
 function filterTbody(tbody, q) {
     let shown = 0, total = 0, lastVisible = true;
     tbody.querySelectorAll(':scope > tr').forEach(tr => {
         if (tr.querySelector('td.empty')) return;   // placeholder — leave untouched
-        const isDetail = tr.classList.contains('exposed-editor-row')
-                      || tr.classList.contains('route-detail');
-        if (isDetail) {
+        if (tr.classList.contains('detail-row')) {
             if (q != null) tr.style.display = lastVisible ? '' : 'none';
             return;
         }
@@ -1742,6 +1394,125 @@ function filterContainer(el, q) {
     return { shown, total };
 }
 
+// ── Sortable table columns ────────────────────────────────────────────────────
+//
+// Every `.fed-table` header cell with a label gets an arrow; clicking it cycles
+// ascending → descending → original order. A column whose values are all numbers sorts
+// numerically, anything else alphabetically (numeric-aware, so "room2" < "room10").
+// A cell's `data-sort` overrides its text (timestamps, byte sizes, names under badges).
+// A `.detail-row` (editor, occupants, cert warning) moves with the row above it;
+// placeholder/"… and N more" rows stay at the bottom. watchRenders() re-applies the
+// active sort after every render. The choice is remembered per table (tbody id, or the
+// header labels for generated tables).
+const SORT_STORE_KEY = 'federation.tableSort';
+let tableSorts = {};   // tableKey -> { col, dir: 1 | -1 }
+
+function bindTableSorting() {
+    try { tableSorts = JSON.parse(localStorage.getItem(SORT_STORE_KEY)) || {}; } catch (e) { tableSorts = {}; }
+    document.addEventListener('click', e => {
+        const th = e.target.closest('.fed-table th.sortable');
+        if (th) cycleSort(th);
+    });
+    sortAllTables();
+}
+
+function tableSortKey(table) {
+    const tbody = table.tBodies[0];
+    if (tbody && tbody.id) return tbody.id;
+    return Array.from(table.querySelectorAll('thead th'), th => th.dataset.label || th.textContent.trim()).join('|');
+}
+
+function cycleSort(th) {
+    const table = th.closest('table');
+    const key = tableSortKey(table);
+    const col = th.cellIndex;
+    const cur = tableSorts[key];
+    if (!cur || cur.col !== col) tableSorts[key] = { col, dir: 1 };
+    else if (cur.dir === 1)      tableSorts[key] = { col, dir: -1 };
+    else                         delete tableSorts[key];
+    try { localStorage.setItem(SORT_STORE_KEY, JSON.stringify(tableSorts)); } catch (e) { /* storage blocked */ }
+    sortAllTables();
+}
+
+/** Adds arrows to new headers and re-applies each table's sort. Cheap when nothing moved. */
+function sortAllTables() {
+    document.querySelectorAll('table.fed-table').forEach(table => {
+        decorateSortHeaders(table);
+        if (table.tBodies[0]) sortTable(table, tableSorts[tableSortKey(table)]);
+    });
+}
+
+function decorateSortHeaders(table) {
+    const key = tableSortKey(table);
+    const st = tableSorts[key];
+    table.querySelectorAll('thead th').forEach(th => {
+        if (!th.classList.contains('sortable')) {
+            const label = th.textContent.trim();
+            if (!label || 'nosort' in th.dataset) return;
+            th.dataset.label = label;
+            th.classList.add('sortable');
+            th.title = 'Sort by ' + label;
+            const arrow = document.createElement('span');
+            arrow.className = 'sort-arrow';
+            th.appendChild(arrow);
+        }
+        const active = st && st.col === th.cellIndex;
+        const arrow = th.querySelector('.sort-arrow');
+        const glyph = active ? (st.dir === 1 ? '▲' : '▼') : '↕';
+        if (arrow.textContent !== glyph) arrow.textContent = glyph;
+        th.classList.toggle('sorted', !!active);
+    });
+}
+
+function sortCellValue(tr, col) {
+    const td = tr.cells[col];
+    if (!td) return '';
+    const v = ('sort' in td.dataset) ? td.dataset.sort : td.textContent;
+    return v.trim();
+}
+
+function sortTable(table, st) {
+    const tbody = table.tBodies[0];
+    // Split rows into groups: a main row plus the detail rows that follow it.
+    const groups = [], pinned = [];
+    for (const tr of tbody.rows) {
+        const only = tr.cells.length === 1 ? tr.cells[0] : null;
+        if (only && (only.classList.contains('empty') || only.classList.contains('hint'))) pinned.push(tr);
+        else if (tr.classList.contains('detail-row') && groups.length) groups[groups.length - 1].rows.push(tr);
+        else groups.push({ main: tr, rows: [tr] });
+    }
+    if (groups.length < 2 && !pinned.length) return;
+    // Remember the order the renderer produced, so "unsorted" can restore it and ties stay stable.
+    let next = groups.reduce((m, g) => Math.max(m, Number(g.main.dataset.sortOrig) || 0), 0);
+    groups.forEach(g => { if (!g.main.dataset.sortOrig) g.main.dataset.sortOrig = String(++next); });
+    const orig = g => Number(g.main.dataset.sortOrig);
+
+    let cmp = (a, b) => orig(a) - orig(b);
+    if (st) {
+        const isBlank = v => v === '' || v === '—' || v === '-';
+        const vals = new Map(groups.map(g => [g, sortCellValue(g.main, st.col)]));
+        const numeric = groups.every(g => isBlank(vals.get(g)) || !isNaN(Number(vals.get(g))));
+        cmp = (a, b) => {
+            const va = vals.get(a), vb = vals.get(b);
+            if (isBlank(va) || isBlank(vb)) return (isBlank(va) - isBlank(vb)) || orig(a) - orig(b); // blanks last
+            const c = numeric ? Number(va) - Number(vb)
+                              : va.localeCompare(vb, undefined, { numeric: true, sensitivity: 'base' });
+            return (c * st.dir) || orig(a) - orig(b);
+        };
+    }
+    const wanted = groups.slice().sort(cmp).flatMap(g => g.rows).concat(pinned);
+    const current = Array.from(tbody.rows);
+    if (wanted.every((tr, i) => tr === current[i])) return;
+    // Moving a row drops focus from inputs inside it (a detail-row editor): put it back.
+    const focused = document.activeElement;
+    const sel = focused && tbody.contains(focused) ? [focused.selectionStart, focused.selectionEnd] : null;
+    wanted.forEach(tr => tbody.appendChild(tr));
+    if (sel && focused.isConnected && document.activeElement !== focused) {
+        focused.focus();
+        try { if (sel[0] != null) focused.setSelectionRange(sel[0], sel[1]); } catch (e) { /* not a text input */ }
+    }
+}
+
 // ── Local rooms ───────────────────────────────────────────────────────────────
 
 function renderLocalRooms(rooms) {
@@ -1755,7 +1526,6 @@ function renderLocalRooms(rooms) {
 
     tbody.innerHTML = rooms.map(r => {
         const expanded = r.federated && expandedRoomVis.has(r.jid);
-        const visible = r.jid.toLowerCase().includes(roomFilter) ? '' : 'display:none';
         // Occupant roster expander (local + remote virtual occupants, with live presence).
         const occList = r.occupantList || [];
         const occExpanded = expandedRoomOccupants.has(r.jid);
@@ -1776,11 +1546,11 @@ function renderLocalRooms(rooms) {
                         onclick="toggleRoomDetail('${jsArg(r.jid)}')">▸</button>`;
         }
         let row = `
-        <tr data-jid="${escHtml(r.jid)}" style="${visible}">
-            <td><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small>${renderRoomDuplicates(r)}</td>
+        <tr>
+            <td data-sort="${escHtml(r.name || r.jid)}"><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small>${renderRoomDuplicates(r)}</td>
             <td>${escHtml(r.description || '—')}</td>
-            <td>${occCell}</td>
-            <td>
+            <td data-sort="${occList.length > 0 ? occList.length : (Number(r.occupants) || 0)}">${occCell}</td>
+            <td data-sort="${r.federated ? 1 : 0}">
                 <label class="toggle">
                     <input type="checkbox" ${r.federated ? 'checked' : ''}
                            onchange="setRoomFederated('${jsArg(r.jid)}', this.checked)">
@@ -1795,12 +1565,11 @@ function renderLocalRooms(rooms) {
     }).join('');
 }
 
-let expandedRoomOccupants = new Set();
+const expandedRoomOccupants = new Set();
 
 function toggleRoomOccupants(jid) {
-    if (expandedRoomOccupants.has(jid)) expandedRoomOccupants.delete(jid);
-    else expandedRoomOccupants.add(jid);
-    refresh();
+    toggleExpanded(expandedRoomOccupants, jid);
+    renderLocalRooms(lastData.localRooms || []);
 }
 
 function renderRoomOccupants(r) {
@@ -1813,25 +1582,22 @@ function renderRoomOccupants(r) {
         return `<span style="display:inline-block;margin:2px 14px 2px 0;font-family:monospace;font-size:12px">`
              + `${presenceDot(o.show)}${escHtml(o.name)}${kind}${st}</span>`;
     }).join('') || '<span style="color:#999">no occupants</span>';
-    return `<tr class="route-detail" data-parent-jid="${escHtml(r.jid)}"><td colspan="5" style="background:#fafafa;padding:8px 24px">
+    return `<tr class="detail-row"><td colspan="5" style="background:#fafafa;padding:8px 24px">
         <div style="font-size:12px;color:#555;margin-bottom:4px">Occupants in ${escHtml(r.name || r.jid)} (local + federated):</div>
         ${items}
     </td></tr>`;
 }
 
 function setRoomFederated(jid, federated) {
-    post({ action: 'set-room', jid, federated: federated.toString() })
-        .then(() => { flashSaved('Saved ✓'); refresh(); });
+    save({ action: 'set-room', jid, federated: federated.toString() });
 }
 
 function setRoomAutoAccept(jid, autoAccept) {
-    post({ action: 'set-room-autoaccept', jid, autoAccept: autoAccept.toString() })
-        .then(() => { flashSaved('Saved ✓'); refresh(); });
+    save({ action: 'set-room-autoaccept', jid, autoAccept: autoAccept.toString() });
 }
 
 function setRoomFiles(jid, enabled) {
-    post({ action: 'set-room-files', jid, filesEnabled: enabled.toString() })
-        .then(() => { flashSaved('Saved ✓'); refresh(); });
+    save({ action: 'set-room-files', jid, filesEnabled: enabled.toString() });
 }
 
 // ── Mapping consent: inline rows + pending-requests panel ───────────────────────
@@ -1925,7 +1691,7 @@ function renderMappingRow(localJid, m) {
             break;
         case 'PENDING_OUT':
             badge = `<span class="mapping-state" style="color:#856404">⧗ awaiting accept</span>`;
-            buttons = `<button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="mappingAction('','${lj}','${dom}',true)">Re-request</button> ${unmap}`;
+            buttons = `<button class="btn-small btn-ghost" onclick="mappingAction('','${lj}','${dom}',true)">Re-request</button> ${unmap}`;
             break;
         case 'PENDING_IN':
             badge = `<span class="mapping-state" style="color:#856404">⧗ awaiting your approval</span>`;
@@ -1942,7 +1708,7 @@ function renderMappingRow(localJid, m) {
             break;
         case 'REJECTED':
             badge = `<span class="mapping-state mapping-disconnected">✖ rejected</span>`;
-            buttons = `<button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="mappingAction('','${lj}','${dom}',true)">Re-request</button> ${unmap}`;
+            buttons = `<button class="btn-small btn-ghost" onclick="mappingAction('','${lj}','${dom}',true)">Re-request</button> ${unmap}`;
             break;
         default:
             badge = `<span class="mapping-state">${escHtml(m.state || '')}</span>`;
@@ -1962,11 +1728,10 @@ function mappingAction(action, localJid, remoteDomain, reRequest) {
         const room = (lastData.localRooms || []).find(x => x.jid === localJid);
         const m = room && (room.mappings || []).find(x => x.remoteDomain === remoteDomain);
         if (!m) return;
-        post({ action: 'map-room', localJid, remoteJid: m.remoteRoomJid, remoteDomain })
-            .then(d => { if (d && d.error) alert(d.error); refresh(); });
+        save({ action: 'map-room', localJid, remoteJid: m.remoteRoomJid, remoteDomain }, 'Mapping re-requested');
         return;
     }
-    post({ action, localJid, remoteDomain }).then(refresh);
+    save({ action, localJid, remoteDomain });
 }
 
 function renderPendingRequests(reqs) {
@@ -2001,7 +1766,7 @@ function renderRoomDetailRow(r) {
         ? r.mappings.map(m => renderMappingRow(r.jid, m)).join('')
         : '<p class="empty" style="margin:6px 0">Not mapped yet — pick this room next to a remote room in the “Remote rooms” list below.</p>';
     return `
-    <tr class="exposed-editor-row room-detail-row" data-parent-jid="${jid}">
+    <tr class="detail-row exposed-editor-row room-detail-row">
         <td colspan="5">
             <div class="exposed-cols">
                 <div class="exposed-col" style="flex:0 0 230px">
@@ -2067,7 +1832,7 @@ function renderRoomVisSection(r) {
                 <input type="text" id="roomvis-add-${id}" placeholder="add a server not listed yet"
                        style="padding:4px 6px;font-size:12px;min-width:220px"
                        onkeydown="if(event.key==='Enter'){addRoomVisServer('${jsArg(r.jid)}');event.preventDefault();}">
-                <button class="btn-small" style="background:#e2e3e5;color:#383d41" onclick="addRoomVisServer('${jsArg(r.jid)}')">Add</button>
+                <button class="btn-small btn-ghost" onclick="addRoomVisServer('${jsArg(r.jid)}')">Add</button>
             </div>`;
     }
 
@@ -2079,7 +1844,6 @@ function renderRoomVisSection(r) {
             ${body}
             <div style="margin-top:8px">
                 <button class="btn-small btn-primary" onclick="saveRoomVis('${jsArg(r.jid)}')">Save</button>
-                <span id="roomvis-saved-${id}" style="display:none;color:#28a745;font-size:12px;margin-left:6px">Saved ✓</span>
             </div>`;
 }
 
@@ -2098,16 +1862,12 @@ function setRoomVisAll(jid, checked) {
 }
 
 function captureRoomVisEdits(jid) {
-    const boxes = document.querySelectorAll(`.roomvis-cb[data-jid="${cssEscape(jid)}"]`);
-    if (boxes.length === 0 && !editedRoomVis[jid]) return;
-    const set = editedRoomVis[jid] || new Set();
-    boxes.forEach(b => { if (b.checked) set.add(b.value); else set.delete(b.value); });
-    editedRoomVis[jid] = set;
+    const set = captureChecks(`.roomvis-cb[data-jid="${cssEscape(jid)}"]`, editedRoomVis[jid]);
+    if (set) editedRoomVis[jid] = set;
 }
 
 function toggleRoomDetail(jid) {
-    if (expandedRoomVis.has(jid)) { captureRoomVisEdits(jid); expandedRoomVis.delete(jid); }
-    else expandedRoomVis.add(jid);
+    toggleExpanded(expandedRoomVis, jid, captureRoomVisEdits);
     renderLocalRooms(lastData.localRooms || []);
 }
 
@@ -2129,14 +1889,8 @@ function addRoomVisServer(jid) {
 function saveRoomVis(jid) {
     captureRoomVisEdits(jid);
     const set = roomVisibleToSet(jid);
-    post({ action: 'set-room-visibility', jid, servers: Array.from(set).join(',') })
-        .then(result => {
-            if (result && result.ok) {
-                delete editedRoomVis[jid];
-                flashSaved('Saved ✓');
-                refresh();
-            }
-        });
+    save({ action: 'set-room-visibility', jid, servers: Array.from(set).join(',') })
+        .then(result => { if (result && result.ok) delete editedRoomVis[jid]; });
 }
 
 /**
@@ -2148,7 +1902,7 @@ function unmapRoom(localJid, remoteDomain) {
     if (!confirm('Remove mapping between ' + localJid + ' and ' + target + '?')) return;
     const params = { action: 'unmap-room', localJid };
     if (remoteDomain) params.remoteDomain = remoteDomain;
-    post(params).then(refresh);
+    save(params, 'Mapping removed');
 }
 
 // ── Remote rooms (collapsible per peer) ───────────────────────────────────────
@@ -2172,7 +1926,6 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
     container.innerHTML = peers.map(peer => {
         const rooms      = remoteRooms[peer];
         const peerId     = jidToElemId(peer);
-        const isCollapsed = collapsedPeers.has(peer);
 
         // Federated local rooms not already mapped to this specific peer.
         const mappedToPeer = new Set(
@@ -2207,9 +1960,9 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
                 }
                 return `
                 <tr>
-                    <td><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small></td>
+                    <td data-sort="${escHtml(r.name || r.jid)}"><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small></td>
                     <td>${escHtml(r.description || '—')}</td>
-                    <td style="min-width:220px">${mapCell}</td>
+                    <td style="min-width:220px" data-sort="${mapped ? escHtml(mapped.localJid) : ''}">${mapCell}</td>
                 </tr>`;
             }).join('');
 
@@ -2221,34 +1974,18 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
             ? `<span class="peer-map-count">${activeMappings} mapped</span>`
             : '';
 
-        return `
-        <div class="peer-section">
-            <div class="peer-section-header" onclick="togglePeer('${jsArg(peer)}')">
-                <span class="peer-collapse-icon" id="peer-icon-${peerId}">${isCollapsed ? '▶' : '▼'}</span>
-                <strong>${escHtml(peer)}</strong>
-                <span class="peer-room-count">${rooms.length} room(s)</span>
-                ${mapInfo}
-            </div>
-            <div class="peer-section-body" id="peer-body-${peerId}"
-                 style="${isCollapsed ? 'display:none' : ''}">
+        return card({
+            list: 'remote-rooms', key: peer, startCollapsed: true,
+            header: `<strong>${escHtml(peer)}</strong>
+                <span class="count-chip" title="${rooms.length} federated room(s)">${rooms.length}</span>
+                ${mapInfo}`,
+            body: `
                 <table class="fed-table">
                     <thead><tr><th>Remote room</th><th>Description</th><th>Local mapping</th></tr></thead>
                     <tbody>${rows}</tbody>
-                </table>
-            </div>
-        </div>`;
+                </table>`,
+        });
     }).join('');
-}
-
-function togglePeer(peer) {
-    const wasCollapsed = collapsedPeers.has(peer);
-    if (wasCollapsed) collapsedPeers.delete(peer); else collapsedPeers.add(peer);
-
-    const peerId = jidToElemId(peer);
-    const body   = document.getElementById('peer-body-' + peerId);
-    const icon   = document.getElementById('peer-icon-' + peerId);
-    if (body) body.style.display = wasCollapsed ? '' : 'none';
-    if (icon) icon.textContent   = wasCollapsed ? '▼' : '▶';
 }
 
 function mapRoom(remoteJid, remoteDomain, selId) {
@@ -2257,11 +1994,59 @@ function mapRoom(remoteJid, remoteDomain, selId) {
         alert('Please select a local room to map to.');
         return;
     }
-    post({ action: 'map-room', localJid: sel.value, remoteJid, remoteDomain })
-        .then(d => { if (d && d.error) alert(d.error); else flashSaved('Mapping requested ✓'); refresh(); });
+    save({ action: 'map-room', localJid: sel.value, remoteJid, remoteDomain }, 'Mapping requested');
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Collapsible cards remember, per list, every card the admin opened or closed ("list|key" ->
+// collapsed); a card never touched follows its list's startCollapsed.
+const cardState = new Map();
+
+/**
+ * A `.peer-section` card. With `list` and `key` its header opens and closes the body, and that
+ * survives re-renders; without them it is a plain, always-open card.
+ */
+function card({ list, key, startCollapsed = false, id, header, body }) {
+    const stateKey = list ? list + '|' + key : null;
+    const collapsed = stateKey != null && (cardState.has(stateKey) ? cardState.get(stateKey) : startCollapsed);
+    const attrs = (id ? ` id="${id}"` : '') + (stateKey ? ` data-card="${escHtml(stateKey)}"` : '');
+    const head = stateKey
+        ? `<div class="peer-section-header" onclick="toggleCard(this)"><span class="peer-collapse-icon"></span>`
+        : `<div class="peer-section-header" style="cursor:default">`;
+    return `
+        <div class="peer-section${collapsed ? ' collapsed' : ''}"${attrs}>
+            ${head}${header}</div>
+            <div class="peer-section-body">${body}</div>
+        </div>`;
+}
+
+function toggleCard(header) {
+    const sec = header.closest('.peer-section');
+    cardState.set(sec.dataset.card, sec.classList.toggle('collapsed'));
+}
+
+/** Opens or closes `key` in a Set of expanded rows; `capture` first keeps the edits of a panel being closed. */
+function toggleExpanded(set, key, capture) {
+    if (set.has(key)) {
+        if (capture) capture(key);
+        set.delete(key);
+    } else {
+        set.add(key);
+    }
+}
+
+/**
+ * Folds the checkboxes matching `selector` into `set` (a new Set when omitted): ticked values in,
+ * unticked out. Returns the set, or null when none of those checkboxes is on screen.
+ */
+function captureChecks(selector, set) {
+    const boxes = document.querySelectorAll(selector);
+    if (boxes.length === 0) return null;
+    set = set || new Set();
+    boxes.forEach(b => { if (b.checked) set.add(b.value); else set.delete(b.value); });
+    return set;
+}
 
 function jidToElemId(jid) {
     return jid.replace(/[^a-zA-Z0-9]/g, '_');
@@ -2277,6 +2062,20 @@ function flashSaved(label) {
     t.classList.add('show');
     clearTimeout(_toastTimer);
     _toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+/**
+ * Posts an admin action and reports the outcome: a {ok} reply flashes `okLabel` (a string, or a
+ * function of the reply), an {error} reply is shown in an alert, and either way the page refreshes
+ * to the server's state. Resolves to the reply, so callers can drop pending edits once saved.
+ */
+function save(params, okLabel = 'Saved') {
+    return post(params).then(result => {
+        if (result && result.ok) flashSaved(typeof okLabel === 'function' ? okLabel(result) : okLabel);
+        else if (result && result.error) alert(result.error);
+        if (result) refresh();
+        return result;
+    });
 }
 
 function post(params) {

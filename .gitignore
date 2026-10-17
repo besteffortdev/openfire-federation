@@ -15,3 +15,4 @@ downloads/
 *.apk
 docs/takchat-xmpp-behavior.md
 /test/
+create-rooms.sh

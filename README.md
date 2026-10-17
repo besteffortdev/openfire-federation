@@ -151,10 +151,12 @@ The **Federation** tab has three sub‑views:
 |-----|----------------|
 | **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
 | **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
-| **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers. |
+| **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers, one collapsed card per server showing how many federated rooms it offers. |
 | **Users** | *Contact Sharing*: local groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups. *Sent lists*: what each server currently receives. |
 
-The page auto‑refreshes every 5 seconds.
+Every table sorts by any column: click its header for ascending, again for descending, a third time for
+the original order (numbers sort as numbers, anything else alphabetically; the choice is remembered per
+browser). Each list has a filter box. The page updates live as things change.
 
 ---
 
