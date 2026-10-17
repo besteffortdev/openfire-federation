@@ -115,14 +115,14 @@
         .count-chip:empty { display: none; }
 
         /* ══ Filter inputs ═══════════════════════════════════════════ */
-        .filter-input, #room-search, .list-search {
+        .filter-input, .list-search {
             margin-left: auto; width: 220px; max-width: 50%;
             padding: 6px 11px 6px 30px; border: 1px solid var(--line);
             border-radius: 999px; font: inherit; font-size: 12.5px; color: var(--fg);
             background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2398a2b3' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E") no-repeat 10px center;
             transition: border-color .12s ease, box-shadow .12s ease;
         }
-        .filter-input:focus, #room-search:focus, .list-search:focus {
+        .filter-input:focus, .list-search:focus {
             outline: none; border-color: var(--primary);
             box-shadow: 0 0 0 3px var(--primary-soft);
         }
@@ -139,6 +139,11 @@
             border-bottom: 1px solid var(--line); font-weight: 600;
             font-size: 11.5px; letter-spacing: .03em; text-transform: uppercase; color: var(--muted);
         }
+        .fed-table thead th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+        .fed-table thead th.sortable:hover { color: var(--fg); }
+        .fed-table thead th.sorted { color: var(--primary); }
+        .sort-arrow { display: inline-block; margin-left: 5px; font-size: 9px; color: var(--faint); }
+        .fed-table thead th.sorted .sort-arrow { color: var(--primary); }
         .fed-table td {
             padding: 10px 14px; border-bottom: 1px solid var(--line-soft); vertical-align: middle;
         }
@@ -263,6 +268,9 @@
         }
         .peer-section-header:hover { background: var(--surface-2); }
         .peer-collapse-icon { font-size: 9px; color: var(--faint); width: 10px; }
+        .peer-collapse-icon::before { content: '▼'; }
+        .peer-section.collapsed .peer-collapse-icon::before { content: '▶'; }
+        .peer-section.collapsed > .peer-section-body { display: none; }
         .peer-room-count    { color: var(--muted); font-size: 12px; }
         .peer-map-count     {
             margin-left: auto; background: var(--green-soft); color: var(--green-ink);
@@ -485,7 +493,7 @@
                         <input type="number" id="keepalive-input" class="num-input"
                                min="30" max="3600" step="10">
                         <span class="setting-state">s</span>
-                        <button class="btn btn-primary btn-small" onclick="saveKeepalive()">Save</button>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('keepalive-input')">Save</button>
                     </div>
                 </div>
                 <div class="setting">
@@ -502,7 +510,7 @@
                         <input type="number" id="reconnect-input" class="num-input"
                                min="5" max="300" step="5">
                         <span class="setting-state">s</span>
-                        <button class="btn btn-primary btn-small" onclick="saveReconnect()">Save</button>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('reconnect-input')">Save</button>
                     </div>
                 </div>
                 <div class="setting">
@@ -520,7 +528,7 @@
                         <input type="number" id="mapping-ping-input" class="num-input"
                                min="0" max="3600" step="5">
                         <span class="setting-state">s</span>
-                        <button class="btn btn-primary btn-small" onclick="saveMappingPing()">Save</button>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('mapping-ping-input')">Save</button>
                     </div>
                 </div>
             </div>
@@ -541,7 +549,7 @@
                     </div>
                     <div class="setting-ctl">
                         <label class="toggle">
-                            <input type="checkbox" id="allowlist-toggle" onchange="saveAllowlist()">
+                            <input type="checkbox" id="allowlist-toggle" onchange="saveSetting('allowlist-toggle')">
                             <span class="slider"></span>
                         </label>
                         <span id="allowlist-state" class="setting-state">…</span>
@@ -561,7 +569,7 @@
                     </div>
                     <div class="setting-ctl">
                         <label class="toggle">
-                            <input type="checkbox" id="traversal-toggle" onchange="saveTraversal()">
+                            <input type="checkbox" id="traversal-toggle" onchange="saveSetting('traversal-toggle')">
                             <span class="slider"></span>
                         </label>
                         <span id="traversal-state" class="setting-state">…</span>
@@ -579,7 +587,7 @@
                     </div>
                     <div class="setting-ctl">
                         <label class="toggle">
-                            <input type="checkbox" id="directrelay-toggle" onchange="saveDirectRelay()">
+                            <input type="checkbox" id="directrelay-toggle" onchange="saveSetting('directrelay-toggle')">
                             <span class="slider"></span>
                         </label>
                         <span id="directrelay-state" class="setting-state">…</span>
@@ -597,7 +605,7 @@
                     </div>
                     <div class="setting-ctl">
                         <label class="toggle">
-                            <input type="checkbox" id="probesub-toggle" onchange="saveProbeOnSubscribe()">
+                            <input type="checkbox" id="probesub-toggle" onchange="saveSetting('probesub-toggle')">
                             <span class="slider"></span>
                         </label>
                         <span id="probesub-state" class="setting-state">…</span>
@@ -666,7 +674,7 @@
                 <span class="count-chip" data-count-for="local-rooms-tbody"></span>
             </div>
             <div class="section-box-body" style="padding-bottom:0">
-                <input type="text" id="room-search" placeholder="Filter rooms…">
+                <input type="text" id="room-search" class="filter-input" data-target="local-rooms-tbody" placeholder="Filter rooms…">
             </div>
             <div class="table-scroll">
                 <table class="fed-table">
@@ -794,7 +802,7 @@
                     back. A server behind an untrusted link is listed only when that link allows contact lists
                     (the untrusted peer's settings panel on the Peer Servers tab).
                 </p>
-                <input type="text" id="group-search" class="list-search" placeholder="Filter groups…">
+                <input type="text" id="group-search" class="filter-input" data-target="local-groups-tbody" placeholder="Filter groups…">
             </div>
             <div class="table-scroll">
                 <table class="fed-table">
@@ -878,7 +886,7 @@
                     </div>
                     <div class="setting-ctl">
                         <label class="toggle">
-                            <input type="checkbox" id="files-toggle" onchange="saveFilesEnabled()">
+                            <input type="checkbox" id="files-toggle" onchange="saveSetting('files-toggle')">
                             <span class="slider"></span>
                         </label>
                         <span id="files-state" class="setting-state">…</span>
@@ -897,7 +905,7 @@
                         <input type="number" id="files-maxsize-input" class="num-input"
                                min="1" max="2048" step="1">
                         <span class="setting-state">MB</span>
-                        <button class="btn btn-primary btn-small" onclick="saveFilesMaxSize()">Save</button>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-maxsize-input')">Save</button>
                     </div>
                 </div>
                 <div class="setting">
@@ -913,7 +921,7 @@
                         <input type="number" id="files-retention-input" class="num-input"
                                min="1" max="3650" step="1">
                         <span class="setting-state">days</span>
-                        <button class="btn btn-primary btn-small" onclick="saveFilesRetention()">Save</button>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-retention-input')">Save</button>
                     </div>
                 </div>
                 <div class="setting">
@@ -930,7 +938,7 @@
                         <input type="number" id="files-log-retention-input" class="num-input"
                                min="1" max="3650" step="1">
                         <span class="setting-state">days</span>
-                        <button class="btn btn-primary btn-small" onclick="saveFilesLogRetention()">Save</button>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-log-retention-input')">Save</button>
                     </div>
                 </div>
                 <div class="setting">
@@ -946,7 +954,7 @@
                         <input type="text" id="files-storagedir-input" class="num-input"
                                style="width:240px;text-align:left"
                                placeholder="/var/lib/openfire/federation-files">
-                        <button class="btn btn-primary btn-small" onclick="saveFilesStorageDir()">Save</button>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-storagedir-input')">Save</button>
                     </div>
                 </div>
                 <div class="setting">
@@ -964,7 +972,7 @@
                         <input type="text" id="files-extensions-input" class="num-input"
                                style="width:360px;text-align:left"
                                placeholder="jpg,jpeg,png,gif,pdf,txt,...">
-                        <button class="btn btn-primary btn-small" onclick="saveFilesAllowedExtensions()">Save</button>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-extensions-input')">Save</button>
                     </div>
                 </div>
                 <div class="setting">
@@ -982,7 +990,7 @@
                     </div>
                     <div class="setting-ctl">
                         <label class="toggle">
-                            <input type="checkbox" id="files-av-toggle" onchange="saveFilesAvEnabled()">
+                            <input type="checkbox" id="files-av-toggle" onchange="saveSetting('files-av-toggle')">
                             <span class="slider"></span>
                         </label>
                         <span id="files-av-state" class="setting-state">…</span>

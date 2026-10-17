@@ -1018,16 +1018,8 @@ public class FederationManager {
         // Every mapping is gone — drop all virtual occupants in the room (incl. hub-relayed
         // users tracked under a relay domain, which a per-domain evict would miss).
         evictAllVirtualOccupantsInRoom(localJid);
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         for (RoomMapping m : mappings) {
-            String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.roomUnmapping(
-                              nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid(), m.token()));
-            } catch (Exception e) {
-                Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
-            }
+            sendRoomUnmap(localJid, m);
         }
     }
 
@@ -1041,6 +1033,11 @@ public class FederationManager {
         // (covers hub-relayed cross-spoke users); otherwise drop this remote's users by origin
         // and propagate their leaves to the still-active spokes. Same path as mapping disable.
         evictForInactiveMapping(localJid, remoteDomain);
+        sendRoomUnmap(localJid, m);
+    }
+
+    /** Tells the remote end of {@code m} that localJid's mapping to it is gone, via the current next hop. */
+    private void sendRoomUnmap(String localJid, RoomMapping m) {
         String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
         String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
         try {
@@ -1822,9 +1819,11 @@ public class FederationManager {
      * presence being relayed actually carries XEP-0153's {@code vcard-temp:x:update} photo hash, and
      * what it is. Distinguishes "no x:update element at all" (client didn't advertise one — e.g. a
      * bare subscribe/subscribed presence, or one from a client that has nothing to advertise) from
-     * "x:update present but empty" (client is signaling no avatar) from an actual hash.
+     * "x:update present but empty" (client is signaling no avatar) from an actual hash. The
+     * receiving end of presence-forward logs the same value, so a hash present at the origin can be
+     * confirmed to have survived the hop-to-hop relay unmodified.
      */
-    private String avatarHashOf(Presence pres) {
+    public static String avatarHashOf(Presence pres) {
         for (Element xEl : pres.getElement().elements("x")) {
             if (!"vcard-temp:x:update".equals(xEl.getNamespaceURI())) continue;
             Element photo = xEl.element("photo");
