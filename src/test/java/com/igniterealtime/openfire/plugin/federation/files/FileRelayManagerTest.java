@@ -7,11 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The two gates between a peer-supplied string and a path in the spool (CERT FIO16-J). A transfer
- * id reaches {@code baseDir.resolve(id)} only through {@code isHexId}; a file name is shown and
- * stored only through {@code sanitizeFileName}.
- */
+/** The checks between a peer-supplied id or file name and a path in the storage directory (CERT FIO16-J). */
 class FileRelayManagerTest {
 
     private static final String ID = "0123456789abcdef".repeat(4);

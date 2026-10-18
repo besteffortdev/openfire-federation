@@ -380,12 +380,21 @@ has a screenshot‑level admin walkthrough.
 
 ```
 src/main/java/.../federation/
-  FederationPlugin.java         Openfire entry point
-  FederationManager.java        orchestrator; sending side of the protocol
+  FederationPlugin.java         Openfire entry point; undoes a failed start
+  FederationManager.java        coordinator: peers, room mappings, gossip, trust
+  PresenceRelay.java            local presence and PEP data to remote contacts
+  OccupantSync.java             remote occupants: roster sync and eviction
+  MappingProbe.java             end-to-end mapping probes
+  CertificatePinning.java       trust on first use for peers' S2S keys
+  ContactListManager.java       contact-list sharing
   FederatedRoomManager.java     local/remote room state + virtual occupants
   FederationRoutingTable.java   distance-vector routing
   S2SMonitor.java               peer poll, keepalive, reconnect, idle-reaper handling
-  protocol/                     IQ handler + stanza factory
+  FederationApiServlet.java     JSON API behind the admin console
+  protocol/                     inbound IQ dispatch, room traffic, 1:1 traffic, validation;
+                                outbound interceptor, stanza factory, sender
+  files/                        HTTP-upload file relay
+src/test/java/                  unit tests (mvn -o test)
 src/main/resources/
   plugin.xml                    Openfire plugin descriptor
   readme.html                   in-console usage documentation

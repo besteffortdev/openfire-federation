@@ -3,20 +3,16 @@ package com.igniterealtime.openfire.plugin.federation.protocol;
 import java.util.Set;
 
 /**
- * Which of a room's mappings a hub sends a relayed payload on to. Kept apart from
- * {@link FederationIQHandler#fanOutToOtherMappings} so the rules can be exercised without a server.
+ * Decides which of a room's mappings a hub relays a payload to. Kept apart from
+ * {@link FederationIQHandler} so the rules can be unit-tested without a running server.
  */
 final class RoomFanOut {
 
     private RoomFanOut() {}
 
     /**
-     * Why the hub does not send the payload to the mapping on {@code spoke}, or null to send it.
-     *
-     * @param fromDomain  the neighbour the payload arrived from
-     * @param viaServers  the relay trail it arrived with
-     * @param hubs        the {@link FederationStanzaFactory#ATTR_HUBS} trail it arrived with
-     * @param payloadHome the home server of the user it is about, or empty if unknown
+     * Why the hub must not relay the payload to the mapping on {@code spoke}, or null to relay it.
+     * {@code hubs} is the {@link FederationStanzaFactory#ATTR_HUBS} trail the payload arrived with.
      */
     static String skipReason(String spoke, String fromDomain, Set<String> viaServers, String hubs,
                              String payloadHome) {

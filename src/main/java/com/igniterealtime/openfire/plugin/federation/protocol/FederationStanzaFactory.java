@@ -1,73 +1,40 @@
 package com.igniterealtime.openfire.plugin.federation.protocol;
 
+import com.igniterealtime.openfire.plugin.federation.ContactListManager;
 import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
 import org.dom4j.Element;
-import org.jivesoftware.openfire.RoutingTable;
 import org.jivesoftware.openfire.XMPPServer;
-import org.jivesoftware.openfire.session.ClientSession;
-import com.igniterealtime.openfire.plugin.federation.ContactListManager;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
-import org.xmpp.packet.Message;
 import org.xmpp.packet.Packet;
-import org.xmpp.packet.Presence;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.List;
 
 /**
- * Builds the IQ stanzas that implement our federation gossip protocol.
- *
- * Namespace: urn:xmpp:federation:1
- *
- * Message types:
- *   peer-announce       — "I exist and I speak this protocol version"
- *   routing-update      — distance-vector table from the sender
- *   room-advertisement  — list of rooms the sender has tagged as federatable
- *   room-mapping        — bilateral room pairing confirmation
- *   muc-forward         — a MUC packet being relayed through the overlay
- *   contact-list        — the contacts one server shares with another
+ * Builds the IQ stanzas of the federation protocol ({@value #NS}) and holds its element and
+ * attribute vocabulary. Every builder here has a matching reader in {@link FederationIQHandler} or
+ * the file relay. The wire format is specified in {@code docs/protocol/}.
  */
 public final class FederationStanzaFactory {
 
     public static final String NS = "urn:xmpp:federation:1";
 
-    // ── Protocol vocabulary ───────────────────────────────────────────────────
-    // The element and attribute names this protocol is made of. Named rather than repeated so the
-    // wire format has one definition instead of ~90 identical string literals spread over three
-    // classes, and so a reader can see the whole vocabulary in one place. Every writer here has a
-    // matching reader in FederationIQHandler or FileRelayManager; a typo in either used to be
-    // silent, producing a stanza the other side simply ignored.
-
-    /** The IQ child element every federation stanza hangs off, qualified by {@link #NS}. */
+    /** The IQ child element that carries every federation payload. */
     public static final String ELEMENT = "federation";
 
     /** Domain a payload originated at. */
     public static final String ATTR_ORIGIN = "origin";
 
-    /** Domain a payload is ultimately addressed to, as opposed to the next hop it is sent to. */
+    /** Domain a payload is finally addressed to, as opposed to the next hop. */
     public static final String ATTR_DESTINATION = "destination";
 
-    /**
-     * Deliberately overloaded, and worth knowing about before reusing it: on a {@code routing-update}
-     * entry this is the single next-hop domain of one route, whereas on a room advertisement or a
-     * mapping probe it is the accumulated hop trail used for loop prevention. Same wire name, two
-     * readings — which one applies is decided by the element it sits on.
-     */
+    /** On a routing-update entry, the route's next hop; elsewhere, the hop trail used to stop loops. */
     public static final String ATTR_VIA = "via";
-    /** routing-update entry flag: the route crosses an untrusted edge (see RouteEntry#edge). */
+    /** Routing-update entry flag: the route crosses an untrusted peer. */
     public static final String ATTR_EDGE = "edge";
-    /**
-     * muc-forward: comma-separated servers whose copy of the room already has the payload and has sent
-     * it on to its own mappings — the originating server, then each hub that fanned it out. Unlike
-     * {@link #ATTR_VIA}, which a hub resets so relays on the next leg are not blocked, this trail is
-     * never reset, so it is what stops a payload circling a ring or mesh of mapped rooms. Kept per
-     * server, not per room, like the rest of the fan-out rules. Absent from peers before 1.11.2,
-     * which neither send nor carry it.
-     */
+    /** muc-forward: servers that already delivered and fanned out the payload; never reset, unlike via. */
     public static final String ATTR_HUBS = "hubs";
     /** Most entries a {@link #ATTR_HUBS} trail may carry; a longer one is a loop that escaped, or abuse. */
     public static final int MAX_HUBS = 32;
@@ -78,29 +45,26 @@ public final class FederationStanzaFactory {
     /** Room mapping: our side of the pairing. */
     public static final String ATTR_LOCAL = "local";
 
-    /** Epoch-millis send stamp, echoed back by a mapping-pong so the sender can compute an RTT. */
+    /** Send time in epoch milliseconds, echoed back by mapping-pong to measure the round trip. */
     public static final String ATTR_TS = "ts";
 
-    /**
-     * File relay: the transfer id (the SHA-256 of the upload URL). Distinct from the {@code id} of
-     * a PEP {@code <item/>}, which is XEP-0060's and is deliberately not shared with this constant.
-     */
+    /** File relay: the transfer id, which is the SHA-256 of the upload URL. */
     public static final String ATTR_ID = "id";
 
-    /**
-     * File relay: the per-share capability. Minted by the origin, published in the {@code fed-file}
-     * annotation (so exactly the servers that receive the announcing message learn it) and echoed
-     * back in a {@code file-request}, which the holder will not answer without it. The relay id is
-     * derived from the upload URL and is therefore visible to every server on the message path,
-     * which makes it an identifier, not a credential — this attribute is the credential.
-     */
+    /** File relay: the per-share capability a file-request must echo; the transfer id alone is public. */
     public static final String ATTR_TOKEN = "token";
 
-    private static final Logger Log = LoggerFactory.getLogger(FederationStanzaFactory.class);
+    /** muc-forward: the mapped server the payload enters the destination through. */
+    public static final String ATTR_SRC = "src";
+
+    /** muc-forward: the room on the destination to deliver into. */
+    public static final String ATTR_TARGET_ROOM = "targetRoom";
+
+    private static final String NS_ORIGIN_ELEMENT = "fed-origin";
 
     private FederationStanzaFactory() {}
 
-    /** Creates a set IQ addressed to toDomain from our local server domain. */
+    /** A set IQ from this server's domain to {@code toDomain}. */
     private static IQ base(String toDomain) {
         IQ iq = new IQ(IQ.Type.set);
         iq.setFrom(localJID());
@@ -112,29 +76,31 @@ public final class FederationStanzaFactory {
         return new JID(null, XMPPServer.getInstance().getServerInfo().getXMPPDomain(), null);
     }
 
-    // ── peer-announce ──────────────────────────────────────────────────────────
-
-    public static IQ peerAnnounce(String toDomain) {
-        return peerAnnounce(toDomain, false, false);
+    /** Adds the federation element to {@code iq} and returns its payload child named {@code name}. */
+    private static Element payload(IQ iq, String name) {
+        return iq.setChildElement(ELEMENT, NS).addElement(name);
     }
 
-    public static IQ peerAnnounce(String toDomain, boolean isReply) {
-        return peerAnnounce(toDomain, isReply, false);
+    /** As {@link #payload}, for a payload routed hop by hop: it names its final destination and origin. */
+    private static Element routedPayload(IQ iq, String name, String destination, String origin) {
+        Element routed = payload(iq, name);
+        routed.addAttribute(ATTR_DESTINATION, destination);
+        routed.addAttribute(ATTR_ORIGIN, origin);
+        return routed;
+    }
+
+    /** Adds the attribute only when {@code value} is neither null nor empty. */
+    private static void addIfPresent(Element el, String name, String value) {
+        if (value != null && !value.isEmpty()) el.addAttribute(name, value);
     }
 
     /**
-     * @param isReply marks a keepalive sent in response to another peer-announce.
-     *        The receiver does not reply to a reply, so one side's keepalive timer
-     *        warms BOTH S2S directions (each direction is a separate socket with its
-     *        own idle timer) without an endless ping-pong.
-     * @param untrusted our trust stance toward this peer. Trust is a property of the LINK:
-     *        the receiver compares it with its own and blocks the link (TRUST_MISMATCH) if
-     *        they disagree. Absent attribute = trusted (back-compat with pre-1.3.39 peers).
+     * A peer-announce carrying our trust stance toward the peer. A reply is never answered, so a
+     * keepalive warms both S2S directions without a ping-pong.
      */
     public static IQ peerAnnounce(String toDomain, boolean isReply, boolean untrusted) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element ann = fed.addElement("peer-announce");
+        Element ann = payload(iq, "peer-announce");
         if (isReply) ann.addAttribute("reply", "true");
         if (untrusted) ann.addAttribute("untrusted", "true");
         ann.addElement("server").setText(localJID().getDomain());
@@ -144,29 +110,20 @@ public final class FederationStanzaFactory {
 
     public static IQ peerWithdraw(String toDomain) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        fed.addElement("peer-withdraw");
+        payload(iq, "peer-withdraw");
         return iq;
     }
 
-    /**
-     * Tells the remote that we have administratively DISABLED this connection.
-     * Unlike peer-withdraw, the receiver records a persistent REMOTE_DISABLED state it
-     * cannot lift itself, and we re-assert this in response to its peer-announce.
-     */
+    /** Tells the remote that our admin disabled the link; it records REMOTE_DISABLED until we re-enable. */
     public static IQ peerDisable(String toDomain) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        fed.addElement("peer-disable");
+        payload(iq, "peer-disable");
         return iq;
     }
-
-    // ── routing-update ─────────────────────────────────────────────────────────
 
     public static IQ routingUpdate(String toDomain, Collection<RouteEntry> table) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element upd = fed.addElement("routing-update");
+        Element upd = payload(iq, "routing-update");
         for (RouteEntry entry : table) {
             Element e = upd.addElement("entry");
             e.addAttribute(ATTR_DESTINATION, entry.destination());
@@ -177,53 +134,30 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
-    /**
-     * Asks the recipient to re-send its routing table and room cache.  Sent when we
-     * lose routes so alternate paths re-form — triggered-only distance-vector would
-     * otherwise never re-learn a destination reachable via a different neighbour.
-     */
+    /** Asks the recipient to re-send its routing table and room cache, so lost routes re-form. */
     public static IQ routingSolicit(String toDomain) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        fed.addElement("routing-solicit");
+        payload(iq, "routing-solicit");
         return iq;
     }
 
-    // ── room-advertisement ────────────────────────────────────────────────────
-
-    /**
-     * Builds a room-advertisement stanza for rooms owned by this server.
-     * No origin attribute — the receiver knows the rooms came from us.
-     */
+    /** A room-advertisement for this server's own rooms. */
     public static IQ roomAdvertisement(String toDomain, List<FederatedRoom> rooms) {
-        return roomAdvertisement(toDomain, rooms, null);
+        return roomAdvertisement(toDomain, rooms, null, null);
     }
 
-    /**
-     * Builds a relayed room-advertisement carrying an origin attribute so the
-     * receiver knows the rooms belong to {@code originDomain}, not to the
-     * immediate sender.  The {@code via} trail (comma-separated server domains)
-     * prevents flooding loops across multi-hop paths.
-     */
-    public static IQ roomAdvertisement(String toDomain, List<FederatedRoom> rooms, String originDomain) {
-        return roomAdvertisement(toDomain, rooms, originDomain, null);
-    }
-
+    /** A room-advertisement relayed for {@code originDomain}, whose trail so far is {@code via}. */
     public static IQ roomAdvertisement(String toDomain, List<FederatedRoom> rooms,
                                        String originDomain, String via) {
         IQ iq = base(toDomain);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element adv = fed.addElement("room-advertisement");
+        Element adv = payload(iq, "room-advertisement");
         if (originDomain != null) adv.addAttribute(ATTR_ORIGIN, originDomain);
-        if (via != null && !via.isEmpty()) adv.addAttribute(ATTR_VIA, via);
+        addIfPresent(adv, ATTR_VIA, via);
         for (FederatedRoom room : rooms) {
             Element r = adv.addElement("room");
             r.addAttribute("jid", room.jid());
             r.addAttribute("name", room.name()        != null ? room.name()        : "");
             r.addAttribute("description", room.description() != null ? room.description() : "");
-            // Per-room visibility ACL travels with the ad so every relay enforces it. The attribute
-            // is emitted only for a non-empty ACL; an empty ACL means "visible to nobody", so such a
-            // room is filtered out upstream (roomVisibleAtHop) and never reaches serialization here.
             if (room.visibleTo() != null && !room.visibleTo().isEmpty()) {
                 r.addAttribute("visibleto", String.join(",", room.visibleTo()));
             }
@@ -231,111 +165,75 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
-    // ── room-mapping ──────────────────────────────────────────────────────────
-
     /**
-     * Notifies a remote server that we are pairing our local room with one of
-     * their rooms.  The IQ is addressed to {@code nextHop} (our direct S2S
-     * neighbour); {@code destination} carries the final target domain and
-     * {@code originDomain} carries the initiating server so intermediate hops
-     * can relay without losing the original sender identity.
-     *
-     * The receiver interprets:
-     *   local  → the JID of the room on the originating server
-     *   remote → the JID of the room on the destination server (receiver's local)
-     *
-     * So the destination stores: localRoomJid=remote, remoteRoomJid=local, remoteDomain=origin.
+     * A mapping request from our room {@code localJid} to {@code remoteJid} on {@code destination},
+     * sent to {@code nextHop} and relayed hop by hop.
      */
     public static IQ roomMapping(String nextHop, String destination, String originDomain,
                                  String localJid, String remoteJid) {
-        IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element mapping = fed.addElement("room-mapping");
-        mapping.addAttribute(ATTR_DESTINATION, destination);
-        mapping.addAttribute(ATTR_ORIGIN, originDomain);
-        Element map = mapping.addElement("map");
-        map.addAttribute(ATTR_LOCAL, localJid);
-        map.addAttribute(ATTR_REMOTE, remoteJid);
-        return iq;
+        return mappingLifecycle("room-mapping", nextHop, destination, originDomain,
+                                localJid, remoteJid, null, null);
     }
 
-    /**
-     * Notifies a remote server that a previously confirmed mapping has been
-     * dissolved by the local admin.  Routed hop-by-hop like room-mapping.
-     */
-    public static IQ roomUnmapping(String nextHop, String destination, String originDomain,
-                                   String localJid, String remoteJid) {
-        return roomUnmapping(nextHop, destination, originDomain, localJid, remoteJid, null);
-    }
-
+    /** Tells the remote that a mapping was removed here; relayed hop by hop like a request. */
     public static IQ roomUnmapping(String nextHop, String destination, String originDomain,
                                    String localJid, String remoteJid, String token) {
-        return mappingLifecycle("room-unmap", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+        return mappingLifecycle("room-unmap", nextHop, destination, originDomain,
+                                localJid, remoteJid, token, null);
     }
 
-    // ── room-mapping lifecycle (consent handshake) ─────────────────────────────
-
-    /** Accept a mapping request — carries the minted consent {@code token}. */
+    /** Accepts a mapping request, carrying the newly minted consent token. */
     public static IQ roomMappingAccept(String nextHop, String destination, String originDomain,
                                        String localJid, String remoteJid, String token) {
-        return mappingLifecycle("room-mapping-accept", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+        return mappingLifecycle("room-mapping-accept", nextHop, destination, originDomain,
+                                localJid, remoteJid, token, null);
     }
 
-    /** Reject a mapping request (optional {@code reason}). */
+    /** Rejects a mapping request, with an optional reason. */
     public static IQ roomMappingReject(String nextHop, String destination, String originDomain,
                                        String localJid, String remoteJid, String reason) {
-        return mappingLifecycle("room-mapping-reject", nextHop, destination, originDomain, localJid, remoteJid, null, reason);
+        return mappingLifecycle("room-mapping-reject", nextHop, destination, originDomain,
+                                localJid, remoteJid, null, reason);
     }
 
-    /** Disable an active mapping — the peer will show "disabled by peer". Carries the {@code token}. */
+    /** Disables an active mapping; the peer shows it as disabled by peer. */
     public static IQ roomMappingDisable(String nextHop, String destination, String originDomain,
                                         String localJid, String remoteJid, String token) {
-        return mappingLifecycle("room-mapping-disable", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+        return mappingLifecycle("room-mapping-disable", nextHop, destination, originDomain,
+                                localJid, remoteJid, token, null);
     }
 
-    /** Re-enable a disabled mapping. Carries the {@code token}. */
+    /** Re-enables a mapping we disabled. */
     public static IQ roomMappingEnable(String nextHop, String destination, String originDomain,
                                        String localJid, String remoteJid, String token) {
-        return mappingLifecycle("room-mapping-enable", nextHop, destination, originDomain, localJid, remoteJid, token, null);
+        return mappingLifecycle("room-mapping-enable", nextHop, destination, originDomain,
+                                localJid, remoteJid, token, null);
     }
 
-    /** Shared builder for the hop-by-hop mapping lifecycle IQs (same shape as room-mapping). Also
-     *  used by relays to re-emit an unchanged lifecycle IQ toward the next hop. */
+    /** Builds any mapping request or lifecycle IQ; relays also use it to pass one on unchanged. */
     public static IQ mappingLifecycle(String element, String nextHop, String destination,
                                       String originDomain, String localJid, String remoteJid,
                                       String token, String reason) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element mapping = fed.addElement(element);
-        mapping.addAttribute(ATTR_DESTINATION, destination);
-        mapping.addAttribute(ATTR_ORIGIN, originDomain);
-        if (token  != null && !token.isEmpty())  mapping.addAttribute("token", token);
-        if (reason != null && !reason.isEmpty()) mapping.addAttribute("reason", reason);
+        Element mapping = routedPayload(iq, element, destination, originDomain);
+        addIfPresent(mapping, "token", token);
+        addIfPresent(mapping, "reason", reason);
         Element map = mapping.addElement("map");
         map.addAttribute(ATTR_LOCAL, localJid);
         map.addAttribute(ATTR_REMOTE, remoteJid);
         return iq;
     }
 
-    // ── mapping-ping / mapping-pong (end-to-end mapping path probe) ───────────
-
     /**
-     * Lightweight end-to-end probe for an active room mapping, relayed hop-by-hop
-     * toward {@code destination}, which answers with a mapping-pong.  A pong coming
-     * back proves the full round trip works — the only signal that catches a path
-     * silently broken mid-way (e.g. a route deny on an intermediate server) while
-     * this server's own routing table still shows the destination as reachable.
+     * An end-to-end probe of a mapped server's path; {@code destination} answers with a mapping-pong.
+     * A missing pong reveals a path broken mid-way while our own routes still look fine.
      */
     public static IQ mappingPing(String nextHop, String destination, String originDomain,
                                  String viaTrail, String ts) {
         return mappingProbe("mapping-ping", nextHop, destination, originDomain, viaTrail, ts);
     }
 
-    /**
-     * Reply half of the mapping path probe; routed back exactly like the ping.
-     * {@code ts} echoes the ping's origin timestamp untouched so the origin can compute
-     * the round-trip time on its own clock (empty/null when the ping carried none).
-     */
+    /** The reply to a mapping-ping; {@code ts} echoes the ping's send time unchanged. */
     public static IQ mappingPong(String nextHop, String destination, String originDomain,
                                  String viaTrail, String ts) {
         return mappingProbe("mapping-pong", nextHop, destination, originDomain, viaTrail, ts);
@@ -344,33 +242,15 @@ public final class FederationStanzaFactory {
     private static IQ mappingProbe(String element, String nextHop, String destination,
                                    String originDomain, String viaTrail, String ts) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element probe = fed.addElement(element);
-        probe.addAttribute(ATTR_DESTINATION, destination);
-        probe.addAttribute(ATTR_ORIGIN, originDomain);
-        if (viaTrail != null && !viaTrail.isEmpty()) probe.addAttribute(ATTR_VIA, viaTrail);
-        if (ts != null && !ts.isEmpty())             probe.addAttribute(ATTR_TS, ts);
+        Element probe = routedPayload(iq, element, destination, originDomain);
+        addIfPresent(probe, ATTR_VIA, viaTrail);
+        addIfPresent(probe, ATTR_TS, ts);
         return iq;
     }
 
-    // ── muc-forward ───────────────────────────────────────────────────────────
-
     /**
-     * Wraps a MUC packet for relay to the next hop toward finalDestination.
-     *
-     * @param nextHop          directly-connected peer we're sending to now
-     * @param finalDestination the domain that ultimately receives this packet
-     * @param targetRoom       the room JID on finalDestination to inject into
-     *                         (null = use the payload's existing to-address)
-     * @param viaTrail         comma-separated list of servers already visited
-     * @param srcMapped        the MAPPED server this roster traffic enters the destination
-     *                         through — i.e. the far end of the destination's mapping (a peer
-     *                         or a hub re-originating a fan-out), NOT the relay neighbour and
-     *                         NOT the user's home.  Recorded as the occupant's arrivedVia so a
-     *                         mapping-disable can evict exactly the occupants that came through
-     *                         that mapping (including hub-relayed cross-spoke users).  Preserved
-     *                         unchanged across pure relay hops.
-     * @param payload          the original MUC packet (message or presence)
+     * Wraps a MUC packet for relay toward {@code targetRoom} on {@code finalDestination}.
+     * {@code srcMapped} is the mapped server the payload enters the destination through.
      */
     public static IQ mucForward(String nextHop,
                                 String finalDestination,
@@ -378,14 +258,10 @@ public final class FederationStanzaFactory {
                                 String viaTrail,
                                 String srcMapped,
                                 Packet payload) {
-        // Every caller of this form originates the payload, so the hub trail starts at its sender.
         return mucForward(nextHop, finalDestination, targetRoom, viaTrail, srcMapped, srcMapped, payload);
     }
 
-    /**
-     * {@link #mucForward(String, String, String, String, String, Packet)} carrying an explicit
-     * {@link #ATTR_HUBS} trail: a relay passes the one it received, a hub its own appended to it.
-     */
+    /** As {@link #mucForward(String, String, String, String, String, Packet)}, with an explicit hub trail. */
     public static IQ mucForward(String nextHop,
                                 String finalDestination,
                                 String targetRoom,
@@ -394,193 +270,101 @@ public final class FederationStanzaFactory {
                                 String hubs,
                                 Packet payload) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element fwd = fed.addElement("muc-forward");
+        Element fwd = payload(iq, "muc-forward");
         fwd.addAttribute(ATTR_DESTINATION, finalDestination);
-        if (targetRoom != null) fwd.addAttribute("targetRoom", targetRoom);
+        if (targetRoom != null) fwd.addAttribute(ATTR_TARGET_ROOM, targetRoom);
         fwd.addAttribute(ATTR_VIA, viaTrail);
-        if (srcMapped != null) fwd.addAttribute("src", srcMapped);
-        if (hubs != null && !hubs.isEmpty()) fwd.addAttribute(ATTR_HUBS, hubs);
+        if (srcMapped != null) fwd.addAttribute(ATTR_SRC, srcMapped);
+        addIfPresent(fwd, ATTR_HUBS, hubs);
         fwd.add(payload.getElement().createCopy());
         return iq;
     }
 
-    // ── direct-forward (1:1 private messaging over the overlay) ─────────────────
-
-    /**
-     * Wraps a 1:1 chat message for relay to the next hop toward {@code finalDestination}.
-     * Shaped like {@link #mucForward} but without room/occupant addressing — the embedded
-     * message keeps its real {@code from}/{@code to} so the recipient can simply reply
-     * (the reply is caught by that server's interceptor and relayed back the same way).
-     *
-     * @param nextHop          directly-connected peer we're sending to now
-     * @param finalDestination the domain that ultimately receives this message
-     * @param viaTrail         comma-separated list of servers already visited (loop guard)
-     * @param payload          the original 1:1 message
-     */
-    public static IQ directForward(String nextHop, String finalDestination,
-                                   String viaTrail, Message payload) {
+    /** Wraps a 1:1 stanza in the {@code element} envelope: direct-forward, presence-forward or iq-forward. */
+    public static IQ oneToOneForward(String element, String nextHop, String finalDestination,
+                                     String viaTrail, Packet payload) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element fwd = fed.addElement("direct-forward");
+        Element fwd = payload(iq, element);
         fwd.addAttribute(ATTR_DESTINATION, finalDestination);
         fwd.addAttribute(ATTR_VIA, viaTrail);
         fwd.add(payload.getElement().createCopy());
         return iq;
     }
 
-    /**
-     * Wraps a 1:1 presence stanza (subscribe/subscribed/probe/directed available/unavailable) for
-     * relay toward {@code finalDestination}.  Same envelope as {@link #directForward}; the embedded
-     * presence keeps its real {@code from}/{@code to} so the destination can route it through its own
-     * roster/subscription engine.
-     */
-    public static IQ presenceForward(String nextHop, String finalDestination,
-                                     String viaTrail, Presence payload) {
-        IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element fwd = fed.addElement("presence-forward");
-        fwd.addAttribute(ATTR_DESTINATION, finalDestination);
-        fwd.addAttribute(ATTR_VIA, viaTrail);
-        fwd.add(payload.getElement().createCopy());
-        return iq;
-    }
-
-    /**
-     * Wraps a user-addressed IQ (vCard, disco, entity-caps, version, ping, PEP …) for relay toward
-     * {@code finalDestination}.  Same envelope as {@link #directForward}; the embedded IQ keeps its
-     * real {@code id}/{@code from}/{@code to} so the destination server answers it (or delivers it to
-     * the target session) and the result relays back the same way, correlated by id.
-     */
-    public static IQ iqForward(String nextHop, String finalDestination, String viaTrail, IQ payload) {
-        IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element fwd = fed.addElement("iq-forward");
-        fwd.addAttribute(ATTR_DESTINATION, finalDestination);
-        fwd.addAttribute(ATTR_VIA, viaTrail);
-        fwd.add(payload.getElement().createCopy());
-        return iq;
-    }
-
-    // ── contact-list (per-server contact sharing) ────────────────────────────────
-
-    /**
-     * The full list of contacts {@code origin} shares with {@code destination}, routed hop-by-hop
-     * to that one server (never flooded). Each send replaces the previous list; an empty list
-     * withdraws it.
-     */
+    /** The full list of contacts {@code origin} shares with {@code destination}; an empty list withdraws it. */
     public static IQ contactList(String nextHop, String destination, String origin, String via,
                                  Collection<ContactListManager.Contact> contacts) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element list = fed.addElement("contact-list");
-        list.addAttribute(ATTR_DESTINATION, destination);
-        list.addAttribute(ATTR_ORIGIN, origin);
-        if (via != null && !via.isEmpty()) list.addAttribute(ATTR_VIA, via);
+        Element list = routedPayload(iq, "contact-list", destination, origin);
+        addIfPresent(list, ATTR_VIA, via);
         for (ContactListManager.Contact c : contacts) {
             Element e = list.addElement("contact");
             e.addAttribute("jid", c.jid());
-            if (c.name() != null && !c.name().isEmpty()) e.addAttribute("name", c.name());
+            addIfPresent(e, "name", c.name());
         }
         return iq;
     }
 
-    /** Asks {@code destination} to re-send the contact list it shares with {@code origin} (us). */
+    /** Asks {@code destination} to re-send the contact list it shares with {@code origin}. */
     public static IQ contactListRequest(String nextHop, String destination, String origin, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element req = fed.addElement("contact-list-request");
-        req.addAttribute(ATTR_DESTINATION, destination);
-        req.addAttribute(ATTR_ORIGIN, origin);
-        if (via != null && !via.isEmpty()) req.addAttribute(ATTR_VIA, via);
+        Element req = routedPayload(iq, "contact-list-request", destination, origin);
+        addIfPresent(req, ATTR_VIA, via);
         return iq;
     }
 
-    // ── file relay (transparent HTTP-upload federation) ─────────────────────────
-
-    /**
-     * Asks {@code destination} (the server believed to hold the content) to stream file {@code id}
-     * back to {@code origin} (the requester — us).  Routed hop-by-hop like a mapping probe.
-     *
-     * @param token the {@link #ATTR_TOKEN} capability read from the {@code fed-file} annotation that
-     *              announced this share; omitted when we have none (content announced by a peer
-     *              running a build older than 1.10.6)
-     */
+    /** Asks {@code destination}, which holds the content, to stream file {@code id} back to {@code origin}. */
     public static IQ fileRequest(String nextHop, String destination, String origin,
                                  String id, String token, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element req = fed.addElement("file-request");
-        req.addAttribute(ATTR_DESTINATION, destination);
-        req.addAttribute(ATTR_ORIGIN, origin);
+        Element req = routedPayload(iq, "file-request", destination, origin);
         req.addAttribute(ATTR_ID, id);
-        if (token != null && !token.isEmpty()) req.addAttribute(ATTR_TOKEN, token);
-        if (via != null && !via.isEmpty()) req.addAttribute(ATTR_VIA, via);
+        addIfPresent(req, ATTR_TOKEN, token);
+        addIfPresent(req, ATTR_VIA, via);
         return iq;
     }
 
-    /**
-     * Transfer header sent by a content holder before its chunk stream: authoritative metadata and
-     * chunk geometry so the requester can assemble (and verify) the file offset-addressed.
-     */
+    /** The transfer header sent before the chunks: file metadata and the chunk layout. */
     public static IQ fileOffer(String nextHop, String destination, String origin, String id,
                                String name, String mime, long size, String sha256,
                                int chunkSize, int totalChunks, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element offer = fed.addElement("file-offer");
-        offer.addAttribute(ATTR_DESTINATION, destination);
-        offer.addAttribute(ATTR_ORIGIN, origin);
+        Element offer = routedPayload(iq, "file-offer", destination, origin);
         offer.addAttribute(ATTR_ID, id);
         offer.addAttribute("name", name != null ? name : "file");
         offer.addAttribute("mime", mime != null ? mime : "application/octet-stream");
         offer.addAttribute("size", Long.toString(size));
-        if (sha256 != null && !sha256.isEmpty()) offer.addAttribute("sha256", sha256);
+        addIfPresent(offer, "sha256", sha256);
         offer.addAttribute("chunkSize", Integer.toString(chunkSize));
         offer.addAttribute("totalChunks", Integer.toString(totalChunks));
-        if (via != null && !via.isEmpty()) offer.addAttribute(ATTR_VIA, via);
+        addIfPresent(offer, ATTR_VIA, via);
         return iq;
     }
 
-    /** One base64 slice of a file transfer ({@code seq} of the offer's {@code totalChunks}). */
+    /** One base64 chunk of a file transfer. */
     public static IQ fileChunk(String nextHop, String destination, String origin, String id,
                                int seq, String dataB64, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element chunk = fed.addElement("file-chunk");
-        chunk.addAttribute(ATTR_DESTINATION, destination);
-        chunk.addAttribute(ATTR_ORIGIN, origin);
+        Element chunk = routedPayload(iq, "file-chunk", destination, origin);
         chunk.addAttribute(ATTR_ID, id);
         chunk.addAttribute("seq", Integer.toString(seq));
-        if (via != null && !via.isEmpty()) chunk.addAttribute(ATTR_VIA, via);
+        addIfPresent(chunk, ATTR_VIA, via);
         chunk.setText(dataB64);
         return iq;
     }
 
-    /** Negative reply to a file-request (e.g. {@code not-found}) so the requester stops waiting. */
+    /** A negative answer to a file-request, such as {@code not-found}, so the requester stops waiting. */
     public static IQ fileError(String nextHop, String destination, String origin, String id,
                                String reason, String via) {
         IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element err = fed.addElement("file-error");
-        err.addAttribute(ATTR_DESTINATION, destination);
-        err.addAttribute(ATTR_ORIGIN, origin);
+        Element err = routedPayload(iq, "file-error", destination, origin);
         err.addAttribute(ATTR_ID, id);
-        if (reason != null && !reason.isEmpty()) err.addAttribute("reason", reason);
-        if (via != null && !via.isEmpty())       err.addAttribute(ATTR_VIA, via);
+        addIfPresent(err, "reason", reason);
+        addIfPresent(err, ATTR_VIA, via);
         return iq;
     }
 
-    /**
-     * Re-emits an unchanged file-* element toward the next hop with an updated {@code via} trail —
-     * the transit-relay path.  The payload (chunk data included) is copied verbatim, so an
-     * intermediate organisation forwards bytes without ever materialising the file.
-     */
-    public static IQ fileRelay(String nextHop, Element fileElement, String newVia) {
-        return relay(nextHop, fileElement, newVia);
-    }
-
-    /** Re-emits an unchanged destination-routed element toward the next hop with an updated {@code via} trail. */
+    /** Passes a destination-routed element on to the next hop unchanged apart from its via trail. */
     public static IQ relay(String nextHop, Element element, String newVia) {
         IQ iq = base(nextHop);
         Element fed = iq.setChildElement(ELEMENT, NS);
@@ -590,42 +374,7 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
-    /**
-     * Delivers a packet directly to the recipient's ClientSession, bypassing the
-     * packet router and all PacketInterceptors (including MUC's non-occupant check).
-     * Falls back to the packet router if the session is not found locally (e.g. the
-     * user just disconnected between the occupant-list snapshot and delivery).
-     *
-     * @return true when the packet went straight to a session and therefore skipped the
-     *         PacketInterceptor chain that Openfire's own routers invoke. That chain is where
-     *         server-side capture hooks live — a message archiver among them — so a caller that
-     *         needs one to see this stanza has to drive it itself in that case (see
-     *         {@link FederationPacketInterceptor#runArchiveCapturePass}). False means the router
-     *         handled delivery and already ran the chain, so driving it again would double up.
-     */
-    public static boolean directDeliver(Packet packet) {
-        JID to = packet.getTo();
-        if (to != null && to.getResource() != null) {
-            RoutingTable rt = XMPPServer.getInstance().getRoutingTable();
-            ClientSession session = rt.getClientRoute(to);
-            if (session != null) {
-                try {
-                    session.process(packet);
-                    return true;
-                } catch (Exception e) {
-                    Log.warn("directDeliver: session.process failed for {}: {}", to, e.getMessage());
-                }
-            }
-        }
-        // Fallback: user just disconnected or bare JID — route normally.
-        XMPPServer.getInstance().getPacketRouter().route(packet);
-        return false;
-    }
-
-    /**
-     * Attaches a marker element to a packet before delivering it locally so the
-     * PacketInterceptor knows not to re-forward it (loop prevention).
-     */
+    /** Marks a packet as delivered by federation, so the interceptor does not forward it again. */
     public static void markAsForwarded(Packet packet) {
         Element el = packet.getElement();
         if (el.element(NS_ORIGIN_ELEMENT) == null) {
@@ -637,12 +386,7 @@ public final class FederationStanzaFactory {
         return packet.getElement().element(NS_ORIGIN_ELEMENT) != null;
     }
 
-    /**
-     * True when {@code domain} appears as an ELEMENT of the comma-separated {@code via} trail.
-     * A plain {@code String.contains} false-positives when one server's domain is a substring
-     * of another's (e.g. {@code xmpp.example.net} inside {@code 2503-xmpp.example.net}), which
-     * would silently drop legitimate traffic or skip a peer during relay.
-     */
+    /** Whether {@code domain} is one of the entries of the comma-separated trail {@code via}. */
     public static boolean viaContains(String via, String domain) {
         if (via == null || via.isEmpty() || domain == null) return false;
         for (String d : via.split(",")) {
@@ -651,7 +395,7 @@ public final class FederationStanzaFactory {
         return false;
     }
 
-    /** {@code trail} with {@code domain} appended, unless it is already an element of it. */
+    /** {@code trail} with {@code domain} appended, unless it is already an entry of it. */
     public static String appendToTrail(String trail, String domain) {
         if (trail == null || trail.isEmpty()) return domain;
         return viaContains(trail, domain) ? trail : trail + "," + domain;
@@ -664,6 +408,4 @@ public final class FederationStanzaFactory {
         for (String d : trail.split(",")) if (!d.isBlank()) n++;
         return n;
     }
-
-    private static final String NS_ORIGIN_ELEMENT = "fed-origin";
 }

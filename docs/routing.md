@@ -176,7 +176,7 @@ public Optional<String> findNextHop(String destination) {
 }
 ```
 
-`FederationManager` calls this when relaying a `muc-forward` / `direct-forward` / `iq-forward` toward a domain
+Every relay calls this when sending a `muc-forward` / `direct-forward` / `iq-forward` toward a domain
 with no direct S2S link: look up the next hop, hand the wrapped stanza to that neighbour, and let *it* repeat
 the lookup. Multi-hop delivery is just this one-hop decision made independently at each server.
 

@@ -13,10 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The distance-vector rules, written as what a peer may and may not make this server believe.
- * Every route arrives as a peer's claim, so most of these are cases of a claim that must be refused.
- */
+/** The distance-vector rules, written as the route claims a peer may and may not make this server accept. */
 class FederationRoutingTableTest {
 
     private static final String LOCAL = "local.example";
@@ -68,8 +65,7 @@ class FederationRoutingTableTest {
     @Test
     @DisplayName("a peer cannot install a route to itself while its direct link is down")
     void refusesSelfRouteWithoutDirectLink() {
-        // With the direct link up, the direct-link rule already protects it; this is the gap that
-        // the self-route check alone covers, e.g. gossip processed just before the link is re-added.
+        // Without the direct link, only the self-route check stops this.
         gossip(A, route(A, 0), route(C, 1));
 
         assertFalse(table.isReachable(A));

@@ -6,10 +6,8 @@ import org.jivesoftware.openfire.container.PluginManager;
 import java.io.File;
 
 /**
- * Openfire plugin entry point.
- *
- * Openfire calls initializePlugin() when the plugin JAR is loaded (or hot-reloaded)
- * and destroyPlugin() when it is unloaded.  All work is delegated to FederationManager.
+ * Openfire entry point for the federation plugin. Openfire calls it when the plugin jar is loaded
+ * or unloaded, and it hands the whole lifecycle to {@link FederationManager}.
  */
 public class FederationPlugin implements Plugin {
 
@@ -17,16 +15,23 @@ public class FederationPlugin implements Plugin {
 
     private FederationManager manager;
 
-    /** Accessible from JSP pages: FederationPlugin.getInstance().getManager() */
+    /** The loaded plugin instance, or null while the plugin is not loaded. */
     public static FederationPlugin getInstance() {
         return instance;
     }
 
+    /** Starts the manager; a failed start is undone before the failure is passed on to Openfire. */
     @Override
     public void initializePlugin(PluginManager pluginManager, File pluginDirectory) {
         instance = this;
         manager  = new FederationManager();
-        manager.start();
+        try {
+            manager.start();
+        } catch (RuntimeException | Error e) {
+            // Openfire keeps a plugin whose start failed registered until it is unloaded, hooks and all.
+            rollBack(e);
+            throw e;
+        }
     }
 
     @Override
@@ -39,5 +44,16 @@ public class FederationPlugin implements Plugin {
 
     public FederationManager getManager() {
         return manager;
+    }
+
+    /** Removes whatever the failed start had registered; a failure here is kept on {@code cause}. */
+    private void rollBack(Throwable cause) {
+        try {
+            manager.stop();
+        } catch (RuntimeException | Error cleanup) {
+            cause.addSuppressed(cleanup);
+        }
+        manager  = null;
+        instance = null;
     }
 }

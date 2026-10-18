@@ -5,33 +5,30 @@ import org.jivesoftware.openfire.XMPPServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 /**
- * Distance-vector routing table for the federation overlay network.
- *
- * Each entry says: "to reach <destination>, send via <nextHop> — it's <hops> hops away."
- * Updates arrive as gossip from peers.  When a peer goes down, all routes
- * learned through it are purged, and the change can be gossiped outward.
- *
- * Deliberately simple Bellman-Ford. Convergence is driven by triggered updates — a peer-up,
- * peer-down, or any change {@link #updateFromPeer} reports back is gossiped onward immediately
- * (see {@code FederationManager.propagateTopologyChange}) rather than waiting for a polling cycle;
- * the S2S poll only re-solicits, so a triggered update lost to a flap still converges.
+ * Distance-vector routing table of the federation overlay: for each destination, the neighbour to
+ * send through and the hop count. Updates come from peer gossip and are passed on as soon as they
+ * change something. Routes through an untrusted peer never outrank routes through trusted ones.
  */
 public class FederationRoutingTable {
 
     private static final Logger Log = LoggerFactory.getLogger(FederationRoutingTable.class);
-    static final int INFINITY = 16;   // anything >= 16 is considered unreachable
+    /** Hop count treated as unreachable. */
+    static final int INFINITY = 16;
 
-    /**
-     * Most destinations one routing-update may install from an untrusted peer. It may announce any
-     * number of servers behind it, and every one would otherwise cost memory here and on every server
-     * the route is gossiped to (room lists, contact lists and mapping probes are all keyed by them).
-     */
+    /** Most destinations one update from an untrusted peer may install, since each costs memory mesh-wide. */
     static final int MAX_ROUTES_FROM_UNTRUSTED = 128;
-    /** The same bound for a trusted peer: generous, it only guards against a runaway or broken peer. */
+    /** The same bound for a trusted peer, generous, against a broken peer. */
     static final int MAX_ROUTES_FROM_TRUSTED = 2048;
     /** Most destinations the table holds; a new one beyond this is not installed. */
     static final int MAX_ROUTES = 4096;
@@ -39,61 +36,34 @@ public class FederationRoutingTable {
     private static final int MAX_EVER_ROUTABLE = 8192;
     private volatile long capLoggedAt = 0;
 
-    /** destination → best known route */
+    /** Destination to its best known route. */
     private final ConcurrentHashMap<String, RouteEntry> table = new ConcurrentHashMap<>();
-    /** peer domain → destinations learned from that peer (for cleanup) */
+    /** Peer to the destinations learned from it. */
     private final ConcurrentHashMap<String, Set<String>> routesLearnedFrom = new ConcurrentHashMap<>();
-    /**
-     * Every destination that has EVER had a route since plugin start — never pruned. Lets the
-     * leak diagnostics (and later the reject-and-bounce guard) recognise a stanza aimed at an
-     * overlay domain even while its route is momentarily absent from {@link #table}.
-     */
+    /** Every destination routed since start, so the leak guard still knows an overlay domain whose route blipped. */
     private final Set<String> everRoutable = ConcurrentHashMap.newKeySet();
 
-    /**
-     * Registers a directly-connected peer (hop count = 1).
-     * Called by S2SMonitor when a peer transitions to REACHABLE.
-     */
+    /** Adds the one-hop route to a peer whose link just came up. */
     public void addDirectPeer(String domain) {
         table.put(domain, new RouteEntry(domain, domain, 1));
         rememberRoutable(domain);
-        // Do NOT add to routesLearnedFrom — direct routes are owned by addDirectPeer/removePeer,
-        // not by gossip. A peer never advertises itself in routing-updates, so adding it here
-        // would cause the stale-withdrawal check to delete the direct route on every update.
+        // Not marked as learned from the peer, which never advertises itself and would withdraw it next update.
         Log.debug("Routing: direct peer added — {}", domain);
     }
 
     /**
-     * Merges a routing table received from a peer via gossip.
-     * Returns the set of destinations that are new or improved (for further propagation).
-     *
-     * <p>Routes carry a trust class as well as a metric. A route is an EDGE route when it crosses an
-     * untrusted peer anywhere on its path: learned from an untrusted neighbour, or flagged
-     * {@code edge} by the trusted neighbour that advertised it (every hop re-advertises the flag, see
-     * {@link #isEdge}). Hop counts are the advertiser's own word, so they are only compared within a
-     * class:
-     * <ul>
-     *   <li>an edge route never displaces a clean one, however short it claims to be — otherwise an
-     *       untrusted edge could pull traffic for our side of the mesh just by advertising a small
-     *       number;</li>
-     *   <li>a clean route always displaces an edge one — so a claim an edge slipped in while the clean
-     *       route was briefly down is undone as soon as the clean route returns.</li>
-     * </ul>
-     * The flag is what keeps the second rule loop-free. A route through US toward something behind the
-     * edge is derived from our own advertisement, which carries the flag, so it can never come back
-     * to us as a clean route and win over the edge route it was derived from.
-     *
-     * @param untrusted whether a given neighbour is an untrusted peer
+     * Merges a peer's routing table and returns the destinations that changed. An edge route, one
+     * that crosses an untrusted peer, never displaces a clean route, and a clean route always displaces an edge one.
      */
     public Set<String> updateFromPeer(String fromPeer, List<RouteEntry> peerTable,
-                                      java.util.function.Predicate<String> untrusted) {
+                                      Predicate<String> untrusted) {
         return updateFromPeer(XMPPServer.getInstance().getServerInfo().getXMPPDomain(),
                               fromPeer, peerTable, untrusted);
     }
 
-    /** {@link #updateFromPeer(String, List, java.util.function.Predicate)} with the local domain supplied. */
+    /** {@link #updateFromPeer(String, List, Predicate)} with the local domain supplied, for tests. */
     Set<String> updateFromPeer(String localDomain, String fromPeer, List<RouteEntry> peerTable,
-                               java.util.function.Predicate<String> untrusted) {
+                               Predicate<String> untrusted) {
         Set<String> changed = new HashSet<>();
         Set<String> learnedSet = routesLearnedFrom.computeIfAbsent(fromPeer, k -> ConcurrentHashMap.newKeySet());
         Set<String> inUpdate = new HashSet<>();
@@ -102,9 +72,7 @@ public class FederationRoutingTable {
         int skipped = 0;
 
         for (RouteEntry remote : peerTable) {
-            // The advertised metric is the peer's claim, so bound it before using it: a negative
-            // value (or one that overflows on +1) would otherwise beat every route we have,
-            // including direct links, and pull traffic for the whole mesh toward the advertiser.
+            // A negative or overflowing metric would beat every route, direct links included.
             if (remote.hops() < 0 || remote.hops() >= INFINITY) continue;
 
             int candidate = remote.hops() + 1;
@@ -112,9 +80,7 @@ public class FederationRoutingTable {
 
             String dest = remote.destination();
             if (dest.equals(localDomain)) continue;
-            // A peer never legitimately advertises a route to ITSELF (split-horizon omits it);
-            // accepting one would let a misbehaving peer overwrite its own direct entry, which
-            // is owned by addDirectPeer/removePeer.
+            // A peer never advertises itself; accepting it would overwrite the direct route.
             if (dest.equals(fromPeer)) continue;
             if (!isPlausibleDomain(dest)) { skipped++; continue; }
             if (inUpdate.size() >= perPeerCap) { skipped++; continue; }
@@ -127,14 +93,10 @@ public class FederationRoutingTable {
                 if (table.size() >= MAX_ROUTES) { skipped++; continue; }
                 install(offered, learnedSet, changed);
             } else if (current.nextHop().equals(dest)) {
-                // A direct link is owned by addDirectPeer/removePeer; gossip never displaces it.
+                // A direct link is never displaced by gossip.
                 continue;
             } else if (current.nextHop().equals(fromPeer)) {
-                // The route's CURRENT next hop is authoritative for its own metric and class: accept
-                // even a WORSE hop count (the path behind it lengthened). Without this the table keeps
-                // the stale better metric forever, so a genuinely shorter alternate via another peer
-                // can never win. An unchanged route still rewrites the entry so updatedAt stays fresh,
-                // but is not gossiped as a change.
+                // The current next hop is authoritative for its route, even when the metric gets worse.
                 table.put(dest, offered);
                 learnedSet.add(dest);
                 if (candidate != current.hops() || candidateEdge != current.edge()) {
@@ -144,7 +106,7 @@ public class FederationRoutingTable {
                 }
             } else {
                 boolean currentEdge = isEdge(current, untrusted);
-                if (candidateEdge && !currentEdge) continue;   // never out-bid the clean mesh
+                if (candidateEdge && !currentEdge) continue;
                 if ((!candidateEdge && currentEdge) || candidate < current.hops()) {
                     install(offered, learnedSet, changed);
                 }
@@ -161,7 +123,7 @@ public class FederationRoutingTable {
             }
         }
 
-        // Withdraw routes previously learned from this peer that are no longer in their table.
+        // Routes learned from this peer that it no longer advertises are withdrawn.
         Set<String> stale = new HashSet<>(learnedSet);
         stale.removeAll(inUpdate);
         for (String dest : stale) {
@@ -177,17 +139,12 @@ public class FederationRoutingTable {
         return changed;
     }
 
-    /**
-     * Removes all routes associated with a peer that went down.
-     * Returns the destinations that were removed (so we can gossip the withdrawal).
-     */
+    /** Removes the route to a peer and every route learned through it; returns the destinations removed. */
     public Set<String> removePeer(String domain) {
         Set<String> removed = new HashSet<>();
 
-        // Remove the direct entry
         if (table.remove(domain) != null) removed.add(domain);
 
-        // Remove everything learned via this peer
         Set<String> learned = routesLearnedFrom.remove(domain);
         if (learned != null) {
             for (String dest : learned) {
@@ -205,11 +162,7 @@ public class FederationRoutingTable {
         return removed;
     }
 
-    /**
-     * Removes the route to {@code destination} only if its current next hop is {@code viaPeer}.
-     * Used when the admin denies that peer's advertisement of the destination; a route via a
-     * different peer is left untouched. Returns true if a route was removed.
-     */
+    /** Removes the route to {@code destination} if it goes through {@code viaPeer}; true if one was removed. */
     public boolean removeRouteVia(String destination, String viaPeer) {
         RouteEntry entry = table.get(destination);
         if (entry == null || !entry.nextHop().equals(viaPeer)) return false;
@@ -220,9 +173,7 @@ public class FederationRoutingTable {
         return true;
     }
 
-    /**
-     * Returns the next-hop domain for reaching destination, or empty if unreachable.
-     */
+    /** The neighbour to send through to reach {@code destination}, or empty if it is unreachable. */
     public Optional<String> findNextHop(String destination) {
         return Optional.ofNullable(table.get(destination)).map(RouteEntry::nextHop);
     }
@@ -236,27 +187,19 @@ public class FederationRoutingTable {
         return table.containsKey(destination);
     }
 
-    /**
-     * True if {@code destination} has had a route at ANY point since plugin start, even if the
-     * table has no entry for it right now.  Used to tell "overlay peer whose route blipped"
-     * apart from "genuinely external XMPP domain" in the native-S2S leak diagnostics.
-     */
+    /** Whether {@code destination} has had a route at any time since the plugin started. */
     public boolean wasEverRoutable(String destination) {
         return everRoutable.contains(destination);
     }
 
-    /**
-     * Whether {@code entry} crosses an untrusted edge: flagged so when learned, or its next hop is an
-     * untrusted peer (which also covers a direct link to an untrusted peer). This is the value we
-     * advertise onward, so every downstream hop knows the path is not clean.
-     */
-    public static boolean isEdge(RouteEntry entry, java.util.function.Predicate<String> untrusted) {
+    /** Whether a route crosses an untrusted peer: flagged when learned, or its next hop is untrusted. */
+    public static boolean isEdge(RouteEntry entry, Predicate<String> untrusted) {
         return entry.edge() || untrusted.test(entry.nextHop());
     }
 
     /**
-     * A destination a peer may announce: a bare domain of sane length, with nothing that could break
-     * out of an attribute, a log line or the admin page.
+     * Whether a peer may announce {@code d}: a dotted bare domain with no character that could break
+     * out of XML, a log line or HTML.
      */
     static boolean isPlausibleDomain(String d) {
         if (d == null || d.isEmpty() || d.length() > 253 || d.indexOf('.') <= 0) return false;
@@ -281,23 +224,16 @@ public class FederationRoutingTable {
                   route.edge() ? " [edge]" : "");
     }
 
-    /** Snapshot of the full table for UI display. */
+    /** Every route, for the admin console. */
     public Collection<RouteEntry> getAll() {
         return Collections.unmodifiableCollection(table.values());
     }
 
-    /**
-     * Split-horizon view of the table for gossip TO {@code toPeer}: routes whose
-     * next hop is {@code toPeer} are omitted.  Advertising a route back toward the
-     * neighbour we learned it from is exactly what forms distance-vector routing
-     * loops (count-to-infinity); that neighbour already has a better route to
-     * those destinations.  Omission also lets the receiver's stale-route detection
-     * correctly withdraw a route if our path to it now runs through the receiver.
-     */
+    /** The routes to advertise to {@code toPeer}: all but those through it (split horizon, against routing loops). */
     public Collection<RouteEntry> getRoutesExcludingNextHop(String toPeer) {
         List<RouteEntry> result = new ArrayList<>();
         for (RouteEntry e : table.values()) {
-            if (e.nextHop().equals(toPeer)) continue;   // split-horizon
+            if (e.nextHop().equals(toPeer)) continue;
             result.add(e);
         }
         return result;

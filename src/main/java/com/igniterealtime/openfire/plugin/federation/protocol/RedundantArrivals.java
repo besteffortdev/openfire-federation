@@ -5,20 +5,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
 
 /**
- * Counts, per mapping, the copies dropped because the room already had them: a second copy of a
- * message, or a payload whose hub trail already names this server. Either means the room is reached
- * by more than one path — its mappings form a ring or a mesh — so the admin page can say which
- * mapping is carrying the redundant traffic. Nothing is lost when this happens; it is a warning
- * about topology, not delivery.
- *
- * <p>A mapping's count covers one stretch of drops and is forgotten {@link #WINDOW_MS} after the
- * last, so the warning clears on its own once the redundant mapping is removed.</p>
+ * Counts, per mapping, the copies a room dropped because it already had them. Such copies mean the
+ * room's mappings form a ring or a mesh; the admin page shows which mapping carries them. A count is
+ * forgotten {@link #WINDOW_MS} after its last drop.
  */
 public final class RedundantArrivals {
 
     /** How long after its last drop a mapping keeps its warning. */
     static final long WINDOW_MS = 24L * 60 * 60 * 1000;
-    /** Most mappings tracked; stale ones are pruned first, and past it a new one is not tracked. */
+    /** Most mappings tracked; stale ones are pruned first, then new ones are ignored. */
     static final int MAX_TRACKED = 1024;
 
     /** Drops through one mapping: how many, and when the first and the latest happened. */
@@ -35,10 +30,7 @@ public final class RedundantArrivals {
         this.clock = clock;
     }
 
-    /**
-     * Records one dropped copy in {@code localRoomJid} that arrived through the mapping whose far
-     * end is {@code remoteDomain}.
-     */
+    /** Records one copy dropped in {@code localRoomJid} that arrived through the mapping to {@code remoteDomain}. */
     public void record(String localRoomJid, String remoteDomain) {
         if (localRoomJid == null || remoteDomain == null) return;
         long now = clock.getAsLong();

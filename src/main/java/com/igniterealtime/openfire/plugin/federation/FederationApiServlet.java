@@ -10,10 +10,11 @@ import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.util.CookieUtils;
 import org.jivesoftware.util.StringUtils;
 import org.jivesoftware.util.SystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -23,20 +24,35 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 
+import static com.igniterealtime.openfire.plugin.federation.FederationNames.isPlausibleDomain;
+import static com.igniterealtime.openfire.plugin.federation.FederationNames.localDomain;
+
+/**
+ * JSON API behind the federation admin console. A GET returns the full status document, optionally
+ * as a long poll that waits for a change; a POST runs one admin action, guarded by a CSRF token.
+ */
 public class FederationApiServlet extends HttpServlet {
 
+    private static final Logger Log = LoggerFactory.getLogger(FederationApiServlet.class);
+
+    /** What the page is told when a request fails unexpectedly; the details go to the Openfire log only. */
+    private static final String INTERNAL_ERROR = "Internal error; see the Openfire log for details";
+
+    /** Answers with the status document, or with a generic error when building it fails. */
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
         resp.setContentType("application/json; charset=UTF-8");
         resp.setHeader("Cache-Control", "no-cache, no-store");
-        ensureCsrfCookie(req, resp);   // hand the page a token it can echo on POSTs
+        ensureCsrfCookie(req, resp);
 
         FederationPlugin plugin = FederationPlugin.getInstance();
         PrintWriter out = resp.getWriter();
@@ -46,14 +62,15 @@ public class FederationApiServlet extends HttpServlet {
             return;
         }
 
-        if ("poll".equals(req.getParameter("action"))) {
-            out.print(longPoll(req.getParameter("hash")));
-        } else {
-            out.print(buildStatusJson(plugin));
+        try {
+            boolean poll = "poll".equals(req.getParameter("action"));
+            out.print(poll ? longPoll(req.getParameter("hash")) : buildStatusJson(plugin));
+        } catch (RuntimeException e) {
+            Log.error("Admin API: could not build the status document", e);
+            resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+            out.print(error(INTERNAL_ERROR));
         }
     }
-
-    // ── Long-poll: hold the request until the status actually changes ─────────
 
     /** How long a poll request is held open before answering "unchanged". */
     private static final long POLL_TIMEOUT_MS = 25_000;
@@ -64,11 +81,8 @@ public class FederationApiServlet extends HttpServlet {
     private static final AtomicInteger heldPolls = new AtomicInteger();
 
     /**
-     * Holds the request until the status fingerprint no longer matches {@code clientHash}
-     * (or the timeout passes), then answers with the full status JSON plus the new
-     * fingerprint under a {@code hash} key. The fingerprint ignores fields that merely age
-     * with the clock (probe age/RTT, and a down peer's reconnect countdown) — the page advances
-     * those locally between updates, so they must not by themselves wake a held poll.
+     * Holds the request until the status no longer matches {@code clientHash} or the timeout passes,
+     * then answers with the status JSON and its new fingerprint under {@code hash}.
      */
     private String longPoll(String clientHash) {
         String json = buildStatusJson(FederationPlugin.getInstance());
@@ -97,16 +111,11 @@ public class FederationApiServlet extends HttpServlet {
         return "{\"hash\":\"" + hash + "\"," + json.substring(1);
     }
 
-    /** SHA-256 (hex, truncated) of the status JSON with clock-derived fields blanked. */
+    /**
+     * A truncated SHA-256 of the status JSON, ignoring the fields that change with the clock alone;
+     * the page advances those itself, so they must not wake a held poll.
+     */
     static String fingerprint(String json) {
-        // Blank the fields that advance on their own without a real state change: probe age/RTT,
-        // nextRetryAt (an UNREACHABLE peer's back-off pushes this forward every few seconds), and a
-        // mapping's duplicate count and ages (a meshed room drops copies on every message; the
-        // duplicates flag beside them still moves when a warning appears or clears).
-        // The page re-derives all of these locally from absolute timestamps (see tickClocks), and a
-        // genuine transition still moves an un-blanked field (e.g. the peer's status), so stripping
-        // these only stops a held long-poll from returning — and the whole page re-rendering — on a
-        // change no admin would notice.
         String stable = json.replaceAll(
                 "\"(?:pongAgeSecs|pingMs|nextRetryAt|dupCount|dupSinceAgeSecs|dupLastAgeSecs)\":-?\\d+", "");
         try {
@@ -120,73 +129,87 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    /** Builds the full status document the admin page renders (one JSON object). */
+    /** The full status document the admin page renders, as one JSON object. */
     private String buildStatusJson(FederationPlugin plugin) {
         FederationManager mgr = plugin.getManager();
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String localDomain = localDomain();
+        FederatedRoomManager rooms = mgr.getRoomManager();
 
         StringBuilder sb = new StringBuilder();
-        sb.append("{");
-
-        sb.append("\"localDomain\":\"").append(esc(localDomain)).append("\",");
-
-        // Candidate servers for the per-room visibility ACL (routing-table destinations).
+        sb.append("{\"localDomain\":\"").append(esc(localDomain)).append("\",");
         sb.append("\"routableServers\":");
         strings(sb, mgr.routableServers());
+        sb.append(",\"peers\":");
+        array(sb, mgr.getPeerRegistry().getPeers(), (b, p) -> appendPeer(b, p, mgr));
+        sb.append(",\"routing\":");
+        array(sb, routeRows(mgr, localDomain), StringBuilder::append);
+        sb.append(",\"localRooms\":");
+        array(sb, rooms.getAllLocalRoomsWithTag(), (b, room) -> appendLocalRoom(b, room, mgr));
+        sb.append(",\"pendingRequests\":");
+        array(sb, rooms.getMappingsByState(RoomMapping.State.PENDING_IN), FederationApiServlet::appendPendingRequest);
+        sb.append(",\"remoteRooms\":");
+        objectOfArrays(sb, rooms.getRemoteRoomsVisibleToUs(), FederationApiServlet::appendRemoteRoom);
+        sb.append(",\"mappings\":");
+        objectOfArrays(sb, rooms.getLocalMappings(), (b, m) -> appendMapping(b, m, mgr));
+        sb.append(",\"s2sSessions\":");
+        array(sb, mgr.getS2SSessions(), FederationApiServlet::appendSession);
         sb.append(",");
+        appendSettings(sb, mgr);
+        appendFileRelay(sb, mgr.getFileRelay());
+        sb.append("\"fileConfig\":");
+        appendFileConfig(sb, mgr.getFileConfig());
+        sb.append(",\"contactLists\":");
+        appendContactLists(sb, mgr);
+        sb.append(",\"roomDefaults\":");
+        array(sb, mgr.getRoomDefaults().getRules(), FederationApiServlet::appendRoomDefault);
+        sb.append("}");
+        return sb.toString();
+    }
 
-        // ── peers ─────────────────────────────────────────────────────────────
-        sb.append("\"peers\":");
-        array(sb, mgr.getPeerRegistry().getPeers(), (b, p) -> {
-            b.append("{")
-             .append("\"domain\":\"").append(esc(p.getDomain())).append("\",")
-             .append("\"status\":\"").append(p.getStatus().name()).append("\",")
-             .append("\"lastSeen\":").append(p.getLastSeenMillis()).append(",")
-             .append("\"nextRetryAt\":").append(mgr.getNextRetryAt(p.getDomain())).append(",")
-             .append("\"untrusted\":").append(p.isUntrusted()).append(",")
-             .append("\"foreign\":").append(mgr.isForeignDomain(p.getDomain())).append(",")
-             .append("\"certPinned\":").append(p.getPinnedCertFp() != null).append(",")
-             .append("\"certMismatch\":").append(p.isCertMismatch()).append(",")
-             .append("\"contactListsAllowed\":").append(p.isContactListsAllowed()).append(",")
-             .append("\"contactListsRefused\":").append(p.isContactListsRefused()).append(",")
-             .append("\"exposedServers\":");
-            strings(b, p.getExposedServers());
+    /** One peer: its link state and trust settings, what is exposed to it, and what it advertises. */
+    private static void appendPeer(StringBuilder b, PeerServer p, FederationManager mgr) {
+        b.append("{")
+         .append("\"domain\":\"").append(esc(p.getDomain())).append("\",")
+         .append("\"status\":\"").append(p.getStatus().name()).append("\",")
+         .append("\"lastSeen\":").append(p.getLastSeenMillis()).append(",")
+         .append("\"nextRetryAt\":").append(mgr.getNextRetryAt(p.getDomain())).append(",")
+         .append("\"untrusted\":").append(p.isUntrusted()).append(",")
+         .append("\"foreign\":").append(mgr.isForeignDomain(p.getDomain())).append(",")
+         .append("\"certPinned\":").append(p.getPinnedCertFp() != null).append(",")
+         .append("\"certMismatch\":").append(p.isCertMismatch()).append(",")
+         .append("\"contactListsAllowed\":").append(p.isContactListsAllowed()).append(",")
+         .append("\"contactListsRefused\":").append(p.isContactListsRefused()).append(",")
+         .append("\"exposedServers\":");
+        strings(b, p.getExposedServers());
 
-            // Candidate servers we may expose, and the servers this peer advertises THROUGH to us
-            // (right-hand column of the per-link view); only computed for untrusted peers to keep
-            // the trusted-peer payload small.
-            b.append(",\"exposableServers\":");
-            strings(b, p.isUntrusted() ? mgr.exposableServers(p.getDomain()) : List.of());
+        // Only untrusted peers need these lists, which keeps the payload small.
+        b.append(",\"exposableServers\":");
+        strings(b, p.isUntrusted() ? mgr.exposableServers(p.getDomain()) : List.of());
 
-            b.append(",\"advertisedVia\":");
-            Set<String> via = new LinkedHashSet<>();
-            if (p.isUntrusted()) {
-                for (FederatedRoom room : mgr.getRoomManager().getRemoteRoomsViaPeer(p.getDomain())) {
-                    via.add(room.originServer());
-                }
+        b.append(",\"advertisedVia\":");
+        Set<String> via = new LinkedHashSet<>();
+        if (p.isUntrusted()) {
+            for (FederatedRoom room : mgr.getRoomManager().getRemoteRoomsViaPeer(p.getDomain())) {
+                via.add(room.originServer());
             }
-            strings(b, via);
+        }
+        strings(b, via);
 
-            // Destinations currently routed THROUGH this peer, and the destinations whose
-            // advertisements from this peer the admin has denied (per-link inbound filter).
-            List<String> through = new ArrayList<>();
-            for (RouteEntry r : mgr.getRoutingTable().getAll()) {
-                if (r.nextHop().equals(p.getDomain()) && !r.destination().equals(p.getDomain())) {
-                    through.add(r.destination());
-                }
+        List<String> through = new ArrayList<>();
+        for (RouteEntry r : mgr.getRoutingTable().getAll()) {
+            if (r.nextHop().equals(p.getDomain()) && !r.destination().equals(p.getDomain())) {
+                through.add(r.destination());
             }
-            b.append(",\"advertisedRoutes\":");
-            strings(b, through);
-            b.append(",\"deniedRoutes\":");
-            strings(b, p.getDeniedRoutes());
-            b.append("}");
-        });
-        sb.append(",");
+        }
+        b.append(",\"advertisedRoutes\":");
+        strings(b, through);
+        b.append(",\"deniedRoutes\":");
+        strings(b, p.getDeniedRoutes());
+        b.append("}");
+    }
 
-        // ── routing (local domain excluded) ───────────────────────────────────
-        // Denied advertisements stay listed as disabled entries (never installed as
-        // real routes) so the admin can see and lift the deny even while the peer
-        // isn't currently advertising the destination.
+    /** The routing table as JSON rows; denied routes stay listed, so the admin can lift a deny at any time. */
+    private static List<String> routeRows(FederationManager mgr, String localDomain) {
         List<String> routes = new ArrayList<>();
         for (RouteEntry r : mgr.getRoutingTable().getAll()) {
             if (r.destination().equals(localDomain)) continue;
@@ -203,187 +226,166 @@ public class FederationApiServlet extends HttpServlet {
                          + "\"denied\":true}");
             }
         }
-        sb.append("\"routing\":");
-        array(sb, routes, StringBuilder::append);
-        sb.append(",");
+        return routes;
+    }
 
-        // ── local rooms ───────────────────────────────────────────────────────
-        sb.append("\"localRooms\":");
-        array(sb, mgr.getRoomManager().getAllLocalRoomsWithTag(), (b, room) -> {
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> roomMappings = (List<Map<String, String>>) room.get("mappings");
-            @SuppressWarnings("unchecked")
-            List<String> visTo = (List<String>) room.getOrDefault("visibleTo", Collections.emptyList());
+    /** One local room with its settings, its occupants and its mappings. */
+    private static void appendLocalRoom(StringBuilder b, Map<String, Object> room, FederationManager mgr) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, String>> roomMappings = (List<Map<String, String>>) room.get("mappings");
+        @SuppressWarnings("unchecked")
+        List<String> visTo = (List<String>) room.getOrDefault("visibleTo", Collections.emptyList());
+        String roomJid = str(room.get("jid"));
 
-            b.append("{")
-             .append("\"jid\":\"").append(esc(str(room.get("jid")))).append("\",")
-             .append("\"name\":\"").append(esc(str(room.get("name")))).append("\",")
-             .append("\"description\":\"").append(esc(str(room.get("description")))).append("\",")
-             .append("\"federated\":").append(room.get("federated")).append(",")
-             .append("\"autoAccept\":").append(room.get("autoAccept")).append(",")
-             .append("\"filesEnabled\":").append(room.get("filesEnabled")).append(",")
-             .append("\"occupants\":").append(room.get("occupants")).append(",")
-             .append("\"visibleTo\":");
-            strings(b, visTo);
+        b.append("{")
+         .append("\"jid\":\"").append(esc(roomJid)).append("\",")
+         .append("\"name\":\"").append(esc(str(room.get("name")))).append("\",")
+         .append("\"description\":\"").append(esc(str(room.get("description")))).append("\",")
+         .append("\"federated\":").append(room.get("federated")).append(",")
+         .append("\"autoAccept\":").append(room.get("autoAccept")).append(",")
+         .append("\"filesEnabled\":").append(room.get("filesEnabled")).append(",")
+         .append("\"occupants\":").append(room.get("occupants")).append(",")
+         .append("\"visibleTo\":");
+        strings(b, visTo);
 
-            // Occupant roster (local + remote virtual) with live presence for the tracking view.
-            b.append(",\"occupantList\":");
-            array(b, mgr.getRoomOccupants(str(room.get("jid"))), (ob, occ) ->
-                ob.append("{\"name\":\"").append(esc(occ.get("name")))
-                  .append("\",\"jid\":\"").append(esc(occ.get("jid")))
-                  .append("\",\"kind\":\"").append(esc(occ.get("kind")))
-                  .append("\",\"show\":\"").append(esc(occ.get("show")))
-                  .append("\",\"status\":\"").append(esc(occ.get("status"))).append("\"}"));
+        b.append(",\"occupantList\":");
+        array(b, mgr.getOccupantSync().getRoomOccupants(roomJid), (ob, occ) ->
+            ob.append("{\"name\":\"").append(esc(occ.get("name")))
+              .append("\",\"jid\":\"").append(esc(occ.get("jid")))
+              .append("\",\"kind\":\"").append(esc(occ.get("kind")))
+              .append("\",\"show\":\"").append(esc(occ.get("show")))
+              .append("\",\"status\":\"").append(esc(occ.get("status"))).append("\"}"));
 
-            b.append(",\"mappings\":");
-            array(b, roomMappings, (mb, m) -> {
-                // pathBroken: a route exists but end-to-end probes go unanswered (deny mid-path).
-                boolean pathBroken = mgr.getRoutingTable().isReachable(m.get("remoteDomain"))
-                        && mgr.isMappingPathBroken(m.get("remoteDomain"));
-                boolean connected = mgr.getRoutingTable().isReachable(m.get("remoteDomain")) && !pathBroken;
-                boolean routeMissing = !connected && !pathBroken
-                        && mgr.getPeerRegistry().getPeer(m.get("remoteDomain")).isEmpty();
-                // Copies the room already had, dropped on arrival through this mapping: the rooms are
-                // mapped in a ring or mesh. The flag is what wakes a held poll; count and ages are not.
-                RedundantArrivals.Summary dups =
-                        mgr.getRedundantArrivals().recent(str(room.get("jid")), m.get("remoteDomain"));
-                long now = System.currentTimeMillis();
-                mb.append("{")
-                  .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
-                  .append("\"remoteDomain\":\"").append(esc(m.get("remoteDomain"))).append("\",")
-                  .append("\"state\":\"").append(esc(m.get("state"))).append("\",")
-                  .append("\"connected\":").append(connected).append(",")
-                  .append("\"routeMissing\":").append(routeMissing).append(",")
-                  .append("\"pathBroken\":").append(pathBroken).append(",")
-                  .append("\"pingMs\":").append(mgr.getMappingPingRttMs(m.get("remoteDomain"))).append(",")
-                  .append("\"pongAgeSecs\":").append(mgr.getMappingPongAgeSecs(m.get("remoteDomain"))).append(",")
-                  .append("\"duplicates\":").append(dups != null).append(",")
-                  .append("\"dupCount\":").append(dups == null ? 0 : dups.count()).append(",")
-                  .append("\"dupSinceAgeSecs\":").append(dups == null ? -1 : (now - dups.firstAt()) / 1000).append(",")
-                  .append("\"dupLastAgeSecs\":").append(dups == null ? -1 : (now - dups.lastAt()) / 1000)
-                  .append("}");
-            });
-            b.append("}");
-        });
-        sb.append(",");
+        b.append(",\"mappings\":");
+        array(b, roomMappings, (mb, m) -> appendRoomMapping(mb, m, roomJid, mgr));
+        b.append("}");
+    }
 
-        // ── incoming pending mapping requests (for the Pending requests panel) ──
-        sb.append("\"pendingRequests\":");
-        array(sb, mgr.getRoomManager().getMappingsByState(RoomMapping.State.PENDING_IN), (b, m) ->
-            b.append("{")
-             .append("\"localJid\":\"").append(esc(m.localRoomJid())).append("\",")
-             .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
-             .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\"}"));
-        sb.append(",");
+    /** One mapping of a local room, with its link health and any recent duplicate arrivals. */
+    private static void appendRoomMapping(StringBuilder mb, Map<String, String> m, String roomJid,
+                                          FederationManager mgr) {
+        String remoteDomain = m.get("remoteDomain");
+        // Only the duplicates flag wakes a held poll; the count and ages are fingerprint-blanked.
+        RedundantArrivals.Summary dups = mgr.getRedundantArrivals().recent(roomJid, remoteDomain);
+        long now = System.currentTimeMillis();
+        mb.append("{")
+          .append("\"remoteRoomJid\":\"").append(esc(m.get("remoteRoomJid"))).append("\",")
+          .append("\"remoteDomain\":\"").append(esc(remoteDomain)).append("\",")
+          .append("\"state\":\"").append(esc(m.get("state"))).append("\",");
+        appendMappingHealth(mb, mgr, remoteDomain);
+        mb.append(",\"duplicates\":").append(dups != null)
+          .append(",\"dupCount\":").append(dups == null ? 0 : dups.count())
+          .append(",\"dupSinceAgeSecs\":").append(dups == null ? -1 : (now - dups.firstAt()) / 1000)
+          .append(",\"dupLastAgeSecs\":").append(dups == null ? -1 : (now - dups.lastAt()) / 1000)
+          .append("}");
+    }
 
-        // ── remote rooms ──────────────────────────────────────────────────────
-        sb.append("\"remoteRooms\":");
-        objectOfArrays(sb, mgr.getRoomManager().getRemoteRoomsVisibleToUs(), (b, room) ->
-            b.append("{")
-             .append("\"jid\":\"").append(esc(room.jid())).append("\",")
-             .append("\"name\":\"").append(esc(room.name())).append("\",")
-             .append("\"description\":\"").append(esc(room.description())).append("\"")
-             .append("}"));
-        sb.append(",");
+    private static void appendPendingRequest(StringBuilder b, RoomMapping m) {
+        b.append("{")
+         .append("\"localJid\":\"").append(esc(m.localRoomJid())).append("\",")
+         .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
+         .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\"}");
+    }
 
-        // ── room mappings (localJid → array of {remoteRoomJid, remoteDomain}) ─
-        sb.append("\"mappings\":");
-        objectOfArrays(sb, mgr.getRoomManager().getLocalMappings(), (b, m) -> {
-            boolean pathBroken = mgr.getRoutingTable().isReachable(m.remoteDomain())
-                    && mgr.isMappingPathBroken(m.remoteDomain());
-            boolean connected = mgr.getRoutingTable().isReachable(m.remoteDomain()) && !pathBroken;
-            boolean routeMissing = !connected && !pathBroken
-                    && mgr.getPeerRegistry().getPeer(m.remoteDomain()).isEmpty();
-            b.append("{")
-             .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
-             .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\",")
-             .append("\"connected\":").append(connected).append(",")
-             .append("\"routeMissing\":").append(routeMissing).append(",")
-             .append("\"pathBroken\":").append(pathBroken).append(",")
-             .append("\"pingMs\":").append(mgr.getMappingPingRttMs(m.remoteDomain())).append(",")
-             .append("\"pongAgeSecs\":").append(mgr.getMappingPongAgeSecs(m.remoteDomain()))
-             .append("}");
-        });
-        sb.append(",");
+    private static void appendRemoteRoom(StringBuilder b, FederatedRoom room) {
+        b.append("{")
+         .append("\"jid\":\"").append(esc(room.jid())).append("\",")
+         .append("\"name\":\"").append(esc(room.name())).append("\",")
+         .append("\"description\":\"").append(esc(room.description())).append("\"")
+         .append("}");
+    }
 
-        // ── active S2S sessions ───────────────────────────────────────────────
-        sb.append("\"s2sSessions\":");
-        array(sb, mgr.getS2SSessions(), (b, sess) ->
-            b.append("{")
-             .append("\"domain\":\"").append(esc(str(sess.get("domain")))).append("\",")
-             .append("\"direction\":\"").append(esc(str(sess.get("direction")))).append("\",")
-             .append("\"since\":").append(sess.get("since")).append(",")
-             .append("\"encrypted\":").append(sess.get("encrypted")).append(",")
-             .append("\"fedPeer\":").append(sess.get("fedPeer"))
-             .append("}"));
-        sb.append(",");
+    private static void appendMapping(StringBuilder b, RoomMapping m, FederationManager mgr) {
+        b.append("{")
+         .append("\"remoteRoomJid\":\"").append(esc(m.remoteRoomJid())).append("\",")
+         .append("\"remoteDomain\":\"").append(esc(m.remoteDomain())).append("\",");
+        appendMappingHealth(b, mgr, m.remoteDomain());
+        b.append("}");
+    }
 
-        // ── settings ──────────────────────────────────────────────────────────
+    private static void appendSession(StringBuilder b, Map<String, Object> sess) {
+        b.append("{")
+         .append("\"domain\":\"").append(esc(str(sess.get("domain")))).append("\",")
+         .append("\"direction\":\"").append(esc(str(sess.get("direction")))).append("\",")
+         .append("\"since\":").append(sess.get("since")).append(",")
+         .append("\"encrypted\":").append(sess.get("encrypted")).append(",")
+         .append("\"fedPeer\":").append(sess.get("fedPeer"))
+         .append("}");
+    }
+
+    /** The S2S timers and the server-wide switches, each followed by a comma. */
+    private static void appendSettings(StringBuilder sb, FederationManager mgr) {
         sb.append("\"keepaliveSeconds\":").append(mgr.getKeepaliveSeconds()).append(",");
         sb.append("\"effectiveKeepaliveSeconds\":").append(mgr.getEffectiveKeepaliveSeconds()).append(",");
         sb.append("\"reconnectSeconds\":").append(mgr.getReconnectSeconds()).append(",");
         sb.append("\"mappingPingSeconds\":").append(mgr.getMappingPingSeconds()).append(",");
         sb.append("\"peerAllowlist\":").append(FederationProperties.PEER_ALLOWLIST.getValue()).append(",");
-        sb.append("\"allowRemoteRoomTraversal\":").append(FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()).append(",");
+        sb.append("\"allowRemoteRoomTraversal\":")
+          .append(FederationProperties.ALLOW_REMOTE_ROOM_TRAVERSAL.getValue()).append(",");
         sb.append("\"directMsgRelay\":").append(FederationProperties.DIRECT_MSG_RELAY.getValue()).append(",");
         sb.append("\"probeOnSubscribe\":").append(FederationProperties.PROBE_ON_SUBSCRIBE.getValue()).append(",");
+    }
 
+    /** The file relay settings and its recent AV scans and rejections, each followed by a comma. */
+    private static void appendFileRelay(StringBuilder sb, FileRelayManager relay) {
         sb.append("\"filesEnabled\":").append(FederationProperties.FILES_ENABLED.getValue()).append(",");
-        // Distinct from filesEnabled: the switch can be on while the relay itself failed to come up
-        // (unusable storage directory, download endpoint not mounted). Shares then keep their
-        // original URLs instead of being rewritten to an endpoint that would never answer, so an
-        // operator needs to be able to see the difference.
-        sb.append("\"filesRelayAvailable\":")
-          .append(mgr.getFileRelay() != null && mgr.getFileRelay().isAvailable()).append(",");
+        // The switch can be on while the relay failed to start, in which case shares keep their URLs.
+        sb.append("\"filesRelayAvailable\":").append(relay != null && relay.isAvailable()).append(",");
         sb.append("\"filesMaxSizeMB\":").append(FederationProperties.FILES_MAX_MB.getValue()).append(",");
         sb.append("\"filesRetentionDays\":").append(FederationProperties.FILES_RETENTION_DAYS.getValue()).append(",");
-        sb.append("\"filesStorageDir\":\"").append(esc(FederationProperties.FILES_STORAGE_DIR.getValue())).append("\",");
-        sb.append("\"filesAllowedExtensions\":\"").append(esc(FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue())).append("\",");
+        sb.append("\"filesStorageDir\":\"")
+          .append(esc(FederationProperties.FILES_STORAGE_DIR.getValue())).append("\",");
+        sb.append("\"filesAllowedExtensions\":\"")
+          .append(esc(FederationProperties.FILES_ALLOWED_EXTENSIONS.getValue())).append("\",");
         sb.append("\"filesAvEnabled\":").append(FederationProperties.FILES_AV_ENABLED.getValue()).append(",");
         sb.append("\"filesAvHost\":\"").append(esc(FederationProperties.FILES_AV_HOST.getValue())).append("\",");
         sb.append("\"filesAvPort\":").append(FederationProperties.FILES_AV_PORT.getValue()).append(",");
         sb.append("\"filesAvTimeoutMs\":").append(FederationProperties.FILES_AV_TIMEOUT_MS.getValue()).append(",");
-        sb.append("\"filesLogRetentionDays\":").append(FederationProperties.FILES_LOG_RETENTION_DAYS.getValue()).append(",");
-        sb.append("\"filesScanLogPath\":\"")
-          .append(mgr.getFileRelay() == null ? "" : esc(mgr.getFileRelay().scanLogPath())).append("\",");
+        sb.append("\"filesLogRetentionDays\":")
+          .append(FederationProperties.FILES_LOG_RETENTION_DAYS.getValue()).append(",");
+        sb.append("\"filesScanLogPath\":\"").append(relay == null ? "" : esc(relay.scanLogPath())).append("\",");
         sb.append("\"filesRejectionLogPath\":\"")
-          .append(mgr.getFileRelay() == null ? "" : esc(mgr.getFileRelay().rejectionLogPath())).append("\",");
+          .append(relay == null ? "" : esc(relay.rejectionLogPath())).append("\",");
 
-        // ── AV scan log (files recently examined by ClamAV, newest first) ───────
         sb.append("\"avScanLog\":");
-        array(sb, mgr.getFileRelay() == null ? List.<FileRelayManager.ScanLogEntry>of()
-                                             : mgr.getFileRelay().recentAvScans(), (b, e) ->
-            b.append("{")
-             .append("\"when\":").append(e.when()).append(",")
-             .append("\"name\":\"").append(esc(e.fileName())).append("\",")
-             .append("\"size\":").append(e.sizeBytes()).append(",")
-             .append("\"origin\":\"").append(esc(e.origin())).append("\",")
-             .append("\"stage\":\"").append(e.stage().token()).append("\",")
-             .append("\"verdict\":\"").append(esc(e.verdict())).append("\",")
-             .append("\"detail\":\"").append(esc(e.detail())).append("\"")
-             .append("}"));
+        array(sb, relay == null ? List.<FileRelayManager.ScanLogEntry>of() : relay.recentAvScans(),
+              FederationApiServlet::appendScan);
+        sb.append(",\"rejectedFiles\":");
+        array(sb, relay == null ? List.<FileRelayManager.RejectionEntry>of() : relay.recentRejections(),
+              FederationApiServlet::appendRejection);
         sb.append(",");
+    }
 
-        // ── Rejected files (extension/content/hash/AV — egress + ingress, newest first) ──
-        sb.append("\"rejectedFiles\":");
-        array(sb, mgr.getFileRelay() == null ? List.<FileRelayManager.RejectionEntry>of()
-                                             : mgr.getFileRelay().recentRejections(), (b, e) ->
-            b.append("{")
-             .append("\"when\":").append(e.when()).append(",")
-             .append("\"name\":\"").append(esc(e.fileName())).append("\",")
-             .append("\"size\":").append(e.sizeBytes()).append(",")
-             .append("\"origin\":\"").append(esc(e.origin())).append("\",")
-             .append("\"stage\":\"").append(e.stage().token()).append("\",")
-             .append("\"reason\":\"").append(e.reason().name()).append("\",")
-             .append("\"detail\":\"").append(esc(e.detail())).append("\"")
-             .append("}"));
-        sb.append(",");
+    private static void appendScan(StringBuilder b, FileRelayManager.ScanLogEntry e) {
+        b.append("{")
+         .append("\"when\":").append(e.when()).append(",")
+         .append("\"name\":\"").append(esc(e.fileName())).append("\",")
+         .append("\"size\":").append(e.sizeBytes()).append(",")
+         .append("\"origin\":\"").append(esc(e.origin())).append("\",")
+         .append("\"stage\":\"").append(e.stage().token()).append("\",")
+         .append("\"verdict\":\"").append(esc(e.verdict())).append("\",")
+         .append("\"detail\":\"").append(esc(e.detail())).append("\"")
+         .append("}");
+    }
 
-        // ── file-based config (openfire.xml <federation> block) ─────────────────
-        FederationFileConfig.IngestResult fcResult = mgr.getFileConfig().lastResult();
-        Long fcLoadedAt = mgr.getFileConfig().lastLoadedAtMillis();
-        sb.append("\"fileConfig\":{")
-          .append("\"path\":\"").append(esc(mgr.getFileConfig().configFile().toString())).append("\",")
+    private static void appendRejection(StringBuilder b, FileRelayManager.RejectionEntry e) {
+        b.append("{")
+         .append("\"when\":").append(e.when()).append(",")
+         .append("\"name\":\"").append(esc(e.fileName())).append("\",")
+         .append("\"size\":").append(e.sizeBytes()).append(",")
+         .append("\"origin\":\"").append(esc(e.origin())).append("\",")
+         .append("\"stage\":\"").append(e.stage().token()).append("\",")
+         .append("\"reason\":\"").append(e.reason().name()).append("\",")
+         .append("\"detail\":\"").append(esc(e.detail())).append("\"")
+         .append("}");
+    }
+
+    /** What the last ingest of the openfire.xml {@code <federation>} block changed. */
+    private static void appendFileConfig(StringBuilder sb, FederationFileConfig fileConfig) {
+        FederationFileConfig.IngestResult fcResult = fileConfig.lastResult();
+        Long fcLoadedAt = fileConfig.lastLoadedAtMillis();
+        sb.append("{")
+          .append("\"path\":\"").append(esc(fileConfig.configFile().toString())).append("\",")
           .append("\"loadedAt\":").append(fcLoadedAt == null ? "null" : fcLoadedAt).append(",")
           .append("\"blockPresent\":").append(fcResult.blockPresent()).append(",")
           .append("\"peersAdded\":").append(fcResult.peersAdded()).append(",")
@@ -393,36 +395,36 @@ public class FederationApiServlet extends HttpServlet {
           .append("\"settingsUpdated\":").append(fcResult.settingsUpdated()).append(",")
           .append("\"warnings\":");
         strings(sb, fcResult.warnings());
-        sb.append("},");
-
-        // ── shared contact lists (sent and received) ──────────────────────────
-        sb.append("\"contactLists\":");
-        appendContactLists(sb, mgr);
-        sb.append(",");
-
-        // ── default-settings rules for newly-created rooms (by name pattern) ───
-        sb.append("\"roomDefaults\":");
-        array(sb, mgr.getRoomDefaults().getRules(), (b, r) -> {
-            b.append("{\"pattern\":\"").append(esc(r.pattern()))
-             .append("\",\"federated\":").append(r.federated())
-             .append(",\"autoAccept\":").append(r.autoAccept())
-             .append(",\"autoMap\":").append(r.autoMap())
-             .append(",\"filesEnabled\":").append(r.filesEnabled())
-             .append(",\"visible\":");
-            strings(b, r.visible());
-            b.append("}");
-        });
-
         sb.append("}");
-        return sb.toString();
     }
 
-    // ── JSON assembly ────────────────────────────────────────────────────────
-    //
-    // The status document is written straight into a StringBuilder rather than built as a tree:
-    // it is produced on nearly every long-poll, so the allocation matters. These three helpers
-    // own all the separator bookkeeping, which is why nothing above tracks "is this the first
-    // element" by hand.
+    private static void appendRoomDefault(StringBuilder b, RoomDefaultsManager.Rule r) {
+        b.append("{\"pattern\":\"").append(esc(r.pattern()))
+         .append("\",\"federated\":").append(r.federated())
+         .append(",\"autoAccept\":").append(r.autoAccept())
+         .append(",\"autoMap\":").append(r.autoMap())
+         .append(",\"filesEnabled\":").append(r.filesEnabled())
+         .append(",\"visible\":");
+        strings(b, r.visible());
+        b.append("}");
+    }
+
+    /**
+     * Appends a mapping's link health: {@code connected}, {@code routeMissing}, {@code pathBroken},
+     * {@code pingMs} and {@code pongAgeSecs}, without surrounding braces.
+     */
+    private static void appendMappingHealth(StringBuilder b, FederationManager mgr, String remoteDomain) {
+        MappingProbe probe = mgr.getMappingProbe();
+        boolean reachable = mgr.getRoutingTable().isReachable(remoteDomain);
+        boolean pathBroken = reachable && probe.isPathBroken(remoteDomain);
+        boolean connected = reachable && !pathBroken;
+        boolean routeMissing = !connected && !pathBroken && mgr.getPeerRegistry().getPeer(remoteDomain).isEmpty();
+        b.append("\"connected\":").append(connected)
+         .append(",\"routeMissing\":").append(routeMissing)
+         .append(",\"pathBroken\":").append(pathBroken)
+         .append(",\"pingMs\":").append(probe.roundTripMs(remoteDomain))
+         .append(",\"pongAgeSecs\":").append(probe.pongAgeSecs(remoteDomain));
+    }
 
     /** Appends {@code [e1,e2,…]}, delegating each element to {@code writer}. */
     private static <T> void array(StringBuilder sb, Iterable<T> values, BiConsumer<StringBuilder, T> writer) {
@@ -441,7 +443,7 @@ public class FederationApiServlet extends HttpServlet {
         array(sb, values, (b, v) -> b.append("\"").append(esc(v)).append("\""));
     }
 
-    /** Appends {@code {"k1":[…],"k2":[…]}} — the shape of the domain-keyed maps the page renders. */
+    /** Appends {@code {"k1":[…],"k2":[…]}}, the shape of the domain-keyed maps the page renders. */
     private static <T> void objectOfArrays(StringBuilder sb, Map<String, ? extends Iterable<T>> map,
                                            BiConsumer<StringBuilder, T> writer) {
         sb.append("{");
@@ -464,10 +466,7 @@ public class FederationApiServlet extends HttpServlet {
              .append("\",\"name\":\"").append(esc(c.name())).append("\"}"));
     }
 
-    /**
-     * The Users tab: what this server shares and with whom, what each target was last sent, and the
-     * lists other servers share with us with their mapping into local groups.
-     */
+    /** The Users tab: what this server shares and with whom, and the lists other servers share with us. */
     private static void appendContactLists(StringBuilder sb, FederationManager mgr) {
         ContactListManager cl = mgr.getContactLists();
         sb.append("{\"groupsReadOnly\":").append(cl.groupsReadOnly());
@@ -482,16 +481,15 @@ public class FederationApiServlet extends HttpServlet {
         sb.append(",\"shareableServers\":");
         strings(sb, cl.shareableServers());
 
-        // Of those, the ones reached across an untrusted link (badged in the server list).
         sb.append(",\"untrustedPathServers\":");
         strings(sb, cl.shareableServers().stream().filter(cl::crossesUntrusted).toList());
 
         sb.append(",\"localGroups\":");
         strings(sb, cl.localGroupNames());
 
-        // Every configured target, including one never sent to yet (unreachable since it was added).
+        // Configured targets are listed even if they were never reachable.
         Map<String, List<ContactListManager.Contact>> sent = cl.getSentLists();
-        Set<String> targets = new java.util.TreeSet<>(sent.keySet());
+        Set<String> targets = new TreeSet<>(sent.keySet());
         for (ContactListManager.ShareRule r : cl.getShareRules()) targets.addAll(r.targets());
         sb.append(",\"sent\":");
         array(sb, targets, (b, t) -> {
@@ -510,7 +508,7 @@ public class FederationApiServlet extends HttpServlet {
         Map<String, ContactListManager.ReceivedList> received = cl.getReceived();
         Map<String, ContactListManager.ListMapping> mappings = cl.getMappings();
         Map<String, String> errors = cl.getMappingErrors();
-        Set<String> origins = new java.util.TreeSet<>(received.keySet());
+        Set<String> origins = new TreeSet<>(received.keySet());
         origins.addAll(mappings.keySet());
         sb.append(",\"received\":");
         array(sb, origins, (b, o) -> {
@@ -539,10 +537,8 @@ public class FederationApiServlet extends HttpServlet {
     }
 
     /**
-     * Dispatches one admin action. Each action answers with exactly one JSON document — either
-     * {@code {"ok":true,…}} or {@code {"error":"…"}} — so the page can branch on those two keys
-     * without knowing the action. The work itself lives in the {@code handle*} groups below, each
-     * of which returns {@code null} for an action it doesn't own so the next group gets a look.
+     * Runs one admin action and answers {@code {"ok":true,…}} or {@code {"error":"…"}}. Each action
+     * group returns null for an action it does not own, so the next group gets a look.
      */
     @Override
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
@@ -551,9 +547,6 @@ public class FederationApiServlet extends HttpServlet {
 
         PrintWriter out = resp.getWriter();
 
-        // CSRF (double-submit): the page echoes the fed-csrf cookie as a parameter. A cross-site
-        // attacker can't read the cookie (same-origin) nor forge a matching parameter, so a
-        // forged POST from an admin's browser is rejected even though the admin session is valid.
         if (!validateCsrf(req)) {
             resp.setStatus(HttpServletResponse.SC_FORBIDDEN);
             out.print(error("CSRF validation failed"));
@@ -566,25 +559,27 @@ public class FederationApiServlet extends HttpServlet {
             return;
         }
 
-        FederationManager mgr = plugin.getManager();
         String action = req.getParameter("action");
-        if (action == null) action = "";
+        try {
+            out.print(runAction(action == null ? "" : action, req, plugin.getManager()));
+        } catch (RuntimeException e) {
+            Log.error("Admin API: action '{}' failed", LogSafe.text(action), e);
+            resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+            out.print(error(INTERNAL_ERROR));
+        }
+    }
 
+    private String runAction(String action, HttpServletRequest req, FederationManager mgr) {
         String reply = peerAction(action, req, mgr);
         if (reply == null) reply = roomAction(action, req, mgr);
         if (reply == null) reply = mappingAction(action, req, mgr);
         if (reply == null) reply = fileAction(action, req, mgr);
         if (reply == null) reply = contactListAction(action, req, mgr);
         if (reply == null) reply = settingAction(action, req, mgr);
-        if (reply == null) reply = error("unknown action");
-        out.print(reply);
+        return reply != null ? reply : error("unknown action");
     }
 
-    // ── Action groups ────────────────────────────────────────────────────────
-    //
-    // Every handler returns the JSON to send, or null when the action isn't one of its own.
-
-    /** Peer lifecycle, per-link trust, and the routes/servers a peer is allowed to advertise. */
+    /** Peer lifecycle, per-link trust, and the routes and servers a peer may advertise. */
     private String peerAction(String action, HttpServletRequest req, FederationManager mgr) {
         switch (action) {
             case "add-peer": {
@@ -592,22 +587,20 @@ public class FederationApiServlet extends HttpServlet {
                 if (d == null) return required("domain");
                 if (!isPlausibleDomain(d)) return error("invalid domain");
                 mgr.addPeer(d);
-                // Default the untrusted flag from the parent-domain rule when the caller didn't
-                // specify it (the UI always sends the checkbox; this guards API callers).
+                // Without an explicit flag, a peer under a foreign parent domain starts untrusted.
                 String untrustedParam = req.getParameter("untrusted");
                 boolean untrusted = untrustedParam != null
                         ? Boolean.parseBoolean(untrustedParam.strip())
                         : mgr.isForeignDomain(d);
                 if (untrusted) {
                     mgr.getPeerRegistry().setUntrusted(d, true);
-                    mgr.applyLocalTrustChange(d);   // announce our untrusted stance to the peer
+                    mgr.applyLocalTrustChange(d);
                 }
                 return OK;
             }
             case "remove-peer": {
                 String d = domainParam(req, "domain");
                 if (d == null) return required("domain");
-                // Reports false for a domain that wasn't a peer, so the page can say so.
                 return "{\"ok\":" + mgr.removePeer(d) + "}";
             }
             case "disable-peer": {
@@ -640,7 +633,7 @@ public class FederationApiServlet extends HttpServlet {
                 String d = domainParam(req, "domain");
                 if (d == null) return required("domain");
                 if (!mgr.getPeerRegistry().contains(d)) return error("not a configured peer");
-                mgr.acceptNewCertificate(d);
+                mgr.getCertificatePinning().acceptNewCertificate(d);
                 return OK;
             }
             case "set-untrusted": {
@@ -649,8 +642,6 @@ public class FederationApiServlet extends HttpServlet {
                 if (d == null || untrusted == null) return required("domain", "untrusted");
                 if (!mgr.getPeerRegistry().contains(d)) return error("not a configured peer");
                 mgr.getPeerRegistry().setUntrusted(d, Boolean.parseBoolean(untrusted.strip()));
-                // Negotiate the new stance over the link: announce it, and block or re-push
-                // immediately based on the remote's last-known stance (trust is per-link).
                 mgr.applyLocalTrustChange(d);
                 return OK;
             }
@@ -658,16 +649,12 @@ public class FederationApiServlet extends HttpServlet {
                 String d = domainParam(req, "domain");
                 if (d == null) return required("domain");
                 if (!mgr.getPeerRegistry().contains(d)) return error("not a configured peer");
-                // Constrain to the legitimate candidate set: this server plus destinations not
-                // reachable via the peer itself. This drops the peer's own domain / echoed servers
-                // as defense-in-depth, so the persisted set stays meaningful.
                 Set<String> allowed = mgr.exposableServers(d);
                 List<String> list = new ArrayList<>();
                 for (String srv : csvDomains(req, "servers")) {
                     if (allowed.contains(srv)) list.add(srv);
                 }
                 mgr.getPeerRegistry().setExposedServers(d, list);
-                // Re-advertise the new exposed set + matching routes immediately.
                 if (isReachable(mgr, d)) {
                     mgr.sendRoutingUpdate(d);
                     mgr.sendRoomState(d);
@@ -680,7 +667,6 @@ public class FederationApiServlet extends HttpServlet {
                 if (d == null || enabled == null) return required("domain", "enabled");
                 if (!mgr.getPeerRegistry().contains(d)) return error("not a configured peer");
                 mgr.getPeerRegistry().setContactListsAllowed(d, Boolean.parseBoolean(enabled.strip()));
-                // Servers newly reachable across this link get their list (and are asked for theirs) now.
                 mgr.getContactLists().resendAll();
                 return OK;
             }
@@ -693,12 +679,11 @@ public class FederationApiServlet extends HttpServlet {
                 return OK;
             }
             case "deny-route": case "allow-route": {
-                String d = domainParam(req, "domain");             // the advertising peer
-                String dest = domainParam(req, "destination");     // the advertised server
+                String d = domainParam(req, "domain");
+                String dest = domainParam(req, "destination");
                 if (d == null || dest == null) return required("domain", "destination");
                 if (!mgr.getPeerRegistry().contains(d)) return error("not a configured peer");
-                String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-                if (dest.equals(localDomain) || dest.equals(d)) {
+                if (dest.equals(localDomain()) || dest.equals(d)) {
                     return error("cannot deny the peer itself or this server");
                 }
                 if ("deny-route".equals(action)) mgr.denyRouteFromPeer(d, dest);
@@ -710,7 +695,7 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    /** Per-room federation settings and the pattern-matched defaults applied to new rooms. */
+    /** Per-room federation settings, and the defaults applied to new rooms by name pattern. */
     private String roomAction(String action, HttpServletRequest req, FederationManager mgr) {
         switch (action) {
             case "set-room": {
@@ -723,7 +708,7 @@ public class FederationApiServlet extends HttpServlet {
             case "set-room-visibility": {
                 String jid = param(req, "jid");
                 if (jid == null) return required("jid");
-                mgr.setRoomVisibility(jid, csvDomains(req, "servers"));   // empty list = all
+                mgr.setRoomVisibility(jid, csvDomains(req, "servers"));
                 return OK;
             }
             case "set-room-autoaccept": {
@@ -747,7 +732,7 @@ public class FederationApiServlet extends HttpServlet {
                 boolean autoAccept = Boolean.parseBoolean(req.getParameter("autoAccept"));
                 boolean autoMap    = Boolean.parseBoolean(req.getParameter("autoMap"));
                 String filesParam  = req.getParameter("filesEnabled");
-                boolean filesEnabled = filesParam == null || Boolean.parseBoolean(filesParam.strip()); // default on
+                boolean filesEnabled = filesParam == null || Boolean.parseBoolean(filesParam.strip());
                 mgr.getRoomDefaults().save(pattern, federated, autoAccept,
                                            csvDomains(req, "visible"), autoMap, filesEnabled);
                 return OK;
@@ -765,7 +750,7 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    /** Requesting, answering, suspending and tearing down local-room ↔ remote-room mappings. */
+    /** Requesting, answering, disabling and removing room mappings. */
     private String mappingAction(String action, HttpServletRequest req, FederationManager mgr) {
         switch (action) {
             case "map-room": {
@@ -775,8 +760,7 @@ public class FederationApiServlet extends HttpServlet {
                 if (localJid == null || remoteJid == null || remoteDomain == null) {
                     return error("localJid, remoteJid, remoteDomain required");
                 }
-                // Reciprocity: you may only map your room to a peer's room if you've shared THAT room
-                // with the peer (federation enabled + the peer is in the room's visibility ACL).
+                // A room may only be mapped to a peer's room once it is shared with that peer.
                 if (!mgr.roomSharedWith(localJid, remoteDomain)) {
                     return error("You must share this room with " + remoteDomain
                             + " before mapping it to a room there. Enable federation on the room and add "
@@ -802,8 +786,8 @@ public class FederationApiServlet extends HttpServlet {
                 String localJid = param(req, "localJid");
                 if (localJid == null) return required("localJid");
                 String remoteDomain = param(req, "remoteDomain");
-                if (remoteDomain != null) mgr.unmapRoom(localJid, remoteDomain);   // just this peer
-                else                      mgr.unmapRooms(localJid);                // every mapping
+                if (remoteDomain != null) mgr.unmapRoom(localJid, remoteDomain);
+                else                      mgr.unmapRooms(localJid);
                 return OK;
             }
             default:
@@ -811,7 +795,7 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    /** File-relay switches: the global gate, size/retention limits, storage, and the AV scanner. */
+    /** File relay settings: the global switch, size and retention limits, storage, and the AV scanner. */
     private String fileAction(String action, HttpServletRequest req, FederationManager mgr) {
         switch (action) {
             case "set-files-enabled":
@@ -835,8 +819,7 @@ public class FederationApiServlet extends HttpServlet {
                 String reply = applyBoundedInt(req, "days", FederationProperties.FILES_LOG_RETENTION_DAYS,
                                                "filesLogRetentionDays", 1, Integer.MAX_VALUE,
                                                "days must be at least 1");
-                // Apply the new window now, so a shortened retention takes visible effect
-                // instead of waiting for the next six-hourly prune.
+                // Prune now rather than at the next scheduled pass, so a shorter window shows at once.
                 if (isOk(reply) && mgr.getFileRelay() != null) mgr.getFileRelay().logRetentionChanged();
                 return reply;
             }
@@ -861,8 +844,7 @@ public class FederationApiServlet extends HttpServlet {
                 }
                 String previous = FederationProperties.FILES_STORAGE_DIR.getValue();
                 FederationProperties.FILES_STORAGE_DIR.setValue(dir);
-                // Move the store now; if the new directory is unusable, roll the property back
-                // so the UI keeps showing where files are actually served from.
+                // An unusable directory rolls the property back, so it always names where files are served from.
                 String moveError = mgr.getFileRelay() != null ? mgr.getFileRelay().storageDirChanged() : null;
                 if (moveError != null) {
                     FederationProperties.FILES_STORAGE_DIR.setValue(previous);
@@ -885,9 +867,8 @@ public class FederationApiServlet extends HttpServlet {
                 String group = param(req, "group");
                 if (group == null) return required("group");
                 if (!cl.localGroupNames().contains(group)) return error("no such group: " + group);
-                // A server the group is already shared with stays allowed while its route is down
-                // (the page shows it as pending); a new one must be reachable over a trusted path.
-                Set<String> allowed = new java.util.HashSet<>(cl.shareableServers());
+                // An existing target stays allowed while its route is down; a new one must be reachable.
+                Set<String> allowed = new HashSet<>(cl.shareableServers());
                 cl.getShareRules().stream().filter(r -> r.group().equals(group))
                   .forEach(r -> allowed.addAll(r.targets()));
                 List<String> targets = new ArrayList<>();
@@ -939,7 +920,7 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    /** Server-wide federation switches, timers, and the one-shot pushes the admin can trigger. */
+    /** Server-wide switches and timers, and the openfire.xml reload. */
     private String settingAction(String action, HttpServletRequest req, FederationManager mgr) {
         switch (action) {
             case "set-allowlist":
@@ -995,12 +976,10 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    // ── JSON replies ─────────────────────────────────────────────────────────
-
     /** The reply for an action that succeeded and has nothing to report back. */
     private static final String OK = "{\"ok\":true}";
 
-    /** {@code {"ok":true,"<key>":<value>}} — for numbers and booleans, which need no quoting. */
+    /** {@code {"ok":true,"<key>":<value>}}, for numbers and booleans, which need no quoting. */
     static String ok(String key, Object value) {
         return "{\"ok\":true,\"" + key + "\":" + value + "}";
     }
@@ -1010,10 +989,7 @@ public class FederationApiServlet extends HttpServlet {
         return "{\"ok\":true,\"" + key + "\":\"" + esc(value) + "\"}";
     }
 
-    /**
-     * {@code {"error":"<message>"}}, with the message JSON-escaped — so a message may safely quote
-     * admin- or peer-supplied text (a domain, a path, a filesystem error) without breaking the reply.
-     */
+    /** {@code {"error":"<message>"}}, with the message JSON-escaped. */
     static String error(String message) {
         return "{\"error\":\"" + esc(message) + "\"}";
     }
@@ -1023,12 +999,10 @@ public class FederationApiServlet extends HttpServlet {
         return error(String.join(" and ", names) + " required");
     }
 
-    /** True when {@code reply} reports success — the gate for a side effect that must not run on error. */
+    /** Whether {@code reply} reports success. */
     static boolean isOk(String reply) {
         return reply.startsWith("{\"ok\":true");
     }
-
-    // ── Request parameters ───────────────────────────────────────────────────
 
     /** Trimmed value of {@code name}, or null when the parameter is absent or blank. */
     private static String param(HttpServletRequest req, String name) {
@@ -1036,7 +1010,7 @@ public class FederationApiServlet extends HttpServlet {
         return v == null || v.isBlank() ? null : v.strip();
     }
 
-    /** {@link #param} lowercased: domains are stored and compared in lower case throughout. */
+    /** {@link #param} lowercased, since domains are stored and compared in lower case. */
     private static String domainParam(HttpServletRequest req, String name) {
         String v = param(req, name);
         return v == null ? null : v.toLowerCase();
@@ -1053,7 +1027,7 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    /** Comma-separated domains, lowercased and blank-free. An absent parameter yields an empty list. */
+    /** Comma-separated domains, lowercased, without blanks; empty when the parameter is absent. */
     private static List<String> csvDomains(HttpServletRequest req, String name) {
         List<String> list = new ArrayList<>();
         String raw = req.getParameter(name);
@@ -1064,17 +1038,12 @@ public class FederationApiServlet extends HttpServlet {
         return list;
     }
 
-    /** Tells "you didn't send it" apart from "what you sent isn't a number" for a `seconds` parameter. */
+    /** The error for a missing or non-numeric {@code seconds} parameter. */
     private static String secondsError(HttpServletRequest req) {
         return param(req, "seconds") == null ? required("seconds") : error("seconds must be an integer");
     }
 
-    // ── Property writers ─────────────────────────────────────────────────────
-
-    /**
-     * Applies the {@code enabled} parameter to a boolean property and answers with the value that
-     * was actually stored, so the page renders what persisted rather than what it sent.
-     */
+    /** Applies the {@code enabled} parameter to a boolean property and answers with the value stored. */
     private static String applyToggle(HttpServletRequest req, SystemProperty<Boolean> prop, String jsonKey) {
         String enabled = req.getParameter("enabled");
         if (enabled == null) return required("enabled");
@@ -1083,10 +1052,8 @@ public class FederationApiServlet extends HttpServlet {
     }
 
     /**
-     * Applies an integer parameter to a property once it is present, parseable, and inside
-     * {@code [min, max]}; otherwise answers with the matching error and leaves the property alone.
-     * {@code rangeMessage} is the operator-facing wording for an out-of-range value, which differs
-     * per setting ("port must be between 1 and 65535", "days must be at least 1", …).
+     * Applies an integer parameter to a property when it is present, numeric and within
+     * {@code [min, max]}; otherwise answers with the error and leaves the property unchanged.
      */
     private static String applyBoundedInt(HttpServletRequest req, String name, SystemProperty<Integer> prop,
                                           String jsonKey, int min, int max, String rangeMessage) {
@@ -1098,23 +1065,22 @@ public class FederationApiServlet extends HttpServlet {
         return ok(jsonKey, prop.getValue());
     }
 
-    /** Smallest AV scan timeout that leaves clamd room to answer; below this the scan just flaps. */
+    /** Smallest AV scan timeout that leaves clamd time to answer. */
     private static final int MIN_AV_TIMEOUT_MS = 1000;
 
     private static final String CSRF_COOKIE = "fed-csrf";
 
-    /** Issues a readable (non-HttpOnly) CSRF token cookie if the client doesn't have one yet. */
+    /** Issues the double-submit CSRF cookie if the client has none; not HttpOnly, since the page reads it. */
     private void ensureCsrfCookie(HttpServletRequest req, HttpServletResponse resp) {
         Cookie existing = CookieUtils.getCookie(req, CSRF_COOKIE);
         if (existing != null && existing.getValue() != null && !existing.getValue().isEmpty()) return;
         Cookie c = new Cookie(CSRF_COOKIE, StringUtils.randomString(24));
-        c.setPath("/");        // available to the whole admin origin (page + /api)
-        c.setMaxAge(-1);       // session cookie
-        // Deliberately NOT HttpOnly: the double-submit pattern needs the page JS to read it.
+        c.setPath("/");
+        c.setMaxAge(-1);
         resp.addCookie(c);
     }
 
-    /** Double-submit check: the 'csrf' POST parameter must equal the fed-csrf cookie. */
+    /** Double-submit CSRF check: the {@code csrf} parameter must equal the cookie. */
     private boolean validateCsrf(HttpServletRequest req) {
         Cookie c = CookieUtils.getCookie(req, CSRF_COOKIE);
         String param = req.getParameter("csrf");
@@ -1122,6 +1088,7 @@ public class FederationApiServlet extends HttpServlet {
             && c.getValue().equals(param);
     }
 
+    /** Escapes {@code s} for a JSON string, including every control character; null becomes empty. */
     static String esc(String s) {
         if (s == null) return "";
         StringBuilder b = new StringBuilder(s.length() + 8);
@@ -1134,8 +1101,6 @@ public class FederationApiServlet extends HttpServlet {
                 case '\r' -> b.append("\\r");
                 case '\t' -> b.append("\\t");
                 default -> {
-                    // Escape any remaining control character so peer-supplied strings (presence
-                    // status/show, room names, JIDs) can never produce invalid JSON in the admin feed.
                     if (c < 0x20) b.append(String.format("\\u%04x", (int) c));
                     else          b.append(c);
                 }
@@ -1146,24 +1111,7 @@ public class FederationApiServlet extends HttpServlet {
 
     private static String str(Object o) { return o == null ? "" : o.toString(); }
 
-    /**
-     * Minimal syntactic check for an admin-entered peer domain: lowercase host characters only
-     * (letters, digits, {@code . - _}). Single-label lab hostnames like {@code 2501} are allowed;
-     * quotes, whitespace, and angle brackets — which could break the status JSON or the admin UI's
-     * inline handlers if persisted and rendered — are rejected. Not a full hostname validation.
-     */
-    static boolean isPlausibleDomain(String d) {
-        if (d == null || d.isEmpty() || d.length() > 253) return false;
-        for (int i = 0; i < d.length(); i++) {
-            char c = d.charAt(i);
-            boolean ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                       || c == '.' || c == '-' || c == '_';
-            if (!ok) return false;
-        }
-        return true;
-    }
-
-    /** True if the peer currently has a live (REACHABLE) federation link. */
+    /** Whether the peer currently has a REACHABLE federation link. */
     private boolean isReachable(FederationManager mgr, String domain) {
         return mgr.getPeerRegistry().getPeer(domain)
                   .map(p -> p.getStatus() == PeerServer.Status.REACHABLE)

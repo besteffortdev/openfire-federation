@@ -4,7 +4,7 @@
     <title>Federation</title>
     <meta charset="UTF-8">
     <style>
-        /* ══ Design tokens ═══════════════════════════════════════════ */
+        /* Design tokens */
         #fed-root {
             --fg:          #1f2933;
             --muted:       #667085;
@@ -36,7 +36,7 @@
         }
         #fed-root *, #fed-root *::before, #fed-root *::after { box-sizing: border-box; }
 
-        /* ══ Header ══════════════════════════════════════════════════ */
+        /* Header */
         .fed-header {
             display: flex; align-items: center; gap: 14px;
             flex-wrap: wrap; margin: 4px 0 22px;
@@ -59,7 +59,7 @@
         .fed-badge.warn    { background: var(--amber-soft); color: var(--amber-ink); }
         .fed-badge.neutral { background: var(--surface-2); color: var(--muted); }
 
-        /* ══ Tabs ════════════════════════════════════════════════════ */
+        /* Tabs */
         .fed-tabs {
             display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 22px;
         }
@@ -76,7 +76,7 @@
         .fed-panel.active { display: block; }
         @keyframes fedfade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 
-        /* ══ Sub-tabs (in-panel bar menu) ════════════════════════════ */
+        /* Sub-tabs (in-panel bar menu) */
         .fed-subtabs {
             display: inline-flex; gap: 3px; padding: 3px;
             background: var(--surface-2); border-radius: 999px; margin-bottom: 20px;
@@ -92,7 +92,7 @@
         .fed-subpanel { display: none; animation: fedfade .18s ease; }
         .fed-subpanel.active { display: block; }
 
-        /* ══ Section cards ═══════════════════════════════════════════ */
+        /* Section cards */
         .section-box {
             border: 1px solid var(--line); border-radius: var(--radius);
             background: #fff; box-shadow: var(--shadow);
@@ -114,7 +114,7 @@
         }
         .count-chip:empty { display: none; }
 
-        /* ══ Filter inputs ═══════════════════════════════════════════ */
+        /* Filter inputs */
         .filter-input, .list-search {
             margin-left: auto; width: 220px; max-width: 50%;
             padding: 6px 11px 6px 30px; border: 1px solid var(--line);
@@ -130,7 +130,7 @@
         #group-search { margin: 0 0 14px; width: 320px; }
         .list-search.in-col { width: 100%; max-width: none; box-sizing: border-box; margin: 0 0 6px; }
 
-        /* ══ Tables ══════════════════════════════════════════════════ */
+        /* Tables */
         .table-scroll { max-height: 480px; overflow: auto; }
         .fed-table { width: 100%; border-collapse: collapse; font-size: 13px; }
         .fed-table thead th {
@@ -155,7 +155,7 @@
         .fed-table td.ts   { color: var(--faint); font-size: 11px; white-space: nowrap; }
         .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 
-        /* ══ Status dots ═════════════════════════════════════════════ */
+        /* Status dots */
         .status-dot {
             display: inline-block; width: 9px; height: 9px;
             border-radius: 50%; margin-right: 6px; vertical-align: middle;
@@ -166,7 +166,7 @@
         .status-dot.grey   { background: var(--grey); }
         .status-dot.orange { background: var(--amber); }
 
-        /* ══ Buttons ═════════════════════════════════════════════════ */
+        /* Buttons */
         .btn {
             padding: 7px 15px; border: 1px solid transparent; border-radius: var(--radius-sm);
             cursor: pointer; font: inherit; font-size: 13px; font-weight: 600;
@@ -183,7 +183,7 @@
         .btn-ghost  { background: var(--surface-2); color: #475467; }
         .btn-ghost:hover { background: #e6e9ee; }
 
-        /* ══ Add-peer form ═══════════════════════════════════════════ */
+        /* Add-peer form */
         .add-peer-form { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
         .add-peer-form input[type=text] {
             flex: 1; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
@@ -194,7 +194,7 @@
         }
         .hint { color: var(--muted); font-size: 12px; line-height: 1.55; }
 
-        /* ══ Toggle switch ═══════════════════════════════════════════ */
+        /* Toggle switch */
         .toggle { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
         .toggle input { opacity: 0; width: 0; height: 0; }
         .slider {
@@ -211,7 +211,7 @@
         input:checked + .slider:before { transform: translateX(18px); }
         input:focus-visible + .slider  { box-shadow: 0 0 0 3px var(--primary-soft); }
 
-        /* ══ Settings rows ═══════════════════════════════════════════ */
+        /* Settings rows */
         .setting {
             display: flex; align-items: flex-start; gap: 18px;
             padding: 16px 0; border-top: 1px solid var(--line-soft);
@@ -236,10 +236,10 @@
         }
         .num-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
 
-        /* ══ Status dot helper + presence ════════════════════════════ */
+        /* Status dot helper + presence */
         p.empty, .empty { color: var(--faint); font-style: italic; }
 
-        /* ══ Mapping rows ════════════════════════════════════════════ */
+        /* Mapping rows */
         .mapping-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
         .mapping-row:last-child { margin-bottom: 0; }
         /* A room mapping: its own line, then any warning on a line of its own underneath. */
@@ -256,7 +256,7 @@
                                 padding: 2px 9px; font-variant-numeric: tabular-nums; cursor: help; }
         .room-dup             { margin-top: 5px; }
 
-        /* ══ Collapsible peer sections ═══════════════════════════════ */
+        /* Collapsible peer sections */
         .peer-section {
             border: 1px solid var(--line); border-radius: var(--radius-sm);
             overflow: hidden; margin-bottom: 12px;
@@ -278,7 +278,7 @@
         }
         .peer-section-body  { border-top: 1px solid var(--line); }
 
-        /* ══ Badges ══════════════════════════════════════════════════ */
+        /* Badges */
         .badge {
             display: inline-block; padding: 2px 9px; border-radius: 999px;
             font-size: 11px; font-weight: 700; white-space: nowrap;
@@ -295,7 +295,7 @@
         .badge-reject-policy   { background: var(--amber-soft); color: var(--amber-ink); }
         .badge-reject-security { background: var(--red-soft);   color: var(--red-ink); }
 
-        /* ══ Untrusted exposed-room editor ═══════════════════════════ */
+        /* Untrusted exposed-room editor */
         .exposed-editor-row td { background: var(--surface); }
         .exposed-cols { display: flex; gap: 22px; padding: 6px 2px 8px; }
         .exposed-col { flex: 1 1 0; min-width: 0; }
@@ -309,10 +309,10 @@
         .exposed-room:last-of-type { border-bottom: none; }
         .exposed-room input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
         .exposed-room small { color: var(--muted); }
-        /* Visibility ACL server list: cap at ~5 rows, scroll beyond (6th row peeks to hint). */
+        /* The visibility list shows about five rows, then scrolls. */
         .roomvis-list { max-height: 150px; overflow-y: auto; overscroll-behavior: contain; }
 
-        /* ══ Room settings expander (arrow on federated rooms) ═══════ */
+        /* Room settings expander (arrow on federated rooms) */
         .room-detail-cell { text-align: right; white-space: nowrap; }
         .room-detail-sum  { color: var(--muted); font-size: 11px; margin-right: 8px; }
         .room-expand-btn {
@@ -326,14 +326,14 @@
         .room-expand-btn.open  { transform: rotate(90deg); }
         .room-detail-row .exposed-cols { align-items: flex-start; }
 
-        /* Denied (disabled) routing-table entries — kept listed so the deny can be lifted. */
+        /* Denied routes stay listed so the deny can be lifted. */
         .route-denied td { color: var(--faint); background: var(--surface); }
 
-        /* ══ Misc ════════════════════════════════════════════════════ */
+        /* Misc */
         .retry-countdown { color: var(--muted); font-size: 11px; font-style: italic; margin-left: 6px; }
         .panel-foot { font-size: 12px; color: var(--muted); margin: 4px 2px 0; line-height: 1.6; }
 
-        /* ══ Saved toast ═════════════════════════════════════════════ */
+        /* Saved toast */
         #fed-toast {
             position: fixed; top: 18px; right: 18px; z-index: 9999;
             background: #101828; color: #fff;
@@ -368,7 +368,7 @@
         <button class="fed-tab"        data-tab="settings">Settings</button>
     </div>
 
-    <!-- ── Peers panel ──────────────────────────────────────────────────────── -->
+    <!-- Peers panel -->
     <div id="panel-peers" class="fed-panel active">
 
         <div class="section-box">
@@ -444,7 +444,7 @@
         </div>
     </div>
 
-    <!-- ── Settings panel ───────────────────────────────────────────────────────── -->
+    <!-- Settings panel -->
     <div id="panel-settings" class="fed-panel">
 
         <div class="section-box">
@@ -615,7 +615,7 @@
         </div>
     </div>
 
-    <!-- ── Routing table panel ──────────────────────────────────────────────── -->
+    <!-- Routing table panel -->
     <div id="panel-routing" class="fed-panel">
         <div class="section-box">
             <div class="section-box-header">
@@ -651,7 +651,7 @@
         </p>
     </div>
 
-    <!-- ── Rooms panel ──────────────────────────────────────────────────────── -->
+    <!-- Rooms panel -->
     <div id="panel-rooms" class="fed-panel">
 
         <div class="fed-subtabs">
@@ -659,7 +659,7 @@
             <button class="fed-subtab"        data-subtab="rooms-config">Rooms config</button>
         </div>
 
-        <!-- ·· Room Sharing ·············································· -->
+        <!-- Room Sharing -->
         <div id="subpanel-room-sharing" class="fed-subpanel active">
 
         <div class="section-box" id="pending-requests-box" style="display:none">
@@ -706,7 +706,7 @@
 
         </div><!-- /subpanel-room-sharing -->
 
-        <!-- ·· Rooms config ············································· -->
+        <!-- Rooms config -->
         <div id="subpanel-rooms-config" class="fed-subpanel">
 
         <div class="section-box">
@@ -776,7 +776,7 @@
         </div><!-- /subpanel-rooms-config -->
     </div>
 
-    <!-- ── Users panel ───────────────────────────────────────────────────────── -->
+    <!-- Users panel -->
     <div id="panel-users" class="fed-panel">
 
         <div class="fed-subtabs">
@@ -784,7 +784,7 @@
             <button class="fed-subtab"        data-subtab="contact-delivery">Sent lists</button>
         </div>
 
-        <!-- ·· Contact Sharing ··········································· -->
+        <!-- Contact Sharing -->
         <div id="subpanel-contact-sharing" class="fed-subpanel active">
 
         <div class="section-box">
@@ -842,7 +842,7 @@
 
         </div><!-- /subpanel-contact-sharing -->
 
-        <!-- ·· Sent lists ··············································· -->
+        <!-- Sent lists -->
         <div id="subpanel-contact-delivery" class="fed-subpanel">
 
         <div class="section-box">
@@ -859,7 +859,7 @@
         </div><!-- /subpanel-contact-delivery -->
     </div>
 
-    <!-- ── Files panel ───────────────────────────────────────────────────────── -->
+    <!-- Files panel -->
     <div id="panel-files" class="fed-panel">
 
         <div class="fed-subtabs">
@@ -867,7 +867,7 @@
             <button class="fed-subtab"        data-subtab="files-activity">Activity Log</button>
         </div>
 
-        <!-- ·· File Sharing ·············································· -->
+        <!-- File Sharing -->
         <div id="subpanel-files-sharing" class="fed-subpanel active">
 
         <div class="section-box">
@@ -1020,7 +1020,7 @@
 
         </div><!-- /subpanel-files-sharing -->
 
-        <!-- ·· Activity Log ·············································· -->
+        <!-- Activity Log -->
         <div id="subpanel-files-activity" class="fed-subpanel">
 
         <div class="section-box">

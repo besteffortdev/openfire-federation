@@ -23,31 +23,15 @@ import java.util.Deque;
 import java.util.List;
 
 /**
- * Append-only, disk-backed activity log for the file relay (AV scans, rejected files), living in
- * Openfire's own log directory next to {@code openfire.log} so an operator can read, grep, ship, or
- * archive it straight from the file system. It is also what makes those tables survive a restart:
- * {@link #readRecent} reloads the newest entries back into the admin UI's in-memory view at start.
- *
- * <p>Format is one tab-separated record per line, prefixed by a {@code #} header line describing the
- * columns. The first column is always an ISO-8601 UTC instant; the rest are the caller's fields,
- * with backslash, tab, CR and LF escaped ({@code \\}, {@code \t}, {@code \r}, {@code \n}) so a file
- * name or an AV detail string can never break the line/column structure. That keeps it usable with
- * ordinary tools ({@code grep}, {@code awk}, {@code cut}) while still round-tripping exactly.
- *
- * <p>Entries older than the configured retention are dropped by {@link #prune}, which rewrites the
- * file through a sibling temp file and an atomic move — a reader never sees a half-written log, and
- * a failure part-way leaves the existing log untouched.
- *
- * <p>Writes open, append and close per record: volume is low (a rejection or a scan, not a chat
- * message), and holding no descriptor means an operator may rotate, truncate or delete the file at
- * any time without the plugin noticing or blocking on it. All public methods are synchronized, so
- * an append can never interleave with a prune's rewrite.
+ * An append-only activity log of the file relay, in Openfire's log directory: one tab-separated
+ * record per line under a {@code #} header, starting with an ISO-8601 time, with tabs and line
+ * breaks escaped. Pruning rewrites it atomically, and all methods are synchronized.
  */
 final class FileActivityLog {
 
     private static final Logger Log = LoggerFactory.getLogger(FileActivityLog.class);
 
-    /** Suppress repeat I/O warnings (a full or read-only disk would otherwise flood openfire.log). */
+    /** Minimum time between repeated I/O warnings, so a full disk cannot flood openfire.log. */
     private static final long FAILURE_LOG_INTERVAL_MS = 3600_000L;
 
     /** One parsed record: its timestamp and the caller's fields, in written order. */
@@ -57,28 +41,18 @@ final class FileActivityLog {
     private final String header;
     private long lastFailureLoggedAt;
 
-    /**
-     * @param fileName log file name, resolved inside Openfire's log directory
-     * @param header   {@code #}-prefixed column description, written when the file is created
-     */
+    /** A log named {@code fileName} in Openfire's log directory, created with the {@code #} header given. */
     FileActivityLog(String fileName, String header) {
         this.fileName = fileName;
         this.header = header;
     }
 
-    /**
-     * Absolute path of this log. Resolved per call rather than cached so it still points at the
-     * right place if Openfire's home is re-resolved during a reload.
-     */
+    /** Absolute path of this log, resolved on each call. */
     synchronized Path path() {
         return JiveGlobals.getHomePath().resolve("logs").resolve(fileName);
     }
 
-    /**
-     * Creates the log (directory + header line) if it isn't there yet, so an operator can find and
-     * {@code tail -F} it from the moment the plugin starts rather than only after the first entry.
-     * Never throws.
-     */
+    /** Creates the log with its header if it does not exist, so it can be tailed from start-up; never throws. */
     synchronized void ensureExists() {
         Path file = path();
         try {
@@ -89,27 +63,19 @@ final class FileActivityLog {
                 return;
             }
         } catch (IOException e) {
-            Log.warn("Could not create file activity log {}: {}", file, e.getMessage());
+            Log.warn("Could not create file activity log {}", file, e);
             return;
         }
         migrateHeader(file);
     }
 
-    /**
-     * Rewrites a stale {@code #} header in place when a release adds a column. Without this the
-     * file would keep describing the old layout indefinitely — {@link #prune} does write the
-     * current header, but only on a run that actually drops something, so a log whose entries are
-     * all inside the retention window would never be corrected. Since the header is what tells an
-     * operator (and their {@code awk}/{@code cut}) which column is which, a wrong one is worse
-     * than none. Existing records are left exactly as written; readers decode positionally and
-     * tolerate both widths.
-     */
+    /** Replaces an outdated header after a release adds a column; the records are left as written. */
     private void migrateHeader(Path file) {
         String existing;
         try (BufferedReader r = reader(file)) {
             existing = r.readLine();
         } catch (IOException e) {
-            Log.warn("Could not read header of file activity log {}: {}", file, e.getMessage());
+            Log.warn("Could not read header of file activity log {}", file, e);
             return;
         }
         if (existing == null || !existing.startsWith("#") || existing.equals(header)) return;
@@ -121,15 +87,14 @@ final class FileActivityLog {
                      StandardOpenOption.WRITE)) {
             w.write(header);
             w.newLine();
-            r.readLine();                       // drop the stale header
+            r.readLine();
             String line;
             while ((line = r.readLine()) != null) {
                 w.write(line);
                 w.newLine();
             }
         } catch (IOException e) {
-            Log.warn("Could not rewrite header of file activity log {} (left unchanged): {}",
-                     file, e.getMessage());
+            Log.warn("Could not rewrite header of file activity log {} (left unchanged)", file, e);
             deleteQuietly(tmp);
             return;
         }
@@ -137,16 +102,13 @@ final class FileActivityLog {
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             Log.info("Updated column header of file activity log {}", file);
         } catch (IOException e) {
-            Log.warn("Could not replace file activity log {} after header update (left unchanged): {}",
-                     file, e.getMessage());
+            Log.warn("Could not replace file activity log {} after header update (left unchanged)", file, e);
             deleteQuietly(tmp);
         }
     }
 
-    /** Appends one record, stamped with the current time. Never throws — logging must not break a relay. */
+    /** Appends one record stamped with the current time; never throws, so logging cannot break a relay. */
     synchronized void append(String... values) {
-        // Millisecond precision: matches what the admin UI shows and keeps the column narrow —
-        // Instant.now()'s native nanoseconds would add nine digits nobody reads.
         StringBuilder sb = new StringBuilder(160).append(Instant.now().truncatedTo(ChronoUnit.MILLIS));
         for (String v : values) sb.append('\t').append(escape(v));
         sb.append('\n');
@@ -163,17 +125,13 @@ final class FileActivityLog {
             long now = System.currentTimeMillis();
             if (now - lastFailureLoggedAt > FAILURE_LOG_INTERVAL_MS) {
                 lastFailureLoggedAt = now;
-                Log.warn("Could not append to file activity log {}: {} (the admin UI's in-memory "
-                       + "view is unaffected; further failures suppressed for an hour)", file, e.getMessage());
+                Log.warn("Could not append to file activity log {} (the admin UI's in-memory view is "
+                       + "unaffected; further failures suppressed for an hour)", file, e);
             }
         }
     }
 
-    /**
-     * The last {@code max} records, newest first — the order the admin UI's tables want. Reads the
-     * whole file but only ever holds {@code max} rows, so a long-retained log costs one pass, not
-     * heap. Unparseable lines are skipped.
-     */
+    /** The last {@code max} records, newest first, holding at most {@code max} rows in memory. */
     synchronized List<Row> readRecent(int max) {
         List<Row> newestFirst = new ArrayList<>();
         Path file = path();
@@ -188,17 +146,15 @@ final class FileActivityLog {
                 if (tail.size() > max) tail.removeFirst();
             }
         } catch (IOException e) {
-            Log.warn("Could not read file activity log {}: {}", file, e.getMessage());
+            Log.warn("Could not read file activity log {}", file, e);
         }
         while (!tail.isEmpty()) newestFirst.add(tail.removeLast());
         return newestFirst;
     }
 
     /**
-     * Drops records older than {@code retentionDays}. Returns how many were dropped (0 when there
-     * was nothing to do, or when the rewrite failed and the log was left exactly as it was).
-     * A line whose timestamp can't be parsed has no age to judge, so it is kept rather than
-     * silently destroyed.
+     * Drops records older than {@code retentionDays}, keeping lines without a readable time, and
+     * returns how many were dropped. A failed rewrite leaves the log unchanged.
      */
     synchronized int prune(int retentionDays) {
         Path file = path();
@@ -224,19 +180,18 @@ final class FileActivityLog {
                 w.newLine();
             }
         } catch (IOException e) {
-            Log.warn("Could not prune file activity log {} (left unchanged): {}", file, e.getMessage());
+            Log.warn("Could not prune file activity log {} (left unchanged)", file, e);
             deleteQuietly(tmp);
             return 0;
         }
-        if (dropped == 0) {          // nothing expired — keep the original file and its inode
+        if (dropped == 0) {
             deleteQuietly(tmp);
             return 0;
         }
         try {
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
-            Log.warn("Could not replace file activity log {} after pruning (left unchanged): {}",
-                     file, e.getMessage());
+            Log.warn("Could not replace file activity log {} after pruning (left unchanged)", file, e);
             deleteQuietly(tmp);
             return 0;
         }
@@ -244,12 +199,12 @@ final class FileActivityLog {
         return dropped;
     }
 
-    /** Malformed bytes decode to U+FFFD rather than aborting the read — a corrupt line must not hide the rest. */
+    /** A UTF-8 reader that decodes malformed bytes as U+FFFD, so one corrupt line cannot hide the rest. */
     private static BufferedReader reader(Path file) throws IOException {
         return new BufferedReader(new InputStreamReader(Files.newInputStream(file), StandardCharsets.UTF_8));
     }
 
-    /** Parses one written line back into a {@link Row}; null when it isn't one (header, blank, bad timestamp). */
+    /** Parses a record line into a {@link Row}; null for a header, a blank line or a bad timestamp. */
     private static Row parse(String line) {
         if (line == null || line.isBlank() || line.startsWith("#")) return null;
         String[] parts = line.split("\t", -1);
@@ -257,7 +212,7 @@ final class FileActivityLog {
         try {
             when = Instant.parse(parts[0]).toEpochMilli();
         } catch (DateTimeParseException e) {
-            return null;                     // not a record line — a header, or a truncated write
+            return null;
         }
         List<String> fields = new ArrayList<>(parts.length - 1);
         for (String p : Arrays.asList(parts).subList(1, parts.length)) fields.add(unescape(p));
@@ -295,13 +250,17 @@ final class FileActivityLog {
                 case 't'  -> sb.append('\t');
                 case 'n'  -> sb.append('\n');
                 case 'r'  -> sb.append('\r');
-                default   -> sb.append('\\').append(next);   // not one of ours — leave it as written
+                default   -> sb.append('\\').append(next);
             }
         }
         return sb.toString();
     }
 
     private static void deleteQuietly(Path p) {
-        try { Files.deleteIfExists(p); } catch (IOException ignored) { }
+        try {
+            Files.deleteIfExists(p);
+        } catch (IOException ignored) {
+            // A leftover temporary file is replaced on the next write.
+        }
     }
 }

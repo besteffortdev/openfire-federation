@@ -18,32 +18,9 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Type-filtering policy for the file relay.
- *
- * <ul>
- *   <li><b>Extension allowlist</b> ({@link #isExtensionAllowed}) — enforced at the origin
- *       (egress: a file whose extension isn't on the list is never staged, so it never leaves
- *       this server) and again at the destination (ingress: defense in depth against a peer whose
- *       own egress filter is absent, bypassed, or an older plugin version).</li>
- *   <li><b>Content verification</b> ({@link #checkContent}) — ingress only. Sniffs the received
- *       bytes by magic number (Apache Tika, no filename hint) and rejects a confident, specific
- *       mismatch against the claimed extension (e.g. a Windows executable renamed to {@code .jpg}).
- *       Tika's generic fallback answers ({@code application/octet-stream}, {@code text/plain} —
- *       "I can't tell") are treated as inconclusive, not a mismatch: byte-signature detection
- *       cannot distinguish plain text from a text-based script, so that class of disguise is left
- *       to the servlet's existing controls ({@code Content-Security-Policy: sandbox} +
- *       {@code X-Content-Type-Options: nosniff} on every response — see
- *       {@link FederationFileServlet}), not re-solved here.</li>
- * </ul>
- *
- * <p>Deliberately reuses Tika's own {@code MimeTypes} registry for the extension↔MIME-type
- * relationship rather than hand-maintaining a parallel table — one allowlist (extensions, the
- * form an admin actually wants to type) covers both nouns in "extension / mime type filtering".
- *
- * <p>Transit hops never call either method: {@link FileRelayManager#relayToward} forwards file-*
- * elements without ever decoding their content, so a purely-relaying server is unaffected by this
- * policy regardless of configuration (matches the file relay's existing "transit never stores"
- * design).
+ * File type checks of the relay: the extension allowlist, applied at both ends, and a content sniff
+ * on arrival (Apache Tika) that rejects a file whose bytes clearly contradict its extension.
+ * Inconclusive sniffs pass; transit servers never call either check.
  */
 final class FileTypePolicy {
 
@@ -52,19 +29,11 @@ final class FileTypePolicy {
     private static final Tika TIKA = new Tika();
     private static final MimeTypes MIME_TYPES = MimeTypes.getDefaultMimeTypes();
 
-    /** Tika's "I couldn't determine anything more specific" answers — not a basis for rejection. */
+    /** Tika's answers when it cannot tell, which are not grounds for rejection. */
     private static final Set<String> GENERIC_FALLBACK_MIMES =
             Set.of("application/octet-stream", "text/plain");
 
-    /**
-     * ISO-BMFF container family: {@code .m4a}/{@code .m4b}/{@code .m4p}/{@code .m4r} (audio),
-     * {@code .mp4}/{@code .m4v} (video), and {@code .mov} (QuickTime) are all boxes of the same
-     * underlying container format. Tika's magic-byte sniff picks a MIME type from the {@code ftyp}
-     * box's brand, which is not a reliable audio-vs-video signal in practice — real voice-memo
-     * recordings routinely sniff as {@code video/mp4} or {@code video/quicktime} despite carrying
-     * no video track. Treat any extension in this family as consistent with any detected MIME type
-     * in this family, rather than flagging genuine recordings as forged/renamed files.
-     */
+    /** The ISO-BMFF family, whose sniffed type does not tell audio from video, so any pairing within it passes. */
     private static final Set<String> ISO_BMFF_EXTENSIONS =
             Set.of("mp4", "m4v", "m4a", "m4b", "m4p", "m4r", "mov");
     private static final Set<String> ISO_BMFF_MIMES =
@@ -72,7 +41,7 @@ final class FileTypePolicy {
 
     private FileTypePolicy() {}
 
-    /** Extension of {@code fileName}, lowercased and without the dot; "" when there isn't one. */
+    /** The extension of {@code fileName}, lowercased and without the dot, or empty. */
     static String extensionOf(String fileName) {
         if (fileName == null) return "";
         int dot = fileName.lastIndexOf('.');
@@ -92,29 +61,19 @@ final class FileTypePolicy {
                 .collect(Collectors.toUnmodifiableSet());
     }
 
-    /**
-     * Is this file's extension on the configured allowlist? A blank/empty allowlist allows
-     * nothing (secure by default — an admin who clears the field is turning file types off, not
-     * opening them up); the literal entry {@code *} allows everything.
-     */
+    /** Whether the file's extension is allowed: an empty list allows nothing, and {@code *} everything. */
     static boolean isExtensionAllowed(String fileName) {
         Set<String> allowed = configuredExtensions();
         if (allowed.contains("*")) return true;
         return allowed.contains(extensionOf(fileName));
     }
 
-    /**
-     * Result of a content-vs-extension check. {@code detectedMime} is Tika's best guess — null when
-     * the file couldn't be read/sniffed, otherwise populated even when {@code ok} is true (generic
-     * fallback / inconclusive detections), so a caller can log it either way.
-     */
+    /** The result of a content check; {@code detectedMime} is null only when the file could not be read. */
     record ContentCheck(boolean ok, String detectedMime) { }
 
     /**
-     * Sniffs {@code file}'s actual bytes (magic number only — no filename hint) and checks the
-     * result is consistent with {@code claimedFileName}'s extension. {@code ok} is false only on a
-     * confident, specific mismatch or an unreadable file; an inconclusive (generic-fallback)
-     * detection is {@code ok}.
+     * Sniffs the file's bytes and checks them against the claimed extension. Fails only on a clear
+     * mismatch, an unreadable file or a missing extension.
      */
     static ContentCheck checkContent(Path file, String claimedFileName) {
         String ext = extensionOf(claimedFileName);
@@ -126,7 +85,7 @@ final class FileTypePolicy {
         try (InputStream in = Files.newInputStream(file)) {
             detected = TIKA.detect(in);
         } catch (IOException e) {
-            Log.warn("File relay: content sniff failed for {}: {}", file, e.getMessage());
+            Log.warn("File relay: content sniff failed for {}", file, e);
             return new ContentCheck(false, null);
         }
         if (detected == null || GENERIC_FALLBACK_MIMES.contains(detected)) {
@@ -142,8 +101,7 @@ final class FileTypePolicy {
                 if (stripped.equalsIgnoreCase(ext)) return new ContentCheck(true, detected);
             }
         } catch (MimeTypeException e) {
-            // Detected type isn't itself in Tika's registry (rare) — no extension list to compare
-            // against, so there's nothing to contradict the claim with.
+            // A type Tika itself does not list has no extensions to contradict the claim.
             return new ContentCheck(true, detected);
         }
         Log.warn("File relay: content mismatch for '{}' — claims .{} but sniffs as '{}'",

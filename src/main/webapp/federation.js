@@ -1,19 +1,17 @@
-/* federation.js — admin console client-side logic */
+/* Client-side logic of the federation admin console: renders the status document and posts admin actions. */
 
 const API_URL = 'api';
 
-// Latest status payload, so per-peer server editors can be built from the peer's exposableServers.
+// The latest status document.
 let lastData = {};
-// Untrusted peers whose exposed-server editor is expanded (persisted across refreshes).
+// Peers whose settings panel is open, kept across re-renders.
 const expandedPeerRooms = new Set();
-// In-flight exposed-server edits per domain (server -> checked) so a background refresh doesn't clobber them.
+// Unsaved exposed-server edits per peer, so a refresh does not discard them.
 const editedExposed = {};
-// Federated rooms whose settings panel (visibility + mappings + sharing) is expanded (persisted across refreshes).
+// Rooms whose settings panel is open, kept across re-renders.
 const expandedRoomVis = new Set();
-// In-flight visibility edits per room jid (server -> checked) so a background refresh doesn't clobber them.
+// Unsaved visibility edits per room, so a refresh does not discard them.
 const editedRoomVis = {};
-
-// ── Bootstrap ────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
@@ -22,11 +20,9 @@ document.addEventListener('DOMContentLoaded', () => {
     bindFilters();
     bindTableSorting();
     watchRenders();
-    pollLoop();                       // long-poll: renders immediately, then on every change
-    setInterval(tickClocks, 1000);    // advances countdowns/probe ages between data updates
+    pollLoop();
+    setInterval(tickClocks, 1000);
 });
-
-// ── Tab switching ─────────────────────────────────────────────────────────────
 
 function setupTabs() {
     document.querySelectorAll('.fed-tab').forEach(btn => {
@@ -51,10 +47,7 @@ function setupTabs() {
     });
 }
 
-// ── Data refresh ──────────────────────────────────────────────────────────────
-
-// One-shot fetch for immediate feedback right after a POST action; every other update
-// arrives through pollLoop() the moment the server-side state changes.
+// Fetches the status once, for immediate feedback after an action; pollLoop() delivers every other update.
 function refresh() {
     fetch(API_URL + '?action=status')
         .then(r => r.json())
@@ -62,8 +55,7 @@ function refresh() {
         .catch(err => console.error('Federation API error:', err));
 }
 
-// Long-poll loop: the server holds each request open until the status fingerprint
-// changes (or ~25 s pass), so the page updates as things happen instead of on a timer.
+// Long-polls the status: the server answers when it changes, or after about 25 seconds.
 let statusHash = '';
 async function pollLoop() {
     while (true) {
@@ -106,16 +98,12 @@ function renderAll(data) {
     renderFileConfig(data.fileConfig || {});
 }
 
-// ── Status badge ──────────────────────────────────────────────────────────────
-
 function updateStatusBadge(peers) {
     const badge = document.getElementById('fed-status-badge');
     const reachable = peers.filter(p => p.status === 'REACHABLE').length;
     badge.textContent = reachable + '/' + peers.length + ' peers reachable';
     badge.className = 'fed-badge ' + (reachable > 0 ? 'ok' : peers.length === 0 ? 'neutral' : 'warn');
 }
-
-// ── Peers tab ─────────────────────────────────────────────────────────────────
 
 function bindPeerForm() {
     const domainField = document.getElementById('input-peer-domain');
@@ -156,8 +144,7 @@ function renderPeers(peers) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty">No peers configured yet.</td></tr>';
         return;
     }
-    // Snapshot any in-flight server-editor edits BEFORE we rebuild the table, so a poll
-    // refresh mid-edit doesn't discard the admin's pending checkbox changes.
+    // Captured before the rebuild, so a refresh mid-edit keeps the admin's unsaved changes.
     expandedPeerRooms.forEach(domain => captureExposedEdits(domain));
 
     tbody.innerHTML = peers.map(p => {
@@ -188,13 +175,12 @@ function renderPeers(peers) {
             ? `<span class="badge badge-untrusted" title="Shares only the servers you expose">untrusted</span>`
             : '';
 
-        // S2S cert pinning: a changed cert (possible impersonation) shows a red alert row with
-        // the accept button; a quietly-pinned cert shows an unobtrusive lock.
+        // A changed certificate gets an alert with an accept button; a pinned one a quiet lock.
         const certBadge = p.certMismatch
             ? `<span class="badge badge-untrusted" title="The S2S certificate changed since it was first pinned">⚠ cert changed</span>`
             : (p.certPinned ? `<span class="badge badge-in" title="S2S certificate pinned (trust-on-first-use)">🔒 pinned</span>` : '');
 
-        // Compact summary next to the expand arrow (mirrors the rooms list).
+        // Summary next to the expand arrow.
         const sumParts = [];
         sumParts.push(p.untrusted ? `${(p.exposedServers || []).length} exposed` : 'trusted');
         if (deniedCount) sumParts.push(`${deniedCount} denied`);
@@ -231,8 +217,6 @@ function renderPeers(peers) {
     }).join('');
 }
 
-// ── Per-peer settings panel (connection + trust/exposure + inbound) ───────────
-
 /** Full-width detail row behind the expand arrow: every setting for one peer in one view. */
 function renderPeerDetailRow(p) {
     const dom = jsArg(p.domain);
@@ -241,13 +225,10 @@ function renderPeerDetailRow(p) {
     const needsRetry = isWithdrawn || p.status === 'UNREACHABLE'
                     || p.status === 'PENDING' || p.status === 'UNKNOWN';
 
-    // ── Connection actions ──
     let actionBtns = '';
     if (p.status === 'DISABLED') {
-        // We disabled this peer — only we can re-enable it.
         actionBtns = `<button class="btn-small btn-primary" onclick="enablePeer('${dom}')">Enable</button>`;
     } else if (p.status === 'REMOTE_DISABLED') {
-        // Disabled by the remote — cannot be re-enabled from this side.
         actionBtns = '<span class="exposed-col-sub">Disabled by the remote — only they can re-enable it.</span>';
     } else {
         if (needsRetry) {
@@ -256,8 +237,7 @@ function renderPeerDetailRow(p) {
         actionBtns += `<button class="btn-small btn-warn" onclick="disablePeer('${dom}')">Disable</button>`;
     }
 
-    // ── Outbound: trust level, and (when untrusted) which servers we expose. ──
-    // Pending edits win over the persisted set so a refresh doesn't reset the admin's work.
+    // Outbound: trust, and the servers exposed to an untrusted peer; unsaved edits win over the stored set.
     const trustBtn = p.untrusted
         ? `<button class="btn-small btn-primary" onclick="setUntrusted('${dom}', false)">Make trusted</button>`
         : `<button class="btn-small btn-warn" onclick="setUntrusted('${dom}', true)">Make untrusted</button>`;
@@ -265,8 +245,7 @@ function renderPeerDetailRow(p) {
     if (p.untrusted) {
         const checkedSet = editedExposed[p.domain] || new Set(p.exposedServers || []);
         const candidates = (p.exposableServers || []).slice();
-        // Include any exposed server no longer in the candidate list (e.g. route lost) so it's not
-        // silently dropped from the UI while still persisted.
+        // A stored server that is no longer a candidate (its route was lost) stays listed.
         (p.exposedServers || []).forEach(s => { if (!candidates.includes(s)) candidates.push(s); });
         const list = candidates.length === 0
             ? '<p class="empty" style="margin:4px 0">No servers available to expose yet.</p>'
@@ -294,7 +273,7 @@ function renderPeerDetailRow(p) {
         outbound = '<p class="empty" style="margin:4px 0">Trusted — this peer sees the full topology and all federated rooms.</p>';
     }
 
-    // ── Per-link permission to send shared contact lists (untrusted links only; trusted ones always carry them). ──
+    // Whether contact lists may be sent over this untrusted link; trusted links always carry them.
     const contactLists = p.untrusted ? `
                         <label class="exposed-room" style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px;align-items:flex-start">
                             <input type="checkbox" ${p.contactListsAllowed ? 'checked' : ''}
@@ -309,7 +288,7 @@ function renderPeerDetailRow(p) {
                                 <small>Drops every list arriving over this link, including lists for servers behind this one.</small></span>
                         </label>` : '';
 
-    // ── Inbound: what this peer advertises through to us, each deniable per-link. ──
+    // Inbound: what this peer advertises to us, each of which can be denied.
     const denied = (p.deniedRoutes || []).slice().sort();
     const advSet = new Set([...(p.advertisedVia || []), ...(p.advertisedRoutes || [])]);
     denied.forEach(s => advSet.delete(s));
@@ -429,8 +408,6 @@ function enablePeer(domain) {
     save({ action: 'enable-peer', domain }, 'Peer enabled');
 }
 
-// ── S2S sessions ──────────────────────────────────────────────────────────────
-
 function renderS2SSessions(sessions) {
     const tbody = document.getElementById('s2s-tbody');
     if (sessions.length === 0) {
@@ -495,8 +472,6 @@ function addPeerFromSession(domain) {
     save({ action: 'add-peer', domain, untrusted }, 'Peer added');
 }
 
-// ── Config file (openfire.xml) ──────────────────────────────────────────────────
-
 function renderFileConfig(fc) {
     const pathEl = document.getElementById('fedconfig-path');
     if (pathEl) pathEl.textContent = fc.path || '';
@@ -527,17 +502,8 @@ function reloadFedConfig() {
                    + ' room(s), ' + result.mappingsRequested + ' mapping(s)');
 }
 
-// ── Settings (Settings and Files tabs) ─────────────────────────────────────────
-//
-// Each entry ties one control in index.html (by id) to one field of the status payload.
-// updateSettings() fills the controls on every render, except the one being edited; a toggle
-// saves on change and every other field through its Save button, both via saveSetting(id).
-//   key      status field             def    value shown when the field is absent
-//   action   admin action to post     param  name the value is posted under (toggles: enabled)
-//   check    value -> true, or the message to show instead of saving
-//   states   [off, on] text for a toggle's "…-state" label
-//   confirmOn  question asked before a toggle is turned on
-// A field whose def is a number is read as an integer, any other field as trimmed text.
+// Ties each settings control (by element id) to a status field (key, def) and the action that saves
+// it (action, param); check validates, states labels a toggle and confirmOn asks before turning one on.
 const SETTINGS = {
     'keepalive-input': {
         key: 'keepaliveSeconds', def: 240, action: 'set-keepalive', param: 'seconds',
@@ -591,7 +557,7 @@ function updateSettings(data) {
         const el = document.getElementById(id);
         if (!el) continue;
         const v = data[s.key] != null ? data[s.key] : s.def;
-        const editing = document.activeElement === el;   // don't overwrite what the admin is typing
+        const editing = document.activeElement === el;
         if (s.states) {
             if (!editing) el.checked = !!v;
             const lbl = document.getElementById(id.replace(/-toggle$/, '-state'));
@@ -630,8 +596,7 @@ function saveSetting(id) {
     save({ action: s.action, [s.param || 'enabled']: v });
 }
 
-// Where the activity logs actually live on disk, so an operator can find, tail or archive them
-// without going through this console.
+// Shows where the activity logs are on disk.
 function updateFilesLogPaths(scanPath, rejectionPath) {
     const scanEl = document.getElementById('scan-log-path');
     if (scanEl && scanPath) scanEl.textContent = scanPath;
@@ -691,20 +656,17 @@ function statusClass(s) {
     return 'grey';
 }
 
-// ── Routing table tab ─────────────────────────────────────────────────────────
-
 function renderRouting(entries) {
     const tbody = document.getElementById('routing-tbody');
     if (entries.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty">No routes yet — waiting for S2S connections.</td></tr>';
         return;
     }
-    // Active routes by hop count first; denied (disabled) entries at the bottom.
+    // Active routes by hop count, then denied ones.
     entries.sort((a, b) => (a.denied ? 1 : 0) - (b.denied ? 1 : 0) || (a.hops || 0) - (b.hops || 0));
     tbody.innerHTML = entries.map(r => {
         if (r.denied) {
-            // A deny is remembered per (peer, destination) — the entry stays here disabled
-            // even if the peer withdraws or re-advertises the route, until it is allowed again.
+            // A deny stays listed, whatever the peer advertises, until it is allowed again.
             return `
         <tr class="route-denied">
             <td><s>${escHtml(r.destination)}</s></td>
@@ -715,8 +677,7 @@ function renderRouting(entries) {
                         onclick="allowRoute('${jsArg(r.nextHop)}','${jsArg(r.destination)}')">Allow</button></td>
         </tr>`;
         }
-        // A learned (indirect) route was advertised to us by its next hop — the admin can
-        // deny that advertisement. A direct route IS the peer; use Disable/Remove instead.
+        // Only a learned route can be denied; a direct route is the peer itself.
         const denyBtn = r.destination !== r.nextHop
             ? `<button class="btn-small btn-warn"
                        onclick="denyRoute('${jsArg(r.nextHop)}','${jsArg(r.destination)}')">Deny</button>`
@@ -828,8 +789,6 @@ function allowRoute(peerDomain, destination) {
     save({ action: 'allow-route', domain: peerDomain, destination }, 'Route allowed');
 }
 
-// ── Users tab ──────────────────────────────────────────────────────────────────
-
 function renderUsersTab(cl) {
     renderLocalGroups();
     renderReceivedLists(cl.received || [], cl.localGroups || [], !!cl.groupsReadOnly);
@@ -889,8 +848,6 @@ const checklistFilters = {};
 function reapplyChecklistFilters() {
     Object.entries(checklistFilters).forEach(([id, q]) => filterChecklist(id, q));
 }
-
-// ── Users tab: local groups (share side) ───────────────────────────────────────
 
 const expandedShares = new Set();   // groups whose settings panel is open
 const editedShares = {};            // group -> Set of ticked servers not saved yet
@@ -997,8 +954,6 @@ function saveShare(group) {
         .then(result => { if (result && result.ok) delete editedShares[group]; });
 }
 
-// ── Users tab: what each server receives ───────────────────────────────────────
-
 function renderSentLists(sent) {
     const el = document.getElementById('contact-sent-container');
     if (!el) return;
@@ -1026,8 +981,6 @@ function renderSentLists(sent) {
 function resendContactLists() {
     save({ action: 'resend-contact-lists' }, 'Re-sent');
 }
-
-// ── Users tab: contact lists received from peers ───────────────────────────────
 
 // Unsaved mapping-form edits per origin, so a re-render (any status change) doesn't wipe them.
 const contactMapEdits = {};
@@ -1133,8 +1086,6 @@ function renderReceivedList(r, localGroups, readOnly) {
     });
 }
 
-
-
 function readContactMapForm(origin) {
     const id = jidToElemId(origin);
     const card = document.getElementById('cm-' + id);
@@ -1185,8 +1136,6 @@ function unmapContactList(origin) {
     save({ action: 'unmap-contact-list', origin }, 'Mapping removed')
         .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
 }
-
-// ── Room default-settings rules (Rooms tab) ────────────────────────────────────
 
 function renderRoomDefaults(rules) {
     const tbody = document.getElementById('room-defaults-tbody');
@@ -1280,11 +1229,7 @@ function presenceDot(show) {
          + `background:${color};margin-right:5px;vertical-align:middle"></span>`;
 }
 
-// ── Live clock text ───────────────────────────────────────────────────────────
-//
-// The page only re-renders when the data actually changes, so text derived from the
-// current time (retry countdowns, probe ages) is advanced here once a second from the
-// absolute timestamps stamped on the elements at render time.
+// Text that depends on the current time is advanced once a second from timestamps set at render time.
 
 function retryCountdownText(retryAt) {
     const left = retryAt - Date.now();
@@ -1309,13 +1254,9 @@ function tickClocks() {
     });
 }
 
-// ── Generic list filtering + live counts ──────────────────────────────────────
-//
-// Any `.filter-input[data-target]` filters the rows of the table tbody (or the
-// `.peer-section` cards of the container) with that id by substring match, and any
-// `.count-chip[data-count-for]` shows that list's size. Both survive background updates:
-// renders rebuild the rows, then renderAll() calls applyAllFilters() to re-apply.
-const tableFilters = {};   // targetId -> active lowercase query (presence = it has a filter input)
+// A `.filter-input[data-target]` filters the rows or cards of the element with that id, and a
+// `.count-chip[data-count-for]` shows its size; both are re-applied after every render.
+const tableFilters = {};
 
 function bindFilters() {
     document.querySelectorAll('.filter-input').forEach(inp => {
@@ -1394,18 +1335,10 @@ function filterContainer(el, q) {
     return { shown, total };
 }
 
-// ── Sortable table columns ────────────────────────────────────────────────────
-//
-// Every `.fed-table` header cell with a label gets an arrow; clicking it cycles
-// ascending → descending → original order. A column whose values are all numbers sorts
-// numerically, anything else alphabetically (numeric-aware, so "room2" < "room10").
-// A cell's `data-sort` overrides its text (timestamps, byte sizes, names under badges).
-// A `.detail-row` (editor, occupants, cert warning) moves with the row above it;
-// placeholder/"… and N more" rows stay at the bottom. watchRenders() re-applies the
-// active sort after every render. The choice is remembered per table (tbody id, or the
-// header labels for generated tables).
+// Clicking a `.fed-table` header cycles ascending, descending and original order; `data-sort`
+// overrides a cell's text, detail rows move with their row, and each table's choice is remembered.
 const SORT_STORE_KEY = 'federation.tableSort';
-let tableSorts = {};   // tableKey -> { col, dir: 1 | -1 }
+let tableSorts = {};
 
 function bindTableSorting() {
     try { tableSorts = JSON.parse(localStorage.getItem(SORT_STORE_KEY)) || {}; } catch (e) { tableSorts = {}; }
@@ -1473,7 +1406,7 @@ function sortCellValue(tr, col) {
 
 function sortTable(table, st) {
     const tbody = table.tBodies[0];
-    // Split rows into groups: a main row plus the detail rows that follow it.
+    // Each group is a main row and the detail rows that follow it.
     const groups = [], pinned = [];
     for (const tr of tbody.rows) {
         const only = tr.cells.length === 1 ? tr.cells[0] : null;
@@ -1482,7 +1415,7 @@ function sortTable(table, st) {
         else groups.push({ main: tr, rows: [tr] });
     }
     if (groups.length < 2 && !pinned.length) return;
-    // Remember the order the renderer produced, so "unsorted" can restore it and ties stay stable.
+    // The rendered order, so "unsorted" can restore it and ties stay stable.
     let next = groups.reduce((m, g) => Math.max(m, Number(g.main.dataset.sortOrig) || 0), 0);
     groups.forEach(g => { if (!g.main.dataset.sortOrig) g.main.dataset.sortOrig = String(++next); });
     const orig = g => Number(g.main.dataset.sortOrig);
@@ -1512,8 +1445,6 @@ function sortTable(table, st) {
         try { if (sel[0] != null) focused.setSelectionRange(sel[0], sel[1]); } catch (e) { /* not a text input */ }
     }
 }
-
-// ── Local rooms ───────────────────────────────────────────────────────────────
 
 function renderLocalRooms(rooms) {
     const tbody = document.getElementById('local-rooms-tbody');
@@ -1599,8 +1530,6 @@ function setRoomAutoAccept(jid, autoAccept) {
 function setRoomFiles(jid, enabled) {
     save({ action: 'set-room-files', jid, filesEnabled: enabled.toString() });
 }
-
-// ── Mapping consent: inline rows + pending-requests panel ───────────────────────
 
 /** "12 ms · 3s ago" chip for the end-to-end mapping probe; explains itself when no pong yet. */
 function renderMappingPing(m, dom) {
@@ -1757,8 +1686,6 @@ function renderPendingRequests(reqs) {
         </div>`).join('');
 }
 
-// ── Per-room federation settings panel (sharing + visibility + mappings) ──────
-
 /** Full-width detail row behind the expand arrow: every federation setting for one room in one view. */
 function renderRoomDetailRow(r) {
     const jid = jsArg(r.jid);
@@ -1905,8 +1832,6 @@ function unmapRoom(localJid, remoteDomain) {
     save(params, 'Mapping removed');
 }
 
-// ── Remote rooms (collapsible per peer) ───────────────────────────────────────
-
 function renderRemoteRooms(remoteRooms, localRooms, mappings) {
     const container = document.getElementById('remote-rooms-container');
     const peers = Object.keys(remoteRooms);
@@ -1997,10 +1922,7 @@ function mapRoom(remoteJid, remoteDomain, selId) {
     save({ action: 'map-room', localJid: sel.value, remoteJid, remoteDomain }, 'Mapping requested');
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-// Collapsible cards remember, per list, every card the admin opened or closed ("list|key" ->
-// collapsed); a card never touched follows its list's startCollapsed.
+// Whether each card the admin opened or closed is collapsed, keyed "list|key".
 const cardState = new Map();
 
 /**
@@ -2052,8 +1974,7 @@ function jidToElemId(jid) {
     return jid.replace(/[^a-zA-Z0-9]/g, '_');
 }
 
-// Uniform "change applied" confirmation. A single green toast so it survives the table
-// re-renders that would otherwise wipe an inline badge, and works for every save/apply button.
+// Shows the "change applied" toast, which survives the re-render an inline badge would not.
 let _toastTimer = null;
 function flashSaved(label) {
     const t = document.getElementById('fed-toast');
@@ -2079,7 +2000,7 @@ function save(params, okLabel = 'Saved') {
 }
 
 function post(params) {
-    // CSRF double-submit: echo the fed-csrf cookie the server handed us on GET.
+    // Double-submit CSRF: the cookie's token goes back as a parameter.
     const csrf = getCookie('fed-csrf');
     const body = new URLSearchParams(csrf ? Object.assign({}, params, { csrf }) : params);
     return fetch(API_URL, { method: 'POST', body, credentials: 'same-origin' })
@@ -2102,12 +2023,8 @@ function escHtml(s) {
         .replace(/"/g, '&quot;');
 }
 
-// Escapes a value for safe interpolation into a SINGLE-QUOTED JS string that itself sits inside a
-// double-quoted inline handler attribute — e.g. onclick="fn('${jsArg(x)}')". HTML-entity escaping
-// alone (escHtml) is NOT enough here: the browser HTML-decodes the attribute value BEFORE the JS
-// parser runs, so an entity-encoded quote would decode back to a real quote and break out of the
-// string. So we backslash-escape the JS metacharacters first, then HTML-escape the attribute-
-// breaking characters. Output is also safe in a double-quoted HTML attribute or HTML text context.
+// Escapes a value for a single-quoted JS string inside a double-quoted inline handler. escHtml alone is
+// not enough, since the browser decodes entities before the JS runs, so JS escaping comes first.
 function jsArg(s) {
     if (s == null) return '';
     return String(s)

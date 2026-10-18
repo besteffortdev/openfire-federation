@@ -19,6 +19,7 @@ Everything below follows from those two.
 ```
 0.  sender identity             — before anything: a bare server JID, not us
 1.  peer allowlist              — before dispatch, uniformly
+1b. routing values              — before dispatch: no control characters
 2.  loop guard (via)            — before any processing
 3.  payload origin (from)       — before relay AND before delivery
 3b. claimed origin (origin/src) — untrusted senders, control actions and muc-forward
@@ -27,7 +28,7 @@ Everything below follows from those two.
 6.  application authorisation   — room federated? mapping state? token valid? subscribed?
 ```
 
-Ordering matters. Checks 0 and 1 come first so they cover every action uniformly. Check 3 before relaying, not
+Ordering matters. Checks 0 to 1b come first so they cover every action uniformly. Check 3 before relaying, not
 only before delivering — a forged identity must not be laundered onward by a hop that was not itself
 the destination.
 
@@ -68,6 +69,25 @@ an **untrusted** peer with nothing exposed (since 1.10.8; trusted before).
 
 If your XMPP server's S2S is itself restricted to known domains, this is redundant. If it is
 internet-facing, this is the trust boundary.
+
+## 1b. Routing values
+
+```
+if any attribute of the action element,
+   any attribute of one of its <map/> children,
+   or the from, to or type of a forwarded <message/>, <presence/> or <iq/>
+   contains a control character (U+0000–U+001F, U+007F–U+009F):
+    log; drop; return result
+```
+
+Applied **once, before dispatch**, like rule 1. No valid domain, JID, token or stanza type contains
+a control character, so nothing legitimate is lost. The values covered are the ones a receiver writes
+to its log; one carrying a line break could forge log lines (CERT IDS03-J). XML attribute
+normalisation does not help: it folds a literal newline to a space, but a `&#10;` character reference
+survives it.
+
+Content is deliberately **not** covered: a message body, a room description or a contact name may
+contain a line break, and none of them is logged. Added in **1.11.4**.
 
 ## 2. Loop guard
 
@@ -558,6 +578,7 @@ an untrusted peer can only claim origins it has a route for.
 |------|-----------|---------|
 | Sender identity | every action | drop |
 | Peer allowlist | every action | drop |
+| Routing values | every action | drop |
 | `via` loop guard | every action carrying `via` | drop |
 | `hubs` trail | `muc-forward` | drop if it names us; skip listed servers on fan-out |
 | Duplicate message | `muc-forward` message injection | drop; do not fan out |

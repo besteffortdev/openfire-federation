@@ -14,27 +14,26 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Source of truth for the set of configured federation peers and their live
- * S2S connection status.  The peer list is persisted via JiveGlobals so it
- * survives plugin restarts; status is ephemeral and rebuilt by S2SMonitor.
+ * The configured federation peers and their settings, persisted in Openfire properties. Live link
+ * status is in memory only and kept current by {@link S2SMonitor}, except the administrative blocks.
  */
 public class PeerRegistry {
 
     private static final Logger Log = LoggerFactory.getLogger(PeerRegistry.class);
     private static final String PROP_PEERS      = "federation.peers";
-    private static final String PROP_PEER_STATE = "federation.peer.state.";   // + domain → DISABLED|REMOTE_DISABLED
-    private static final String PROP_UNTRUSTED  = "federation.peer.untrusted."; // + domain → true
-    private static final String PROP_EXPOSED_SRV = "federation.peer.exposedsrv."; // + domain → csv of server domains
-    /** Legacy room-level exposure key (1.3.38–41); now dead — deleted on load/remove. */
+    private static final String PROP_PEER_STATE = "federation.peer.state.";
+    private static final String PROP_UNTRUSTED  = "federation.peer.untrusted.";
+    private static final String PROP_EXPOSED_SRV = "federation.peer.exposedsrv.";
+    /** A retired per-room exposure key, deleted on load and on removal. */
     private static final String PROP_EXPOSED_LEGACY = "federation.peer.exposed.";
-    private static final String PROP_CERTFP     = "federation.peer.certfp.";    // + domain → sha256 hex of pinned cert
-    private static final String PROP_DENIED_RT  = "federation.peer.deniedroutes."; // + domain → csv of denied destinations
-    private static final String PROP_CONTACT_LISTS = "federation.peer.contactlists."; // + domain → true (lists may be sent across)
-    private static final String PROP_CONTACT_LISTS_REFUSED = "federation.peer.contactlistsrefused."; // + domain → true (lists from it refused)
+    private static final String PROP_CERTFP     = "federation.peer.certfp.";
+    private static final String PROP_DENIED_RT  = "federation.peer.deniedroutes.";
+    private static final String PROP_CONTACT_LISTS = "federation.peer.contactlists.";
+    private static final String PROP_CONTACT_LISTS_REFUSED = "federation.peer.contactlistsrefused.";
 
     private final ConcurrentHashMap<String, PeerServer> peers = new ConcurrentHashMap<>();
 
-    /** Called once by FederationManager.start() — loads persisted peers. */
+    /** Loads the persisted peers and their settings; called once on start. */
     public void load() {
         String stored = JiveGlobals.getProperty(PROP_PEERS, "").strip();
         if (!stored.isEmpty()) {
@@ -42,8 +41,6 @@ public class PeerRegistry {
                 domain = domain.strip();
                 if (!domain.isEmpty()) {
                     PeerServer peer = new PeerServer(domain);
-                    // Restore a persisted control status (DISABLED / REMOTE_DISABLED) so the
-                    // block survives restarts and the peer re-adding the connection.
                     String state = JiveGlobals.getProperty(PROP_PEER_STATE + domain, "").strip();
                     if (!state.isEmpty()) {
                         try {
@@ -52,25 +49,24 @@ public class PeerRegistry {
                                 peer.setStatus(s);
                                 Log.info("Loaded federation peer {} with persisted status {}", domain, s);
                             }
-                        } catch (IllegalArgumentException ignored) {}
+                        } catch (IllegalArgumentException ignored) {
+                            // A status this build does not know: the peer starts out UNKNOWN.
+                        }
                     } else {
                         Log.info("Loaded configured federation peer: {}", domain);
                     }
-                    // One-time cleanup of the dead room-level exposure key (replaced by server-level).
                     JiveGlobals.deleteProperty(PROP_EXPOSED_LEGACY + domain);
-                    // Restore untrusted flag + exposed-server allowlist (filtered-exposure peers).
                     if (JiveGlobals.getBooleanProperty(PROP_UNTRUSTED + domain, false)) {
                         peer.setUntrusted(true);
                         peer.setExposedServers(parseCsv(JiveGlobals.getProperty(PROP_EXPOSED_SRV + domain, "")));
                         peer.setContactListsAllowed(JiveGlobals.getBooleanProperty(PROP_CONTACT_LISTS + domain, false));
-                        peer.setContactListsRefused(JiveGlobals.getBooleanProperty(PROP_CONTACT_LISTS_REFUSED + domain, false));
+                        peer.setContactListsRefused(
+                                JiveGlobals.getBooleanProperty(PROP_CONTACT_LISTS_REFUSED + domain, false));
                         Log.info("Loaded untrusted peer {} with {} exposed server(s)",
                                  domain, peer.getExposedServers().size());
                     }
-                    // Restore the pinned S2S cert fingerprint (TOFU). Mismatch is re-derived live.
                     String fp = JiveGlobals.getProperty(PROP_CERTFP + domain, "").strip();
                     if (!fp.isEmpty()) peer.setPinnedCertFp(fp);
-                    // Restore the admin's per-peer denied route advertisements.
                     peer.setDeniedRoutes(parseCsv(JiveGlobals.getProperty(PROP_DENIED_RT + domain, "")));
                     peers.put(domain, peer);
                 }
@@ -78,31 +74,19 @@ public class PeerRegistry {
         }
     }
 
-    /**
-     * Whether a domain is allowed to federate when the peer allowlist is enabled. The single
-     * source of truth is the configured peer registry itself: a peer is approved iff it is a
-     * configured peer (added by the admin, or auto-registered while the allowlist was off).
-     * Using the registry directly — rather than a parallel "approved" set — avoids the two
-     * desyncing, which previously could leave the approved set empty and reject every peer.
-     */
+    /** Whether a domain may federate while the peer allowlist is on: only configured peers may. */
     public boolean isApproved(String domain) {
         return peers.containsKey(domain);
     }
 
-    /**
-     * Adds a peer domain to the registry and persists the list.
-     * Silently ignored if the domain is already present.
-     */
+    /** Adds a peer and persists the list; returns the existing peer if it was already there. */
     public PeerServer addPeer(String domain) {
         PeerServer peer = peers.computeIfAbsent(domain, PeerServer::new);
         persist();
         return peer;
     }
 
-    /**
-     * Removes a peer domain and persists the updated list.
-     * Returns true if the peer was present.
-     */
+    /** Removes a peer with all its settings and persists the list; true if it was present. */
     public boolean removePeer(String domain) {
         boolean removed = peers.remove(domain) != null;
         if (removed) {
@@ -119,21 +103,19 @@ public class PeerRegistry {
         return removed;
     }
 
-    // ── Untrusted (filtered-exposure) peers ────────────────────────────────────
-
     public boolean isUntrusted(String domain) {
         PeerServer peer = peers.get(domain);
         return peer != null && peer.isUntrusted();
     }
 
-    /** Server domains an untrusted peer may see/map onto; empty for trusted peers or none set. */
+    /** The servers exposed to a peer; empty when none are set. */
     public Set<String> getExposedServers(String domain) {
         PeerServer peer = peers.get(domain);
         return peer == null ? Collections.emptySet()
                             : Collections.unmodifiableSet(peer.getExposedServers());
     }
 
-    /** Marks (or clears) a peer as untrusted and persists the flag. No-op if unknown. */
+    /** Marks or clears a peer as untrusted and persists it; ignored for an unknown peer. */
     public void setUntrusted(String domain, boolean untrusted) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
@@ -145,16 +127,13 @@ public class PeerRegistry {
         }
     }
 
-    /**
-     * Whether shared contact lists may cross the untrusted link to {@code domain}. False for an unknown
-     * peer; meaningless (and ignored) for a trusted one, whose links always carry them.
-     */
+    /** Whether contact lists may be sent across the untrusted link to {@code domain}. */
     public boolean isContactListsAllowed(String domain) {
         PeerServer peer = peers.get(domain);
         return peer != null && peer.isContactListsAllowed();
     }
 
-    /** Allows (or stops) shared contact lists across the link to {@code domain} and persists it. No-op if unknown. */
+    /** Allows or stops sending contact lists to {@code domain} and persists it; ignored for an unknown peer. */
     public void setContactListsAllowed(String domain, boolean allowed) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
@@ -166,16 +145,13 @@ public class PeerRegistry {
         }
     }
 
-    /**
-     * Whether contact lists arriving over the untrusted link from {@code domain} are refused. False for
-     * an unknown peer; ignored for a trusted one.
-     */
+    /** Whether contact lists arriving over the untrusted link from {@code domain} are refused. */
     public boolean isContactListsRefused(String domain) {
         PeerServer peer = peers.get(domain);
         return peer != null && peer.isContactListsRefused();
     }
 
-    /** Refuses (or accepts again) contact lists arriving from {@code domain} and persists it. No-op if unknown. */
+    /** Refuses or accepts contact lists from {@code domain} and persists it; ignored for an unknown peer. */
     public void setContactListsRefused(String domain, boolean refused) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
@@ -187,7 +163,7 @@ public class PeerRegistry {
         }
     }
 
-    /** Replaces an untrusted peer's exposed-server allowlist and persists it. No-op if unknown. */
+    /** Replaces the servers exposed to a peer and persists them; ignored for an unknown peer. */
     public void setExposedServers(String domain, Collection<String> servers) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
@@ -200,22 +176,20 @@ public class PeerRegistry {
         }
     }
 
-    // ── Denied route advertisements (per-peer inbound filter) ──────────────────
-
-    /** Destinations whose advertisements from {@code domain} the admin has denied. */
+    /** The destinations whose advertisements from {@code domain} the admin refused. */
     public Set<String> getDeniedRoutes(String domain) {
         PeerServer peer = peers.get(domain);
         return peer == null ? Collections.emptySet()
                             : Collections.unmodifiableSet(peer.getDeniedRoutes());
     }
 
-    /** True if advertisements for {@code destination} arriving from {@code domain} are denied. */
+    /** Whether advertisements for {@code destination} from {@code domain} are refused. */
     public boolean isRouteDenied(String domain, String destination) {
         PeerServer peer = peers.get(domain);
         return peer != null && peer.isRouteDenied(destination);
     }
 
-    /** Adds (or removes) a denied destination for a peer and persists the set. No-op if unknown. */
+    /** Refuses or allows a destination's advertisements from a peer and persists it; ignored for an unknown peer. */
     public void setRouteDenied(String domain, String destination, boolean denied) {
         PeerServer peer = peers.get(domain);
         if (peer == null || destination == null || destination.isBlank()) return;
@@ -229,15 +203,13 @@ public class PeerRegistry {
         }
     }
 
-    // ── S2S certificate pinning (TOFU) ─────────────────────────────────────────
-
-    /** The pinned top-of-chain cert fingerprint (hex), or null if not yet pinned. */
+    /** The pinned certificate fingerprint of a peer, or null if none is pinned yet. */
     public String getPinnedCertFp(String domain) {
         PeerServer peer = peers.get(domain);
         return peer == null ? null : peer.getPinnedCertFp();
     }
 
-    /** Pins (or clears) a peer's cert fingerprint and persists it. No-op if unknown. */
+    /** Pins or clears a peer's certificate fingerprint and persists it; ignored for an unknown peer. */
     public void setPinnedCertFp(String domain, String fp) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
@@ -264,13 +236,13 @@ public class PeerRegistry {
         return peer != null && peer.isCertMismatch();
     }
 
-    /** Marks a link blocked because the two ends disagree on trust. Not persisted (re-derived). */
+    /** Blocks a link because the two ends disagree on trust; not persisted. */
     public void setTrustMismatch(String domain) {
         PeerServer peer = peers.get(domain);
         if (peer != null) peer.setStatus(PeerServer.Status.TRUST_MISMATCH);
     }
 
-    /** Clears a TRUST_MISMATCH block (the ends now agree); leaves other statuses untouched. */
+    /** Lifts a TRUST_MISMATCH block now that the ends agree; other statuses are left alone. */
     public void clearTrustMismatch(String domain) {
         PeerServer peer = peers.get(domain);
         if (peer != null && peer.getStatus() == PeerServer.Status.TRUST_MISMATCH) {
@@ -301,16 +273,13 @@ public class PeerRegistry {
     }
 
     /**
-     * Called by S2SMonitor to update live connection state.  Sticky control statuses
-     * (DISABLED / REMOTE_DISABLED) are never overwritten by live updates — they change
-     * only through {@link #setControlStatus}.
+     * Sets a peer's live link status. The blocks DISABLED, REMOTE_DISABLED and TRUST_MISMATCH are never
+     * overwritten here; they change only through {@link #setControlStatus} and the trust exchange.
      */
     public void updateStatus(String domain, PeerServer.Status status) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;
         PeerServer.Status cur = peer.getStatus();
-        // Sticky statuses are never overwritten by live polling: DISABLED/REMOTE_DISABLED are
-        // admin blocks; TRUST_MISMATCH is a negotiated block cleared only by a matching announce.
         if (cur == PeerServer.Status.DISABLED || cur == PeerServer.Status.REMOTE_DISABLED
                 || cur == PeerServer.Status.TRUST_MISMATCH) return;
         peer.setStatus(status);
@@ -319,11 +288,7 @@ public class PeerRegistry {
         }
     }
 
-    /**
-     * Sets a control status set by an administrative action (disable/enable) rather than
-     * by live polling.  Persists DISABLED / REMOTE_DISABLED so the state survives restarts
-     * and the peer re-creating the connection; clears the persisted state otherwise.
-     */
+    /** Sets a status from an administrative action; DISABLED and REMOTE_DISABLED are persisted. */
     public void setControlStatus(String domain, PeerServer.Status status) {
         PeerServer peer = peers.get(domain);
         if (peer == null) return;

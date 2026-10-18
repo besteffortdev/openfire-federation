@@ -6,36 +6,16 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Per-room message bookkeeping for mapped rooms, shared by the forwarder (outbound) and injection
- * (inbound):
- * <ul>
- *   <li><b>Acceptance.</b> Openfire fires {@code MUCEventListener.messageReceived} only after the room
- *       has accepted and broadcast a public message. The forwarder runs as a post-processing
- *       interceptor, which sees every groupchat a local client sent, including ones the room
- *       rejected (sender not an occupant, banned, muted). It forwards only what was marked here.</li>
- *   <li><b>Used stanza-ids.</b> A relayed message keeps its origin's stanza-id (XEP-0359) in every copy of
- *       the room, so a peer could reuse the id of a message the room already has and make two
- *       messages share it; a reaction or reply would then resolve to the wrong one. Ids seen in a room
- *       are remembered (bounded) so a reused one can be replaced.</li>
- *   <li><b>Origins.</b> Each remembered id records where its message came from: the room it was first
- *       posted to, the id that room gave it, and its author. A moderation (XEP-0425) crosses the
- *       federation only for a message its author's own server can moderate, and this is how both
- *       sides tell. See {@link RoomModeration}.</li>
- *   <li><b>Arrivals.</b> When rooms are mapped in a ring or a mesh, one message reaches a room once per
- *       path. Its origin room and the id that room gave it name it on every path, so every copy after
- *       the first is recognised and neither delivered nor fanned out again.</li>
- * </ul>
+ * Per-room message bookkeeping for mapped rooms: which local messages the room accepted, which
+ * stanza-ids it has used and where each message came from, and which relayed copies already
+ * arrived. The forwarder and the injection path share it; every map is bounded per room.
  */
 public final class RoomMessageIds {
 
-    /**
-     * Where a message in a mapped room came from. {@code room} is the room it was first posted to (this
-     * room for a local user's message), {@code stanzaId} the id that room gave it (null if it gave none
-     * we could use), and {@code author} the sender's bare JID.
-     */
+    /** Where a message came from: the room it was posted to, the id that room gave it, and its author. */
     public record Origin(String room, String stanzaId, String author) { }
 
-    /** How long an accepted mark waits for the forwarder; it normally consumes it in microseconds. */
+    /** How long an accepted mark waits for the forwarder, which normally takes it at once. */
     private static final long ACCEPT_TTL_MS = 30_000;
     /** Stanza-ids remembered per mapped room. */
     static final int SEEN_PER_ROOM = 2_000;
@@ -58,10 +38,7 @@ public final class RoomMessageIds {
         return at != null && System.currentTimeMillis() - at <= ACCEPT_TTL_MS;
     }
 
-    /**
-     * Records {@code stanzaId} as used in {@code roomJid} by a message from {@code origin}. Returns false,
-     * recording nothing, if the room already had it among its last {@link #SEEN_PER_ROOM} ids.
-     */
+    /** Records {@code stanzaId} as used in {@code roomJid}; false, recording nothing, if it was already used. */
     public boolean claim(String roomJid, String stanzaId, Origin origin) {
         Map<String, Origin> ids = lru(seen, roomJid);
         synchronized (ids) {
@@ -78,8 +55,8 @@ public final class RoomMessageIds {
     }
 
     /**
-     * The id {@code roomJid} gave the message that {@code originRoom} knows as {@code originId}, or null
-     * if not remembered. The oldest match wins: a later message reusing the id got a fresh one here.
+     * The id {@code roomJid} gave the message {@code originRoom} knows as {@code originId}, or null.
+     * The oldest match wins, because a later message that reused the id was given a fresh one here.
      */
     public String localIdOf(String roomJid, String originRoom, String originId) {
         Map<String, Origin> ids = seen.get(roomJid);
@@ -94,15 +71,14 @@ public final class RoomMessageIds {
     }
 
     /**
-     * True the first time a relayed copy of the message {@code originRoom} knows as {@code originId}
-     * reaches {@code roomJid}, among its last {@link #SEEN_PER_ROOM}. Atomic, so two copies arriving
-     * together over different paths cannot both be taken for the first.
+     * True the first time a relayed copy of that origin message reaches {@code roomJid}. Atomic, so
+     * two copies arriving together over different paths cannot both count as the first.
      */
     public boolean firstArrival(String roomJid, String originRoom, String originId) {
         return lru(arrived, roomJid).putIfAbsent(originRoom + '\n' + originId, Boolean.TRUE) == null;
     }
 
-    /** True the first time a moderation of {@code stanzaId} in {@code roomJid} is seen (bounded). */
+    /** True the first time a moderation of {@code stanzaId} in {@code roomJid} is seen. */
     public boolean markModerated(String roomJid, String stanzaId) {
         Map<String, Boolean> ids = lru(moderated, roomJid);
         return ids.putIfAbsent(stanzaId, Boolean.TRUE) == null;
@@ -117,10 +93,8 @@ public final class RoomMessageIds {
     }
 
     /**
-     * The key both sides compute for one message: its stanza-id from the room, which Openfire stamps on
-     * the client's packet before the room processes it, so the event's copy and the interceptor's
-     * original carry the same one. With stanza-ids switched off server-wide
-     * ({@code xmpp.sid.enabled=false}) it falls back to the client's stanza id and sender.
+     * The key the forwarder and the room event both compute for one message: the room's stanza-id,
+     * or the client's packet id and sender when stanza-ids are disabled server-wide.
      */
     public static String keyOf(String stanzaId, String packetId, String from) {
         return stanzaId != null ? "sid:" + stanzaId : "pid:" + packetId + '\n' + from;
