@@ -6,6 +6,7 @@ import org.dom4j.DocumentException;
 import org.dom4j.Element;
 import org.dom4j.io.SAXReader;
 import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.SystemProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xml.sax.SAXException;
@@ -15,45 +16,20 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
- * Reads a declarative {@code <federation>} block from Openfire's own {@code conf/openfire.xml} (if
- * present) and upserts its contents — configured peers, per-room federation/sharing/visibility/
- * mappings — into the JiveGlobals-backed DB through the same public methods the admin console uses.
- *
- * Read-only: {@code openfire.xml} is never written to. Safe to re-run (called once from
- * {@link FederationManager#start()} and again any time from the admin console's "Reload" button) —
- * it only adds peers/mappings that don't exist yet and updates fields the file actually declares;
- * anything present in the DB but absent from the file is never touched or removed.
- *
- * <pre>{@code
- * <jive>
- *   <federation>
- *     <files enabled="true" maxSizeMB="25" retentionDays="90" storageDir="/var/lib/openfire/federation-files"/>
- *     <peers>
- *       <peer domain="2502-xmpp.example.net" untrusted="false"/>
- *       <peer domain="2506-xmpp.example.net" untrusted="true">
- *         <exposedServers><server>2505-xmpp.example.net</server></exposedServers>
- *       </peer>
- *     </peers>
- *     <rooms>
- *       <room jid="team@conference.2501-xmpp.example.net" federated="true" autoAccept="true" files="false">
- *         <visibleTo><server>2502-xmpp.example.net</server></visibleTo>  <!-- or <server>*</server> for all -->
- *         <mappings>
- *           <mapping remoteJid="team@conference.2502-xmpp.example.net" remoteDomain="2502-xmpp.example.net"/>
- *         </mappings>
- *       </room>
- *     </rooms>
- *   </federation>
- * </jive>
- * }</pre>
+ * Applies the optional {@code <federation>} block of {@code conf/openfire.xml}: file settings, peers
+ * and room settings, through the same methods the admin console uses. It only adds and updates what
+ * the file declares and never writes the file. The format is described in the README.
  */
 public class FederationFileConfig {
 
     private static final Logger Log = LoggerFactory.getLogger(FederationFileConfig.class);
     private static final int MAX_WARNINGS = 20;
 
+    /** What one ingest changed, for the log and the admin console. */
     public record IngestResult(boolean blockPresent, int peersAdded, int peersUpdated,
                                 int roomsUpdated, int mappingsRequested, int settingsUpdated,
                                 List<String> warnings) {
@@ -63,28 +39,14 @@ public class FederationFileConfig {
     private volatile IngestResult lastResult = IngestResult.EMPTY;
     private volatile Long lastLoadedAtMillis = null;
 
-    /**
-     * Name of the block we read out of {@code openfire.xml}. Deliberately <em>not</em> shared with
-     * {@link com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory#ELEMENT}:
-     * that one is the wire protocol's IQ child element and happens to spell the same word. They are
-     * free to diverge, so they stay separate constants.
-     */
+    /** The config block's element name; unrelated to the protocol element that happens to share it. */
     private static final String CONFIG_ELEMENT = "federation";
 
     public Path configFile() {
         return JiveGlobals.getHomePath().resolve("conf").resolve("openfire.xml");
     }
 
-    /**
-     * A {@link SAXReader} with entity resolution switched off (CERT IDS17-J).
-     *
-     * <p>{@code openfire.xml} is admin-owned, so this is defence in depth rather than a live hole —
-     * but it is cheap, and "the file is trusted" stops being true the moment someone templates that
-     * file out of a config-management system fed from somewhere else. Blocking DOCTYPE outright is
-     * the strongest of the three settings and the other two are belt-and-braces for parsers that
-     * honour them selectively; Openfire's own config never contains a DTD, so nothing legitimate is
-     * lost.
-     */
+    /** A {@link SAXReader} that refuses DOCTYPEs and external entities (CERT IDS17-J). */
     private static SAXReader hardenedReader() throws SAXException {
         SAXReader reader = new SAXReader();
         reader.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
@@ -97,7 +59,7 @@ public class FederationFileConfig {
 
     public Long lastLoadedAtMillis() { return lastLoadedAtMillis; }
 
-    /** Parses {@code conf/openfire.xml} and upserts any {@code <federation>} block found. Never throws. */
+    /** Parses {@code conf/openfire.xml} and applies its {@code <federation>} block, if any; never throws. */
     public IngestResult ingest(FederationManager manager) {
         File file = configFile().toFile();
         if (!file.isFile()) {
@@ -111,7 +73,7 @@ public class FederationFileConfig {
             Element root = doc.getRootElement();
             fedEl = root == null ? null : root.element(CONFIG_ELEMENT);
         } catch (DocumentException | SAXException e) {
-            Log.warn("Failed to parse {} for federation config: {}", file, e.getMessage());
+            Log.warn("Failed to parse {} for federation config", file, e);
             return remember(IngestResult.EMPTY);
         }
 
@@ -159,13 +121,7 @@ public class FederationFileConfig {
         return r;
     }
 
-    // ── file-sharing settings ────────────────────────────────────────────────
-
-    /**
-     * Applies a {@code <files enabled maxSizeMB retentionDays storageDir/>} element to the
-     * file-relay properties. Same declare-only semantics as the rest of the block: attributes the
-     * file doesn't mention are never touched. Returns the number of settings actually changed.
-     */
+    /** Applies the {@code <files>} element's attributes to the file relay settings; returns how many changed. */
     private int applyFiles(FederationManager manager, Element filesEl, List<String> warnings) {
         if (filesEl == null) return 0;
         int updated = 0;
@@ -187,13 +143,11 @@ public class FederationFileConfig {
             String declared = dirAttr.strip();
             if (declared.isEmpty()) {
                 warn(warnings, "<files> storageDir is empty, skipped");
-            } else if (!java.nio.file.Path.of(declared).isAbsolute()) {
+            } else if (!Path.of(declared).isAbsolute()) {
                 warn(warnings, "<files> storageDir='" + declared + "' must be a full path, skipped");
             } else if (!declared.equals(FederationProperties.FILES_STORAGE_DIR.getValue())) {
                 String previous = FederationProperties.FILES_STORAGE_DIR.getValue();
                 FederationProperties.FILES_STORAGE_DIR.setValue(declared);
-                // On a "Reload now" the relay is already running — move the store immediately.
-                // During plugin start ingest runs after the relay too, so this is always live.
                 String moveError = manager.getFileRelay() != null
                         ? manager.getFileRelay().storageDirChanged() : null;
                 if (moveError != null) {
@@ -207,8 +161,8 @@ public class FederationFileConfig {
         return updated;
     }
 
-    /** Returns 1 when the attribute is present, valid, and different from the stored value. */
-    private int applyIntSetting(Element el, String attr, org.jivesoftware.util.SystemProperty<Integer> prop,
+    /** Applies one integer attribute; returns 1 when it was present, valid and different from the stored value. */
+    private int applyIntSetting(Element el, String attr, SystemProperty<Integer> prop,
                                 int min, List<String> warnings) {
         String raw = el.attributeValue(attr);
         if (raw == null) return 0;
@@ -228,16 +182,13 @@ public class FederationFileConfig {
         return 1;
     }
 
-    // ── peers ────────────────────────────────────────────────────────────────
-
-    /** Returns {addedCount, updatedCount} (each 0 or 1). */
+    /** Applies one {@code <peer>}; returns {added, updated}, each 0 or 1. */
     private int[] applyPeer(FederationManager manager, Element peerEl, List<String> warnings) {
-        String rawDomain = peerEl.attributeValue("domain");
-        if (!isPlausibleDomain(rawDomain)) {
-            warn(warnings, "skipped <peer> with invalid domain '" + rawDomain + "'");
+        String domain = normalizedDomain(peerEl.attributeValue("domain"));
+        if (domain == null) {
+            warn(warnings, "skipped <peer> with invalid domain '" + peerEl.attributeValue("domain") + "'");
             return new int[]{0, 0};
         }
-        String domain = rawDomain.strip().toLowerCase();
 
         PeerRegistry registry = manager.getPeerRegistry();
         boolean added = false, updated = false;
@@ -251,9 +202,6 @@ public class FederationFileConfig {
             boolean declared = Boolean.parseBoolean(untrustedAttr.strip());
             if (registry.isUntrusted(domain) != declared) {
                 registry.setUntrusted(domain, declared);
-                // Trust is negotiated per-link: announce the new stance to the peer and let it
-                // block/clear against the remote's last-known stance — same as the admin console's
-                // add-peer and set-untrusted actions (both follow setUntrusted with this call).
                 manager.applyLocalTrustChange(domain);
                 updated = true;
             }
@@ -261,9 +209,6 @@ public class FederationFileConfig {
 
         Element exposedEl = peerEl.element("exposedServers");
         if (exposedEl != null) {
-            // Constrain to the legitimate candidate set, same defense-in-depth filter the admin
-            // console's set-exposed-servers action applies (drops the peer's own domain / anything
-            // only reachable via the peer itself, so the persisted set stays meaningful).
             Set<String> allowed = manager.exposableServers(domain);
             Set<String> declared = new LinkedHashSet<>();
             for (Element s : exposedEl.elements("server")) {
@@ -274,7 +219,6 @@ public class FederationFileConfig {
             }
             if (!declared.equals(registry.getExposedServers(domain))) {
                 registry.setExposedServers(domain, declared);
-                // Push the updated exposure (routes + room state) immediately if the link is up.
                 registry.getPeer(domain)
                         .filter(p -> p.getStatus() == PeerServer.Status.REACHABLE)
                         .ifPresent(p -> { manager.sendRoutingUpdate(domain); manager.sendRoomState(domain); });
@@ -285,16 +229,13 @@ public class FederationFileConfig {
         return new int[]{added ? 1 : 0, updated ? 1 : 0};
     }
 
-    // ── rooms ────────────────────────────────────────────────────────────────
-
-    /** Returns {roomUpdatedCount (0/1), mappingsRequestedCount}. */
+    /** Applies one {@code <room>}; returns {updated (0 or 1), mappings requested}. */
     private int[] applyRoom(FederationManager manager, Element roomEl, List<String> warnings) {
-        String rawJid = roomEl.attributeValue("jid");
-        if (!isSafeFederationJid(rawJid)) {
-            warn(warnings, "skipped <room> with invalid jid '" + rawJid + "'");
+        String jid = normalizedJid(roomEl.attributeValue("jid"));
+        if (jid == null) {
+            warn(warnings, "skipped <room> with invalid jid '" + roomEl.attributeValue("jid") + "'");
             return new int[]{0, 0};
         }
-        String jid = rawJid.strip();
 
         FederatedRoomManager roomManager = manager.getRoomManager();
         boolean updated = false;
@@ -317,8 +258,6 @@ public class FederationFileConfig {
             }
         }
 
-        // File federation for this room (default on). Same switch as the admin console's
-        // "Federate file sharing" checkbox; independent of the global 1:1 file setting.
         String filesAttr = roomEl.attributeValue("files");
         if (filesAttr != null) {
             boolean declared = Boolean.parseBoolean(filesAttr.strip());
@@ -350,20 +289,19 @@ public class FederationFileConfig {
         Element mappingsEl = roomEl.element("mappings");
         if (mappingsEl != null) {
             for (Element mapEl : mappingsEl.elements("mapping")) {
-                String rawRemoteJid = mapEl.attributeValue("remoteJid");
-                String rawRemoteDomain = mapEl.attributeValue("remoteDomain");
-                if (!isSafeFederationJid(rawRemoteJid) || !isPlausibleDomain(rawRemoteDomain)) {
+                String remoteJid = normalizedJid(mapEl.attributeValue("remoteJid"));
+                String remoteDomain = normalizedDomain(mapEl.attributeValue("remoteDomain"));
+                if (remoteJid == null || remoteDomain == null) {
                     warn(warnings, "skipped <mapping> on " + jid + " with invalid remoteJid/remoteDomain");
                     continue;
                 }
-                String remoteDomain = rawRemoteDomain.strip().toLowerCase();
-                if (roomManager.getMappingForLocal(jid, remoteDomain) != null) continue;   // already mapped
+                if (roomManager.getMappingForLocal(jid, remoteDomain) != null) continue;
                 if (!manager.roomSharedWith(jid, remoteDomain)) {
-                    warn(warnings, "skipped mapping " + jid + " -> " + rawRemoteJid
+                    warn(warnings, "skipped mapping " + jid + " -> " + remoteJid
                             + ": room isn't shared (federated + visible) with " + remoteDomain + " yet");
                     continue;
                 }
-                manager.requestMapping(jid, rawRemoteJid.strip(), remoteDomain);
+                manager.requestMapping(jid, remoteJid, remoteDomain);
                 mappingsRequested++;
             }
         }
@@ -371,36 +309,21 @@ public class FederationFileConfig {
         return new int[]{updated ? 1 : 0, mappingsRequested};
     }
 
-    // ── helpers ──────────────────────────────────────────────────────────────
-
     private static void warn(List<String> warnings, String msg) {
         if (warnings.size() < MAX_WARNINGS) warnings.add(msg);
     }
 
-    /** Same character-class rule as {@code FederationApiServlet.isPlausibleDomain} (case-insensitive here). */
-    private static boolean isPlausibleDomain(String d) {
-        if (d == null) return false;
-        d = d.strip();
-        if (d.isEmpty() || d.length() > 253) return false;
-        for (int i = 0; i < d.length(); i++) {
-            char c = d.charAt(i);
-            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-                       || c == '.' || c == '-' || c == '_';
-            if (!ok) return false;
-        }
-        return true;
+    /** {@code raw} trimmed and lowercased, or null when the result is not a plausible domain. */
+    private static String normalizedDomain(String raw) {
+        if (raw == null) return null;
+        String domain = raw.strip().toLowerCase(Locale.ROOT);
+        return FederationNames.isPlausibleDomain(domain) ? domain : null;
     }
 
-    /** Same character-class rule as {@code FederationIQHandler.isSafeFederationJid}. */
-    private static boolean isSafeFederationJid(String jid) {
-        if (jid == null) return false;
-        jid = jid.strip();
-        if (jid.isEmpty() || jid.length() > 3071) return false;   // RFC 7622 max length
-        for (int i = 0; i < jid.length(); i++) {
-            char c = jid.charAt(i);
-            if (c < 0x20 || c == 0x7f) return false;
-            if (c == '"' || c == '\'' || c == '<' || c == '>' || c == '&' || c == '\\' || c == ' ') return false;
-        }
-        return jid.indexOf('@') > 0 || jid.indexOf('.') > 0;
+    /** {@code raw} trimmed, or null when the result is not a safe JID. */
+    private static String normalizedJid(String raw) {
+        if (raw == null) return null;
+        String jid = raw.strip();
+        return FederationNames.isSafeJid(jid) ? jid : null;
     }
 }

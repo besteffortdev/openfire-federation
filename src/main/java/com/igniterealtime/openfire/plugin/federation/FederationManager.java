@@ -1,48 +1,38 @@
 package com.igniterealtime.openfire.plugin.federation;
 
+import com.igniterealtime.openfire.plugin.federation.files.FileRelayManager;
 import com.igniterealtime.openfire.plugin.federation.model.FederatedRoom;
-import org.dom4j.Element;
 import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.model.RouteEntry;
+import com.igniterealtime.openfire.plugin.federation.protocol.DirectTrafficHandler;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationIQHandler;
-import com.igniterealtime.openfire.plugin.federation.protocol.RoomMessageIds;
-import com.igniterealtime.openfire.plugin.federation.protocol.RedundantArrivals;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationPacketInterceptor;
+import com.igniterealtime.openfire.plugin.federation.protocol.FederationSender;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
+import com.igniterealtime.openfire.plugin.federation.protocol.MucTrafficHandler;
+import com.igniterealtime.openfire.plugin.federation.protocol.RedundantArrivals;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomMessageIds;
+import org.dom4j.Element;
 import org.jivesoftware.openfire.SessionManager;
 import org.jivesoftware.openfire.XMPPServer;
-import org.jivesoftware.openfire.handler.PresenceSubscribeHandler;
 import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.muc.MUCEventDispatcher;
-import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
 import org.jivesoftware.openfire.muc.MultiUserChatService;
-import org.jivesoftware.openfire.pep.PEPService;
-import org.jivesoftware.openfire.pep.PEPServiceManager;
-import org.jivesoftware.openfire.pubsub.Node;
-import org.jivesoftware.openfire.pubsub.PublishedItem;
-import org.jivesoftware.openfire.session.ClientSession;
-import org.jivesoftware.openfire.session.DomainPair;
 import org.jivesoftware.openfire.session.IncomingServerSession;
 import org.jivesoftware.openfire.session.OutgoingServerSession;
-import org.jivesoftware.openfire.roster.Roster;
-import org.jivesoftware.openfire.roster.RosterItem;
-import org.jivesoftware.openfire.user.UserNotFoundException;
 import org.jivesoftware.openfire.user.PresenceEventDispatcher;
-import org.jivesoftware.openfire.user.PresenceEventListener;
 import org.jivesoftware.util.JiveGlobals;
+import org.jivesoftware.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Message;
+import org.xmpp.packet.Packet;
 import org.xmpp.packet.Presence;
 
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateEncodingException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -52,580 +42,116 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import static com.igniterealtime.openfire.plugin.federation.FederationNames.localDomain;
+
 /**
- * Central coordinator for the federation plugin.
- *
- * Lifecycle:
- *   FederationPlugin.initializePlugin() → FederationManager.start()
- *   FederationPlugin.destroyPlugin()    → FederationManager.stop()
- *
- * All subsystems are accessible through this class so JSP pages only need a
- * single reference: FederationPlugin.getInstance().getManager()
+ * Central coordinator of the federation plugin. It owns the subsystems, registers the Openfire hooks
+ * on start, and carries out the peer, mapping, gossip and trust actions that the protocol handlers
+ * and the admin console request.
  */
 public class FederationManager {
 
     private static final Logger Log = LoggerFactory.getLogger(FederationManager.class);
 
-    private final PeerRegistry           peerRegistry    = new PeerRegistry();
-    private final FederationRoutingTable routingTable    = new FederationRoutingTable();
-    private final FederatedRoomManager   roomManager     = new FederatedRoomManager();
-    private final RoomDefaultsManager    roomDefaults    = new RoomDefaultsManager();
-    private final ContactListManager     contactLists    = new ContactListManager(this);
-    private final FederationFileConfig   fileConfig      = new FederationFileConfig();
-    private final RoomMessageIds         roomMessageIds  = new RoomMessageIds();
+    /** Window in which routing-driven room floods are coalesced into one. */
+    private static final long ROOMS_FLOOD_DEBOUNCE_MS = 2000;
+
+    private final PeerRegistry           peerRegistry      = new PeerRegistry();
+    private final FederationRoutingTable routingTable      = new FederationRoutingTable();
+    private final FederatedRoomManager   roomManager       = new FederatedRoomManager();
+    private final RoomDefaultsManager    roomDefaults      = new RoomDefaultsManager();
+    private final ContactListManager     contactLists      = new ContactListManager(this);
+    private final FederationFileConfig   fileConfig        = new FederationFileConfig();
+    private final RoomMessageIds         roomMessageIds    = new RoomMessageIds();
     private final RedundantArrivals      redundantArrivals = new RedundantArrivals();
-    private       com.igniterealtime.openfire.plugin.federation.files.FileRelayManager fileRelay;
+    private final PresenceRelay          presenceRelay     = new PresenceRelay(this);
+    private final OccupantSync           occupantSync      = new OccupantSync(this);
+    private final MappingProbe           mappingProbe      = new MappingProbe(this);
+    private final CertificatePinning     certificatePinning = new CertificatePinning(this);
+    private final AtomicBoolean          roomsFloodPending = new AtomicBoolean(false);
+    private       FileRelayManager       fileRelay;
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
     private       FederationPacketInterceptor interceptor;
-    private       PresenceEventListener  presenceListener;
-    private       RoomCreationListener   roomListener;
+    private       RoomEventListener      roomListener;
 
+    /** Loads persisted state, starts the subsystems and registers the Openfire hooks. */
     public void start() {
         Log.info("Federation plugin starting…");
 
-        FederationProperties.register();   // expose all plugin properties under the Federation plugin
+        FederationProperties.register();
         peerRegistry.load();
         roomManager.load();
         roomDefaults.load();
         contactLists.load();
         LegacyBookmarkCleanup.runOnceInBackground();
 
-        // Transparent HTTP-upload federation: staging store, overlay pull protocol, download servlet.
-        fileRelay = new com.igniterealtime.openfire.plugin.federation.files.FileRelayManager(this);
+        fileRelay = new FileRelayManager(this);
         fileRelay.start();
 
-        iqHandler   = new FederationIQHandler(this);
+        iqHandler   = FederationIQHandler.create(this);
         interceptor = new FederationPacketInterceptor(this);
-
         XMPPServer.getInstance().getIQRouter().addHandler(iqHandler);
         InterceptorManager.getInstance().addInterceptor(interceptor);
 
-        s2sMonitor = new S2SMonitor(peerRegistry, routingTable, roomManager, this);
+        s2sMonitor = new S2SMonitor(peerRegistry, routingTable, this);
         s2sMonitor.start();
 
-        // Relay local users' presence changes to federated rooms and contacts as they happen.
-        presenceListener = new PresenceEventListener() {
-            @Override public void availableSession(ClientSession s, Presence p) {
-                onLocalPresenceEvent(s, p);
-                // On login, probe our multi-hop contacts to pull their current presence.
-                try { if (s != null && s.getAddress() != null) probeRemoteContacts(s.getAddress()); }
-                catch (Exception e) { Log.debug("probeRemoteContacts failed: {}", e.getMessage()); }
-            }
-            @Override public void unavailableSession(ClientSession s, Presence p) { onLocalPresenceEvent(s, p); }
-            @Override public void presenceChanged(ClientSession s, Presence p)    { onLocalPresenceEvent(s, p); }
-            @Override public void subscribedToPresence(JID subscriberJID, JID userJID) {
-                // A local user just became subscribed to a contact's presence. If that contact lives on
-                // a multi-hop peer, Openfire's own probe leaks to native S2S and fails — re-issue it over
-                // the overlay so the contact's presence is actually pulled (and the entry stays visible).
-                try { probeRemoteContact(subscriberJID, userJID); }
-                catch (Exception e) { Log.debug("probeRemoteContact failed: {}", e.getMessage()); }
-            }
-            @Override public void unsubscribedToPresence(JID a, JID b) { }
-        };
-        PresenceEventDispatcher.addListener(presenceListener);
-
-        // Apply default federation settings to rooms as they are created (by name pattern).
-        roomListener = new RoomCreationListener(this);
+        PresenceEventDispatcher.addListener(presenceRelay);
+        roomListener = new RoomEventListener(this);
         MUCEventDispatcher.addListener(roomListener);
 
-        // Declarative config from openfire.xml (<federation> block, if present): configured peers +
-        // per-room federation/sharing/visibility/mappings, safe-upserted into the DB via the same
-        // public methods the admin console uses. No-op if the block is absent.
         fileConfig.ingest(this);
 
         Log.info("Federation plugin started — {} peer(s) configured", peerRegistry.getPeers().size());
     }
 
-    /** Re-runs file-based config ingestion (the admin console "Reload" button). Safe to call any time. */
+    /**
+     * Stops the subsystems and removes every Openfire hook registered by {@link #start()}. Each step
+     * runs even if an earlier one fails, so a partial start is undone too.
+     */
+    public void stop() {
+        Log.info("Federation plugin stopping…");
+        stopStep("S2S monitor", () -> { if (s2sMonitor != null) s2sMonitor.stop(); });
+        stopStep("presence listener", () -> PresenceEventDispatcher.removeListener(presenceRelay));
+        stopStep("room listener", () -> { if (roomListener != null) MUCEventDispatcher.removeListener(roomListener); });
+        stopStep("IQ handler", () -> {
+            if (iqHandler != null) XMPPServer.getInstance().getIQRouter().removeHandler(iqHandler);
+        });
+        stopStep("packet interceptor", () -> {
+            if (interceptor != null) InterceptorManager.getInstance().removeInterceptor(interceptor);
+        });
+        stopStep("contact lists", contactLists::stop);
+        stopStep("file relay", () -> { if (fileRelay != null) fileRelay.stop(); });
+        Log.info("Federation plugin stopped.");
+    }
+
+    /** Runs one shutdown step; a failure is logged so the remaining steps still run. */
+    private static void stopStep(String what, Runnable step) {
+        try {
+            step.run();
+        } catch (RuntimeException e) {
+            Log.warn("Could not stop the {} cleanly", what, e);
+        }
+    }
+
+    /** Re-reads the {@code <federation>} block of openfire.xml, as the admin console's Reload does. */
     public FederationFileConfig.IngestResult reloadConfigFile() {
         return fileConfig.ingest(this);
     }
 
-    public FederationFileConfig getFileConfig() { return fileConfig; }
-
-    /**
-     * A local user's presence changed: forward it to mapped peers for any federated room they occupy,
-     * and to their federated contacts, so a status change propagates live (a broadcast presence never
-     * reaches the interceptor).
-     */
-    private void onLocalPresenceEvent(ClientSession session, Presence presence) {
-        try {
-            if (session != null && session.getAddress() != null) {
-                forwardLocalOccupantPresence(session.getAddress(), presence);        // MUC occupants
-                forwardPresenceToRemoteSubscribers(session.getAddress(), presence);  // 1:1 roster contacts
-            }
-        } catch (Exception e) {
-            Log.debug("presence-event forward failed: {}", e.getMessage());
-        }
-    }
-
-    /**
-     * Forwards a local user's presence to their roster subscribers living on MULTI-HOP peers.
-     * Needed because a user's availability is a BROADCAST presence (no {@code to}); Openfire's
-     * server-generated directed copies to remote subscribers (and probe answers) bypass the packet
-     * interceptor, so without this a federated contact never sees the user go online/away/offline.
-     * Mirrors the MUC fix in {@link #forwardLocalOccupantPresence}. Direct peers are left to native
-     * S2S, which delivers subscriber presence correctly on its own — except for contacts who see the
-     * user through a shared contact list: the user's roster has no entry for them, so Openfire sends
-     * them nothing natively, and they are relayed to whatever the hop count.
-     */
-    public void forwardPresenceToRemoteSubscribers(JID user, Presence presence) {
-        if (user == null || user.getNode() == null) return;
-        if (!XMPPServer.getInstance().isLocal(user)) return;
-
-        Set<String> done = new java.util.HashSet<>();
-        if (FederationProperties.DIRECT_MSG_RELAY.getValue()) {
-            for (String bare : remoteSubscriberTargets(user)) {
-                JID contact = new JID(bare);
-                if (!isMultiHopPeer(contact.getDomain())) continue;          // direct peers: native S2S
-                forwardDirectPresence(directedPresence(user, contact, presence));
-                done.add(bare);
-            }
-        }
-        for (String bare : contactLists.subscribersOf(user)) {
-            if (done.contains(bare)) continue;
-            forwardDirectPresence(directedPresence(user, new JID(bare), presence));
-        }
-    }
-
-    /**
-     * The federated presence subscribers of a local user, as bare JIDs. We union two sources:
-     *  (1) subscribers we tracked from the {@code subscribed} stanzas we relayed — authoritative and
-     *      robust even when Openfire's cross-server roster state lands incomplete; and
-     *  (2) roster items marked FROM/BOTH (covers a restart, where the tracked map is empty).
-     * Callers filter to multi-hop peers (direct peers use native S2S).
-     */
-    private Set<String> remoteSubscriberTargets(JID user) {
-        Set<String> targets = new LinkedHashSet<>(
-                remoteSubscribers.getOrDefault(user.toBareJID(), Collections.emptySet()));
-        try {
-            Roster roster = XMPPServer.getInstance().getRosterManager().getRoster(user.getNode());
-            if (roster != null) {
-                for (RosterItem item : roster.getRosterItems()) {
-                    JID c = item.getJid();
-                    if (c == null || c.getNode() == null) continue;
-                    RosterItem.SubType sub = item.getSubStatus();
-                    if (sub == RosterItem.SUB_FROM || sub == RosterItem.SUB_BOTH) targets.add(c.toBareJID());
-                }
-            }
-        } catch (Exception ignored) { }
-        return targets;
-    }
-
-    /** Subscribers (remote bare JIDs) of each local user's presence, tracked from relayed `subscribed`. */
-    private final Map<String, Set<String>> remoteSubscribers = new java.util.concurrent.ConcurrentHashMap<>();
-
-    /** Record that {@code subscriber} is now subscribed to local {@code localUser}'s presence. */
-    public void addRemoteSubscriber(JID localUser, JID subscriber) {
-        if (localUser == null || subscriber == null || subscriber.getNode() == null) return;
-        remoteSubscribers.computeIfAbsent(localUser.toBareJID(),
-                k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(subscriber.toBareJID());
-    }
-
-    /** Forget a subscriber (relayed `unsubscribed`). */
-    public void removeRemoteSubscriber(JID localUser, JID subscriber) {
-        if (localUser == null || subscriber == null) return;
-        Set<String> subs = remoteSubscribers.get(localUser.toBareJID());
-        if (subs != null) {
-            subs.remove(subscriber.toBareJID());
-            if (subs.isEmpty()) remoteSubscribers.remove(localUser.toBareJID());
-        }
-    }
-
-    /**
-     * Pushes a local user's current presence to a remote (multi-hop) target.  Used both when we have
-     * just approved a subscription (the relayed {@code subscribed}) and when answering a presence
-     * probe — in both cases Openfire's own presence delivery to the remote peer would be routed past
-     * the packet interceptor, so we send it explicitly over the overlay.
-     */
-    public void pushUserPresenceTo(JID target, JID localUser) {
-        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
-        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
-        if (target == null || target.getNode() == null) return;
-        if (!isMultiHopPeer(target.getDomain())) return;
-        Presence cur = currentPresenceOf(localUser);
-        if (cur == null) return;   // user offline — nothing to advertise
-        forwardDirectPresence(directedPresence(localUser, target, cur));
-    }
-
-    /**
-     * Answers a relayed presence probe for a local user by sending that user's presence to the prober —
-     * but only if the prober is subscribed to it (RFC 6121 §4.3.2: a server answers a probe only for an
-     * entity with a FROM/BOTH subscription; anyone else gets nothing). Without the check, any peer could
-     * read any user's availability and status text across the overlay just by asking.
-     */
-    public void answerPresenceProbe(JID prober, JID localUser) {
-        if (prober == null || localUser == null || !isPresenceSubscriber(localUser, prober)) {
-            Log.info("SECURITY: not answering presence probe from {} for {} — not a presence subscriber",
-                     prober, localUser);
-            return;
-        }
-        pushUserPresenceTo(prober, localUser);
-    }
-
-    /** True when {@code contact}'s bare JID is one of {@code localUser}'s presence subscribers. */
-    public boolean isPresenceSubscriber(JID localUser, JID contact) {
-        if (contact == null || contact.getNode() == null) return false;
-        return remoteSubscriberTargets(localUser).contains(contact.toBareJID())
-            || contactLists.isAuthorizedContact(localUser, contact);
-    }
-
-    /**
-     * Sends a shared local user's current presence (unavailable when offline) to a contact on a server
-     * the user is shared with. Relayed over the overlay whatever the hop count: the user's roster has
-     * no entry for the contact, so Openfire would not send it natively even to a direct peer.
-     */
-    public void pushContactPresenceTo(JID contact, JID localUser) {
-        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
-        if (contact == null || contact.getNode() == null) return;
-        Presence cur = currentPresenceOf(localUser);
-        Presence p;
-        if (cur != null) {
-            p = directedPresence(localUser, contact, cur);
-        } else {
-            p = new Presence(Presence.Type.unavailable);
-            p.setFrom(localUser.asBareJID());
-            p.setTo(contact);
-        }
-        forwardDirectPresence(p);
-    }
-
-    /** {@link #pushLocalPepItemsTo} for a contact who sees the user through a shared contact list, on any hop count. */
-    public void pushContactPepItemsTo(JID contact, JID localUser) {
-        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
-        if (contact == null || contact.getNode() == null) return;
-        pushPepItems(contact, localUser);
-    }
-
-    /** True when {@code domain} is reached over the overlay through at least one intermediate server. */
+    /** Whether {@code domain} is reached through at least one intermediate server. */
     public boolean isMultiHopDomain(String domain) {
-        return isMultiHopPeer(domain);
-    }
-
-    /**
-     * PEP nodes whose last-published item we proactively push to a newly-approved remote subscriber
-     * (see {@link #pushLocalPepItemsTo}) and re-push on every subsequent change (see
-     * {@link #relayLocalPepPublish}). These are the personal-eventing nodes a contact's client needs
-     * to render/interoperate: XEP-0084 avatar metadata (drives the avatar image fetch), XEP-0172 user
-     * nickname (the published display name), and the OMEMO device list (XEP-0384, lets the contact
-     * start an encrypted session). All are +notify PEP nodes a same-server client would receive
-     * automatically; over federation the native push/notify is unreliable, so we send them ourselves.
-     */
-    private static final String[] PUSH_PEP_NODES = {
-        "urn:xmpp:avatar:metadata",
-        "http://jabber.org/protocol/nick",
-        "eu.siacs.conversations.axolotl.devicelist"
-    };
-
-    /** True if {@code nodeId} is one of the federated push nodes we mirror over the overlay. */
-    private static boolean isPushPepNode(String nodeId) {
-        if (nodeId == null) return false;
-        for (String n : PUSH_PEP_NODES) if (n.equals(nodeId)) return true;
-        return false;
-    }
-
-    /**
-     * Proactively pushes a local user's current PEP items (see {@link #PUSH_PEP_NODES}) to a remote
-     * subscriber that was just approved, as {@code <message><event xmlns='…#event'>} notifications
-     * relayed over the overlay — exactly the pubsub-event a same-server subscriber would receive.
-     *
-     * WHY this is needed even though 1.9.15 makes Openfire's own PEP auto-subscribe fire: on a relayed
-     * subscription approval, {@code IQPEPHandler.subscribedToPresence} creates the subscription and then
-     * calls {@code PEPService.sendLastPublishedItems(subscriber)} — but that push checks for the
-     * subscription synchronously while the subscription itself is created on an async executor, so it
-     * routinely finds none yet and returns without sending anything. Confirmed live: after a federated
-     * add, the subscription row appears in the DB but no avatar {@code pubsub#event} is ever routed to
-     * the remote contact, so the contact's client (which relies purely on the push — modern Conversations
-     * never actively fetches a contact's avatar) never learns the avatar exists. We therefore push the
-     * current items ourselves, deterministically. The remote client then fetches the avatar DATA node,
-     * which the origin answers via {@code answerPepItemsLocally} (1.9.14).
-     */
-    public void pushLocalPepItemsTo(JID subscriber, JID localUser) {
-        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
-        if (localUser == null || !XMPPServer.getInstance().isLocal(localUser)) return;
-        if (subscriber == null || subscriber.getNode() == null) return;
-        if (!isMultiHopPeer(subscriber.getDomain())) return;
-        pushPepItems(subscriber, localUser);
-    }
-
-    private void pushPepItems(JID subscriber, JID localUser) {
-        PEPService pep;
-        try {
-            PEPServiceManager mgr = XMPPServer.getInstance().getIQPEPHandler().getServiceManager();
-            pep = mgr.getPEPService(localUser.asBareJID(), false);
-        } catch (Exception e) {
-            Log.warn("pushLocalPepItemsTo: cannot resolve PEP service for {}: {}", localUser, e.getMessage());
-            return;
-        }
-        if (pep == null) return;   // user never published any PEP items — nothing to push
-
-        for (String nodeId : PUSH_PEP_NODES) {
-            try {
-                Node node = pep.getNodes().stream()
-                        .filter(n -> nodeId.equals(n.getUniqueIdentifier().getNodeId()))
-                        .findFirst().orElse(null);
-                if (node == null) continue;
-                PublishedItem item = node.getLastPublishedItem();
-                if (item == null) continue;
-
-                Message event = buildPepEventMessage(localUser.asBareJID(), subscriber,
-                                                     nodeId, item.getID(), item.getPayload());
-                if (forwardDirectMessage(event)) {
-                    Log.info("pushed PEP node '{}' (item {}) of {} to new remote subscriber {}",
-                             nodeId, item.getID(), localUser, subscriber);
-                }
-            } catch (Exception e) {
-                Log.warn("pushLocalPepItemsTo: failed to push node '{}' of {} to {}: {}",
-                         nodeId, localUser, subscriber, e.getMessage());
-            }
-        }
-    }
-
-    /**
-     * Builds a headline {@code pubsub#event} notification carrying one PEP item, addressed for overlay
-     * relay to {@code to}. Shared by the initial-subscription push ({@link #pushLocalPepItemsTo}) and
-     * the on-change re-push ({@link #relayLocalPepPublish}) so both emit an identical event.
-     *
-     * Headline, NOT a plain (no-type) message: a no-type message addressed to the subscriber's BARE JID
-     * is delivered by the destination server to only ONE resource (the highest-priority available
-     * session). When the contact has more than one client online (e.g. Conversations AND Spark on the
-     * same account), the event can land on a client that ignores it, so the intended client never learns
-     * of the change. Headline is fanned out to ALL available resources (and never stored offline),
-     * matching how a pubsub#event notification is meant to reach every interested resource.
-     */
-    private Message buildPepEventMessage(JID from, JID to, String nodeId, String itemId, Element payload) {
-        Message event = new Message();
-        event.setType(Message.Type.headline);
-        event.setFrom(from);
-        event.setTo(to);
-        Element items = event.getElement()
-                .addElement("event", "http://jabber.org/protocol/pubsub#event")
-                .addElement("items");
-        items.addAttribute("node", nodeId);
-        Element itemEl = items.addElement("item");
-        if (itemId != null) itemEl.addAttribute("id", itemId);
-        if (payload != null) itemEl.add(payload.createCopy());
-        return event;
-    }
-
-    /**
-     * A local user just published a PEP item (avatar metadata, nickname, OMEMO device list — see
-     * {@link #PUSH_PEP_NODES}). Re-push it to every federated subscriber as a headline
-     * {@code pubsub#event}, so a CHANGE propagates to an already-added remote contact — including every
-     * resource of a multi-client account. Called from {@link FederationPacketInterceptor} on the
-     * post-processing pass of the client's {@code <iq type='set'><pubsub><publish>} (i.e. after the
-     * server accepted the publish); {@code payload} is the published item's child element, taken
-     * straight off the IQ so there is no read-after-write race against PEP storage.
-     *
-     * WHY this is needed even though the contact is already subscribed: Openfire's native publish→notify
-     * ({@code PEPService.sendNotification}) is, for a remote subscriber, both (a) gated by the recipient's
-     * cached entity-caps {@code +notify} filter and a presence-probe check — neither reliable for a
-     * federated bare JID — and (b) delivered, when it does fire, as a no-type message to the subscriber's
-     * BARE JID, which the destination hands to only ONE resource. So a two-client contact routinely never
-     * sees an avatar/nickname change on the right client. We push it ourselves, deterministically and as
-     * a headline, exactly as {@link #pushLocalPepItemsTo} does for the initial subscription.
-     */
-    public void relayLocalPepPublish(JID publisher, String nodeId, String itemId, Element payload) {
-        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
-        if (publisher == null || publisher.getNode() == null) return;
-        if (!XMPPServer.getInstance().isLocal(publisher)) return;
-        if (!isPushPepNode(nodeId)) return;
-
-        Set<String> targets = new LinkedHashSet<>();
-        for (String bare : remoteSubscriberTargets(publisher)) {
-            if (isMultiHopPeer(new JID(bare).getDomain())) targets.add(bare);   // direct peers: native S2S
-        }
-        targets.addAll(contactLists.subscribersOf(publisher));   // shared-list contacts: any hop count
-        for (String bare : targets) {
-            JID subscriber = new JID(bare);
-            Message event = buildPepEventMessage(publisher.asBareJID(), subscriber, nodeId, itemId, payload);
-            if (forwardDirectMessage(event)) {
-                Log.info("re-pushed PEP node '{}' (item {}) of {} to subscriber {} on publish",
-                         nodeId, itemId, publisher, subscriber);
-            }
-        }
-    }
-
-    /**
-     * Replicates, for the LOCAL sender only, the roster + listener side effects Openfire's own
-     * {@code PresenceSubscribeHandler} would apply when a subscribe/subscribed/unsubscribe/unsubscribed
-     * presence is sent — side effects that never happen natively here because
-     * {@link FederationPacketInterceptor} intercepts and rejects the packet (to suppress a native S2S
-     * attempt toward an overlay-only multi-hop domain) before Openfire's router ever processes it.
-     *
-     * Without this, the local user's own roster row for the remote contact never updates (stuck at
-     * sub=none / recv=pending even after approving a request), and every {@link PresenceEventListener}
-     * Openfire fires as a side effect of a native approval — including {@code IQPEPHandler}'s XEP-0163
-     * PEP auto-subscribe — never fires. That's why a federated contact's avatar-over-PEP push never
-     * reached anyone: nobody was ever actually registered as a subscriber to anyone's PEP nodes.
-     *
-     * Reuses Openfire's own state table ({@link PresenceSubscribeHandler#getStateChange}) rather than a
-     * hand-rolled one, so the transition rules stay bound to whatever Openfire itself does — but applies
-     * the result via the public Roster/RosterItem API directly instead of calling
-     * {@code PresenceSubscribeHandler.process()}/{@code manageSub()}, which would ALSO attempt (and fail)
-     * an actual delivery to the unreachable multi-hop domain. Mirrors {@code manageSub}'s own no-op
-     * cases: only {@code subscribe} auto-creates a missing roster item; approving/canceling/revoking a
-     * subscription for a contact that isn't on the roster at all is a no-op, same as native Openfire.
-     */
-    public void syncLocalRosterOnSubscriptionRelay(Presence pres) {
-        Presence.Type type = pres.getType();
-        if (type != Presence.Type.subscribe && type != Presence.Type.subscribed
-                && type != Presence.Type.unsubscribe && type != Presence.Type.unsubscribed) {
-            return;
-        }
-        JID sender = pres.getFrom();
-        JID target = pres.getTo();
-        if (sender == null || sender.getNode() == null || target == null) return;
-        if (!XMPPServer.getInstance().isLocal(sender)) return;
-
-        try {
-            Roster roster = XMPPServer.getInstance().getRosterManager().getRoster(sender.getNode());
-            if (roster == null) return;
-
-            RosterItem item;
-            if (roster.isRosterItem(target)) {
-                item = roster.getRosterItem(target);
-            } else if (type == Presence.Type.subscribe) {
-                item = roster.createRosterItem(target, false, true);
-            } else {
-                return;   // nothing to approve/cancel/revoke for a contact not on the roster
-            }
-
-            RosterItem.SubType prevSub = item.getSubStatus();
-            PresenceSubscribeHandler.Change change =
-                    PresenceSubscribeHandler.getStateChange(prevSub, type, true);
-            if (change == null) return;
-            if (change.getNewAsk() != null && change.getNewAsk() != item.getAskStatus()) {
-                item.setAskStatus(change.getNewAsk());
-            }
-            if (change.getNewSub() != null && change.getNewSub() != item.getSubStatus()) {
-                item.setSubStatus(change.getNewSub());
-            }
-            if (change.getNewRecv() != null && change.getNewRecv() != item.getRecvStatus()) {
-                item.setRecvStatus(change.getNewRecv());
-            }
-            roster.updateRosterItem(item);
-
-            if (type == Presence.Type.subscribed) {
-                PresenceEventDispatcher.subscribedToPresence(target, sender);
-            } else if (type == Presence.Type.unsubscribed) {
-                PresenceEventDispatcher.unsubscribedToPresence(sender, target);
-            }
-            Log.debug("Synced local roster for {} -> {} on relayed {} (sub now {})",
-                      sender, target, type, item.getSubStatus());
-        } catch (Exception e) {
-            Log.warn("Failed to sync local roster for {} -> {} on relayed {}: {}",
-                      sender, target, type, e.getMessage());
-        }
-    }
-
-    /**
-     * On a local user's login, probe their multi-hop roster contacts so we pull each contact's current
-     * presence (Openfire's own probe is routed past the interceptor and never crosses the overlay).
-     * The far server answers via {@link #answerPresenceProbe}.
-     */
-    public void probeRemoteContacts(JID user) {
-        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
-        if (user == null || user.getNode() == null || !XMPPServer.getInstance().isLocal(user)) return;
-        Roster roster;
-        try {
-            roster = XMPPServer.getInstance().getRosterManager().getRoster(user.getNode());
-        } catch (UserNotFoundException e) {
-            // Routine: the account went away between the presence event and this call.
-            Log.debug("No roster for {} — nothing to probe", user, e);
-            return;
-        }
-        if (roster == null) return;
-        for (RosterItem item : roster.getRosterItems()) {
-            JID contact = item.getJid();
-            if (contact == null || contact.getNode() == null) continue;
-            if (!isMultiHopPeer(contact.getDomain())) continue;
-            RosterItem.SubType sub = item.getSubStatus();
-            if (sub != RosterItem.SUB_TO && sub != RosterItem.SUB_BOTH) continue;   // we subscribe to them
-            Presence probe = new Presence();
-            probe.setType(Presence.Type.probe);
-            probe.setFrom(user.asBareJID());
-            probe.setTo(contact);
-            forwardDirectPresence(probe);
-        }
-    }
-
-    /**
-     * Probe a single multi-hop contact's presence over the overlay on behalf of a local user — used when
-     * the user becomes subscribed to that contact mid-session ({@code subscribedToPresence}). Openfire's
-     * own auto-probe at that moment is routed straight to native S2S and, for a multi-hop peer with no
-     * direct link, hangs and fails; this re-issues the same probe over the overlay so the contact's
-     * presence is pulled. Gated by {@link FederationProperties#PROBE_ON_SUBSCRIBE} (and the relay master
-     * switch). A no-op unless {@code localUser} is local and {@code contact} is a multi-hop peer user.
-     */
-    public void probeRemoteContact(JID localUser, JID contact) {
-        if (!FederationProperties.PROBE_ON_SUBSCRIBE.getValue()) return;
-        if (!FederationProperties.DIRECT_MSG_RELAY.getValue()) return;
-        if (localUser == null || localUser.getNode() == null || !XMPPServer.getInstance().isLocal(localUser)) return;
-        if (contact == null || contact.getNode() == null) return;
-        if (!isMultiHopPeer(contact.getDomain())) return;
-        Presence probe = new Presence();
-        probe.setType(Presence.Type.probe);
-        probe.setFrom(localUser.asBareJID());
-        probe.setTo(contact.asBareJID());
-        forwardDirectPresence(probe);
-        Log.info("subscription-probe: probing multi-hop contact {} for {} over overlay", contact.asBareJID(), localUser.asBareJID());
-    }
-
-    /** The highest-priority available presence of a local user's sessions, or null if offline. */
-    private Presence currentPresenceOf(JID user) {
-        for (ClientSession s : XMPPServer.getInstance().getSessionManager().getSessions(user.getNode())) {
-            Presence p = s.getPresence();
-            if (p != null && p.isAvailable()) return p;
-        }
-        return null;
-    }
-
-    /**
-     * Builds a directed presence from→to.  Copies the source presence WHOLE (not just show/status)
-     * so extension elements survive — the avatar hash {@code vcard-temp:x:update} (XEP-0153), entity
-     * caps {@code <c/>} (XEP-0115) and priority — then overwrites from/to.  Without this a contact's
-     * client never learns there is an avatar to fetch or what the contact supports.
-     */
-    private Presence directedPresence(JID from, JID to, Presence src) {
-        Presence p = (src != null) ? new Presence(src.getElement().createCopy()) : new Presence();
-        p.setFrom(src != null && src.getFrom() != null ? src.getFrom() : from);
-        p.setTo(to);
-        return p;
-    }
-
-    private boolean isMultiHopPeer(String domain) {
         return routingTable.findNextHop(domain).map(nh -> !nh.equals(domain)).orElse(false);
     }
 
-    public void stop() {
-        Log.info("Federation plugin stopping…");
-
-        if (s2sMonitor != null) s2sMonitor.stop();
-
-        if (presenceListener != null)
-            PresenceEventDispatcher.removeListener(presenceListener);
-
-        if (roomListener != null)
-            MUCEventDispatcher.removeListener(roomListener);
-
-        if (iqHandler != null)
-            XMPPServer.getInstance().getIQRouter().removeHandler(iqHandler);
-
-        if (interceptor != null)
-            InterceptorManager.getInstance().removeInterceptor(interceptor);
-
-        contactLists.stop();
-
-        if (fileRelay != null) fileRelay.stop();
-
-        Log.info("Federation plugin stopped.");
+    /** The next hop toward {@code domain}, or the domain itself when there is no route yet. */
+    private String nextHopToward(String domain) {
+        return routingTable.findNextHop(domain).orElse(domain);
     }
-
-    // ── Peer management (called from admin UI / api.jsp) ───────────────────────
 
     public PeerServer addPeer(String domain) {
         PeerServer peer = peerRegistry.addPeer(domain);
@@ -634,15 +160,15 @@ public class FederationManager {
         return peer;
     }
 
+    /** Re-announces to a peer, clearing WITHDRAWN first; ignored for a disabled link. */
     public void retryPeer(String domain) {
         PeerServer.Status cur = peerRegistry.getPeer(domain).map(PeerServer::getStatus).orElse(null);
         if (cur == PeerServer.Status.DISABLED || cur == PeerServer.Status.REMOTE_DISABLED) {
-            Log.info("retryPeer ignored for {} — status {} (use enable; a REMOTE_DISABLED link can only be lifted by the remote)",
-                     domain, cur);
+            Log.info("retryPeer ignored for {} — status {} (use enable; a REMOTE_DISABLED link can only be "
+                   + "lifted by the remote)", domain, cur);
             return;
         }
         Log.info("Retrying S2S for peer: {}", domain);
-        // Clear WITHDRAWN so S2SMonitor will track this peer again.
         peerRegistry.getPeer(domain).ifPresent(p -> {
             if (p.getStatus() == PeerServer.Status.WITHDRAWN) {
                 peerRegistry.updateStatus(domain, PeerServer.Status.UNKNOWN);
@@ -652,17 +178,11 @@ public class FederationManager {
     }
 
     /**
-     * Administratively disables a peer: tears down federation exactly like removePeer
-     * but keeps the peer registered with a persistent DISABLED status, tells the remote
-     * (peer-disable), and keeps refusing it — re-asserting the disable if it re-creates
-     * the connection.  Re-enable locally with {@link #enablePeer}.
+     * Disables a peer: tears federation down as {@link #removePeer} does, but keeps the peer
+     * registered as DISABLED and tells it so. {@link #enablePeer} lifts it.
      */
     public void disablePeer(String domain) {
-        for (String localJid : new ArrayList<>(roomManager.getLocalMappings().keySet())) {
-            if (roomManager.getMappingForLocal(localJid, domain) != null) {
-                unmapRoom(localJid, domain);
-            }
-        }
+        unmapAllRoomsWith(domain);
         peerRegistry.getPeer(domain).ifPresent(peer -> {
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
                 sendPeerDisable(domain);
@@ -670,25 +190,18 @@ public class FederationManager {
         });
         killSession(domain, "outgoing");
         killSession(domain, "incoming");
-        Set<String> removedRoutes = routingTable.removePeer(domain);
-        handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
-        if (!removedRoutes.isEmpty()) {
-            propagateTopologyChange(domain);
-        }
+        dropRoutesThrough(domain);
         if (!peerRegistry.contains(domain)) peerRegistry.addPeer(domain);
         peerRegistry.setControlStatus(domain, PeerServer.Status.DISABLED);
         Log.info("Peer disabled: {}", domain);
     }
 
-    /**
-     * Lifts a local DISABLE: clears the status and reaches out so the remote (which is
-     * holding REMOTE_DISABLED) sees our announce and resumes federation.  No-op unless
-     * the peer is currently DISABLED (a REMOTE_DISABLED link can only be lifted remotely).
-     */
+    /** Lifts our own DISABLED status and re-announces, so the remote resumes federation. */
     public void enablePeer(String domain) {
         PeerServer.Status cur = peerRegistry.getPeer(domain).map(PeerServer::getStatus).orElse(null);
         if (cur != PeerServer.Status.DISABLED) {
-            Log.info("enablePeer ignored for {} — status {} (only a locally DISABLED peer can be enabled here)", domain, cur);
+            Log.info("enablePeer ignored for {} — status {} (only a locally DISABLED peer can be enabled here)",
+                     domain, cur);
             return;
         }
         peerRegistry.setControlStatus(domain, PeerServer.Status.UNKNOWN);
@@ -696,37 +209,70 @@ public class FederationManager {
         Log.info("Peer enabled: {}", domain);
     }
 
+    /**
+     * Removes a peer: unmaps its rooms while S2S is still up, sends peer-withdraw, closes the
+     * sessions and drops every route and cached room reached through it.
+     */
+    public boolean removePeer(String domain) {
+        unmapAllRoomsWith(domain);
+        peerRegistry.getPeer(domain).ifPresent(peer -> {
+            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
+                FederationSender.send("peer-withdraw", domain, () -> FederationStanzaFactory.peerWithdraw(domain));
+            }
+        });
+        killSession(domain, "outgoing");
+        killSession(domain, "incoming");
+        boolean removed = peerRegistry.removePeer(domain);
+        if (removed) dropRoutesThrough(domain);
+        return removed;
+    }
+
+    /** Unmaps, and tells the remote, every local room that has a mapping to {@code domain}. */
+    private void unmapAllRoomsWith(String domain) {
+        for (String localJid : new ArrayList<>(roomManager.getLocalMappings().keySet())) {
+            if (roomManager.getMappingForLocal(localJid, domain) != null) {
+                unmapRoom(localJid, domain);
+            }
+        }
+    }
+
+    /** Drops the routes through a peer and the state they carried, and gossips the change. */
+    void dropRoutesThrough(String domain) {
+        Set<String> removedRoutes = routingTable.removePeer(domain);
+        handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
+        if (!removedRoutes.isEmpty()) {
+            propagateTopologyChange(domain);
+        }
+    }
+
+    /** Every open S2S session, both directions, for the admin console. */
     public List<Map<String, Object>> getS2SSessions() {
         SessionManager sm = XMPPServer.getInstance().getSessionManager();
         List<Map<String, Object>> result = new ArrayList<>();
-
         for (String domain : sm.getOutgoingServers()) {
             for (OutgoingServerSession s : sm.getOutgoingServerSessions(domain)) {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("domain",    domain);
-                m.put("direction", "outgoing");
-                m.put("since",     s.getCreationDate().getTime());
-                m.put("encrypted", s.isEncrypted());
-                m.put("fedPeer",   peerRegistry.contains(domain));
-                result.add(m);
+                result.add(sessionRow(domain, "outgoing", s.getCreationDate().getTime(), s.isEncrypted()));
             }
         }
-
         for (String domain : sm.getIncomingServers()) {
             for (IncomingServerSession s : sm.getIncomingServerSessions(domain)) {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("domain",    domain);
-                m.put("direction", "incoming");
-                m.put("since",     s.getCreationDate().getTime());
-                m.put("encrypted", s.isEncrypted());
-                m.put("fedPeer",   peerRegistry.contains(domain));
-                result.add(m);
+                result.add(sessionRow(domain, "incoming", s.getCreationDate().getTime(), s.isEncrypted()));
             }
         }
-
         return result;
     }
 
+    private Map<String, Object> sessionRow(String domain, String direction, long since, boolean encrypted) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("domain",    domain);
+        m.put("direction", direction);
+        m.put("since",     since);
+        m.put("encrypted", encrypted);
+        m.put("fedPeer",   peerRegistry.contains(domain));
+        return m;
+    }
+
+    /** Closes the S2S sessions with {@code domain} in one direction ("outgoing" or "incoming"). */
     public void killSession(String domain, String direction) {
         SessionManager sm = XMPPServer.getInstance().getSessionManager();
         if ("outgoing".equals(direction)) {
@@ -742,61 +288,16 @@ public class FederationManager {
         }
     }
 
-    public boolean removePeer(String domain) {
-        // Unmap every local room that has a mapping to this domain BEFORE killing
-        // the session.  This delivers room-unmap IQs and virtual leave presences
-        // while S2S is still open, AND clears the local mapping so the interceptor
-        // won't try to re-open S2S after the session is gone.
-        for (String localJid : new ArrayList<>(roomManager.getLocalMappings().keySet())) {
-            if (roomManager.getMappingForLocal(localJid, domain) != null) {
-                unmapRoom(localJid, domain);
-            }
-        }
-
-        peerRegistry.getPeer(domain).ifPresent(peer -> {
-            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
-                try {
-                    XMPPServer.getInstance().getPacketRouter()
-                              .route(FederationStanzaFactory.peerWithdraw(domain));
-                } catch (Exception e) {
-                    Log.warn("Failed to send peer-withdraw to {}: {}", domain, e.getMessage());
-                }
-            }
-        });
-        // Kill S2S sessions so the remote side detects the disconnect immediately.
-        killSession(domain, "outgoing");
-        killSession(domain, "incoming");
-        boolean removed = peerRegistry.removePeer(domain);
-        if (removed) {
-            Set<String> removedRoutes = routingTable.removePeer(domain);
-            // Drop cached rooms and evict ghost occupants for this peer AND every
-            // destination that was only reachable through it.
-            handleUnreachableDestinations(removedRoutes.isEmpty() ? Set.of(domain) : removedRoutes);
-            if (!removedRoutes.isEmpty()) {
-                propagateTopologyChange(domain);
-            }
-        }
-        return removed;
-    }
-
-    // ── Room federation (called from admin UI / api.jsp) ──────────────────────
-
+    /** Tags or untags a local room for federation; untagging first removes all its mappings. */
     public void setRoomFederated(String roomJid, boolean federated) {
-        if (!federated) {
-            // Tear down all mappings (any state) before clearing the federation tag.
-            if (!roomManager.getAllMappingsForLocal(roomJid).isEmpty()) {
-                unmapRooms(roomJid);
-            }
+        if (!federated && !roomManager.getAllMappingsForLocal(roomJid).isEmpty()) {
+            unmapRooms(roomJid);
         }
         roomManager.setFederated(roomJid, federated);
         reAdvertiseToAllReachable();
     }
 
-    /**
-     * Sets a room's visibility ACL (server domains allowed to see it; empty = all) and re-advertises
-     * to every reachable peer so the change (including withdrawals from now-excluded peers) takes
-     * effect immediately. The ACL is persisted, so it survives a listed server being unavailable.
-     */
+    /** Sets a room's visibility list and re-advertises at once, so newly excluded peers drop the room. */
     public void setRoomVisibility(String roomJid, Collection<String> servers) {
         roomManager.setRoomVisibility(roomJid, servers);
         reAdvertiseToAllReachable();
@@ -810,17 +311,9 @@ public class FederationManager {
         }
     }
 
-    // ── Room mapping ──────────────────────────────────────────────────────────
-
     /**
-     * Adds one spoke mapping (localJid ↔ remoteJid on remoteDomain) and notifies
-     * the remote server.  Can be called multiple times on the hub to connect
-     * additional spokes to the same local room.
-     */
-    /**
-     * Requests a mapping from our local room to a remote room. Stores it PENDING_OUT and sends a
-     * room-mapping REQUEST; nothing forwards until the remote accepts (handleMappingAccept). No
-     * roster is pushed yet — that happens on the accept transition.
+     * Requests a mapping from our room to a remote room. It is stored PENDING_OUT and carries no
+     * traffic until the remote accepts.
      */
     public void requestMapping(String localJid, String remoteJid, String remoteDomain) {
         roomManager.addMapping(localJid, remoteJid, remoteDomain, RoomMapping.State.PENDING_OUT, "");
@@ -828,26 +321,18 @@ public class FederationManager {
     }
 
     private void sendMappingRequest(String localJid, String remoteJid, String remoteDomain) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.roomMapping(
-                          nextHop, remoteDomain, localDomain, localJid, remoteJid));
-            Log.info("Sent mapping request {} → {} ({})", localJid, remoteJid, remoteDomain);
-        } catch (Exception e) {
-            Log.warn("Failed to send mapping request to {}: {}", remoteDomain, e.getMessage());
-        }
+        String nextHop = nextHopToward(remoteDomain);
+        boolean sent = FederationSender.send("mapping request", remoteDomain, () -> FederationStanzaFactory.roomMapping(
+                nextHop, remoteDomain, localDomain(), localJid, remoteJid));
+        if (sent) Log.info("Sent mapping request {} → {} ({})", localJid, remoteJid, remoteDomain);
     }
 
     /**
-     * Re-sends pending outgoing mapping requests toward a peer that just came up. To avoid both ends
-     * racing on a legacy/queued link, only the lexicographically-smaller domain initiates; the other
-     * side simply accepts the incoming request.
+     * Re-sends our pending requests to a peer that just came up. Only the lexicographically smaller
+     * domain does so, so the two ends do not race.
      */
     public void resendPendingRequests(String remoteDomain) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        if (localDomain.compareTo(remoteDomain) >= 0) return;
+        if (localDomain().compareTo(remoteDomain) >= 0) return;
         for (List<RoomMapping> list : roomManager.getLocalMappings().values()) {
             for (RoomMapping m : list) {
                 if (m.remoteDomain().equals(remoteDomain) && m.state() == RoomMapping.State.PENDING_OUT) {
@@ -858,90 +343,77 @@ public class FederationManager {
     }
 
     /**
-     * Accepts an incoming mapping request on one of our rooms (we are the room owner). Mints a shared
-     * token, marks the mapping ACTIVE, tells the requester (room-mapping-accept), and pushes our roster.
+     * Accepts a request on one of our rooms: mints the token, goes ACTIVE, tells the requester and
+     * sends it our roster.
      */
     public void acceptMapping(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
-        if (m == null) { Log.warn("acceptMapping: no mapping {} ({})", localJid, remoteDomain); return; }
-        String token = org.jivesoftware.util.StringUtils.randomString(40);
+        if (m == null) {
+            Log.warn("acceptMapping: no mapping {} ({})", localJid, remoteDomain);
+            return;
+        }
+        String token = StringUtils.randomString(40);
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, token);
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
-        route(FederationStanzaFactory.roomMappingAccept(nextHop, remoteDomain, localDomain,
-                m.localRoomJid(), m.remoteRoomJid(), token), remoteDomain);
-        // Push our roster so the requester's clients see our occupants immediately.
-        pushRosterToPeer(localJid, remoteDomain, m.remoteRoomJid());
+        String nextHop = nextHopToward(remoteDomain);
+        FederationSender.send("mapping accept", remoteDomain, () -> FederationStanzaFactory.roomMappingAccept(
+                nextHop, remoteDomain, localDomain(), m.localRoomJid(), m.remoteRoomJid(), token));
+        occupantSync.pushRosterToPeer(localJid, remoteDomain, m.remoteRoomJid());
         Log.info("Accepted mapping {} ({})", localJid, remoteDomain);
     }
 
-    /**
-     * Re-sends our acceptance of an already-ACTIVE mapping, carrying its EXISTING token. Used when the
-     * remote asks again for a mapping we already hold as active — typically because it lost its own
-     * state (reinstall, re-add) and is now waiting in PENDING_OUT. Re-accepting with the stored token
-     * converges both ends without demoting our mapping, and is a no-op on a remote that is already
-     * active (it only honours an accept while PENDING_OUT).
-     */
+    /** Re-sends our acceptance of an ACTIVE mapping with its existing token, for a remote that lost its state. */
     public void resendAccept(RoomMapping m) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
-        route(FederationStanzaFactory.roomMappingAccept(nextHop, m.remoteDomain(), localDomain,
-                m.localRoomJid(), m.remoteRoomJid(), m.token()), m.remoteDomain());
+        String nextHop = nextHopToward(m.remoteDomain());
+        FederationSender.send("mapping accept", m.remoteDomain(), () -> FederationStanzaFactory.roomMappingAccept(
+                nextHop, m.remoteDomain(), localDomain(), m.localRoomJid(), m.remoteRoomJid(), m.token()));
         Log.info("Re-sent acceptance of active mapping {} ({})", m.localRoomJid(), m.remoteDomain());
     }
 
-    /** Re-sends our own pending request for {@code m} (see the mutual-request rule in the IQ handler). */
+    /** Re-sends our own pending request for {@code m}. */
     public void resendMappingRequest(RoomMapping m) {
         sendMappingRequest(m.localRoomJid(), m.remoteRoomJid(), m.remoteDomain());
     }
 
-    /** Rejects an incoming mapping request: tells the requester and drops our pending record. */
+    /** Rejects an incoming request: tells the requester and drops our pending record. */
     public void rejectMapping(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (m == null) return;
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
-        route(FederationStanzaFactory.roomMappingReject(nextHop, remoteDomain, localDomain,
-                m.localRoomJid(), m.remoteRoomJid(), null), remoteDomain);
+        String nextHop = nextHopToward(remoteDomain);
+        FederationSender.send("mapping reject", remoteDomain, () -> FederationStanzaFactory.roomMappingReject(
+                nextHop, remoteDomain, localDomain(), m.localRoomJid(), m.remoteRoomJid(), null));
         roomManager.removeMapping(localJid, remoteDomain);
         Log.info("Rejected mapping request {} ({})", localJid, remoteDomain);
     }
 
-    /** Disables an active mapping from our side; the peer will show "disabled by peer". */
+    /** Disables an active mapping from our side; the peer shows it as disabled by peer. */
     public void disableMapping(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (m == null) return;
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.DISABLED_LOCAL, m.token());
-        pushVirtualPresences(localJid, remoteDomain, m.remoteRoomJid(), true);
-        evictForInactiveMapping(localJid, remoteDomain);
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
-        route(FederationStanzaFactory.roomMappingDisable(nextHop, remoteDomain, localDomain,
-                m.localRoomJid(), m.remoteRoomJid(), m.token()), remoteDomain);
+        occupantSync.pushVirtualPresences(localJid, remoteDomain, m.remoteRoomJid(), true);
+        occupantSync.evictForInactiveMapping(localJid, remoteDomain);
+        String nextHop = nextHopToward(remoteDomain);
+        FederationSender.send("mapping disable", remoteDomain, () -> FederationStanzaFactory.roomMappingDisable(
+                nextHop, remoteDomain, localDomain(), m.localRoomJid(), m.remoteRoomJid(), m.token()));
         Log.info("Disabled mapping {} ({})", localJid, remoteDomain);
     }
 
-    /** Re-enables a mapping we previously disabled (DISABLED_LOCAL → ACTIVE) and re-syncs rosters. */
+    /** Re-enables a mapping we disabled and re-syncs the rosters. */
     public void enableMapping(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (m == null || m.state() != RoomMapping.State.DISABLED_LOCAL) return;
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, m.token());
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
-        route(FederationStanzaFactory.roomMappingEnable(nextHop, remoteDomain, localDomain,
-                m.localRoomJid(), m.remoteRoomJid(), m.token()), remoteDomain);
-        pushRosterToPeer(localJid, remoteDomain, m.remoteRoomJid());
+        String nextHop = nextHopToward(remoteDomain);
+        FederationSender.send("mapping enable", remoteDomain, () -> FederationStanzaFactory.roomMappingEnable(
+                nextHop, remoteDomain, localDomain(), m.localRoomJid(), m.remoteRoomJid(), m.token()));
+        occupantSync.pushRosterToPeer(localJid, remoteDomain, m.remoteRoomJid());
         Log.info("Enabled mapping {} ({})", localJid, remoteDomain);
     }
 
-    // ── Inbound lifecycle transitions (called from FederationIQHandler) ──────────
-    //
-    // Each inbound transition is legal from exactly one state. They used to apply to a mapping in ANY
-    // state, which made the consent model bypassable: a peer could file a request (stored PENDING_IN)
-    // and then accept or enable it itself, or re-activate a mapping our admin had disabled. A message
-    // arriving in the wrong state is dropped and logged.
-
-    /** True when {@code m} exists and is in {@code expected}; otherwise logs why the transition is refused. */
+    /**
+     * Whether {@code m} exists and is in {@code expected}; each inbound lifecycle transition is legal
+     * from exactly one state, so a peer cannot accept or re-enable its own request.
+     */
     private boolean inState(RoomMapping m, RoomMapping.State expected, String op,
                             String localJid, String remoteDomain) {
         if (m != null && m.state() == expected) return true;
@@ -950,11 +422,7 @@ public class FederationManager {
         return false;
     }
 
-    /**
-     * Requester side: the remote accepted our request → go ACTIVE, store the token, push our roster.
-     * Only a mapping WE requested (PENDING_OUT) can be accepted by the remote, and only for the room we
-     * asked for.
-     */
+    /** The remote accepted our request for the room we asked for: goes ACTIVE and syncs occupants. */
     public void onMappingAccepted(String localJid, String remoteDomain, String remoteJid, String token) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (!inState(m, RoomMapping.State.PENDING_OUT, "accept", localJid, remoteDomain)) return;
@@ -964,12 +432,12 @@ public class FederationManager {
             return;
         }
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, token);
-        pushInitialSyncPresences(localJid, remoteDomain, m.remoteRoomJid());
-        forwardVirtualOccupants(localJid, remoteDomain, m.remoteRoomJid());
+        occupantSync.pushInitialSyncPresences(localJid, remoteDomain, m.remoteRoomJid());
+        occupantSync.forwardVirtualOccupants(localJid, remoteDomain, m.remoteRoomJid());
         Log.info("Mapping {} ({}) accepted by remote — now ACTIVE", localJid, remoteDomain);
     }
 
-    /** Requester side: the remote rejected our request. Only a pending request of ours can be rejected. */
+    /** The remote rejected our pending request. */
     public void onMappingRejected(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (!inState(m, RoomMapping.State.PENDING_OUT, "reject", localJid, remoteDomain)) return;
@@ -977,197 +445,55 @@ public class FederationManager {
         Log.info("Mapping {} ({}) rejected by remote", localJid, remoteDomain);
     }
 
-    /**
-     * Peer disabled the mapping → mark DISABLED_REMOTE and evict its virtual occupants. Only an ACTIVE
-     * mapping can be disabled by the peer: one our admin already disabled stays DISABLED_LOCAL, so the
-     * peer's later enable cannot override our own decision.
-     */
+    /** The peer disabled an ACTIVE mapping: marks it DISABLED_REMOTE and evicts its occupants. */
     public void onMappingDisabledByPeer(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (!inState(m, RoomMapping.State.ACTIVE, "disable", localJid, remoteDomain)) return;
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.DISABLED_REMOTE, m.token());
-        evictForInactiveMapping(localJid, remoteDomain);
+        occupantSync.evictForInactiveMapping(localJid, remoteDomain);
         Log.info("Mapping {} ({}) disabled by peer", localJid, remoteDomain);
     }
 
-    /** Peer re-enabled the mapping → mark ACTIVE and re-sync. Only undoes the peer's OWN disable. */
+    /** The peer lifted its own disable: goes ACTIVE and re-syncs. */
     public void onMappingEnabledByPeer(String localJid, String remoteDomain, String remoteJid) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (!inState(m, RoomMapping.State.DISABLED_REMOTE, "enable", localJid, remoteDomain)) return;
         roomManager.setMappingState(localJid, remoteDomain, RoomMapping.State.ACTIVE, m.token());
-        pushInitialSyncPresences(localJid, remoteDomain, m.remoteRoomJid());
-        forwardVirtualOccupants(localJid, remoteDomain, m.remoteRoomJid());
+        occupantSync.pushInitialSyncPresences(localJid, remoteDomain, m.remoteRoomJid());
+        occupantSync.forwardVirtualOccupants(localJid, remoteDomain, m.remoteRoomJid());
         Log.info("Mapping {} ({}) re-enabled by peer", localJid, remoteDomain);
     }
 
-    private void route(IQ iq, String remoteDomain) {
-        try {
-            XMPPServer.getInstance().getPacketRouter().route(iq);
-        } catch (Exception e) {
-            Log.warn("Failed to route mapping lifecycle IQ to {}: {}", remoteDomain, e.getMessage());
-        }
-    }
-
-    /** Removes ALL spoke mappings for localJid (any state) and notifies every remote. */
+    /** Removes every mapping of {@code localJid}, in any state, and tells each remote. */
     public void unmapRooms(String localJid) {
         List<RoomMapping> mappings = new ArrayList<>(roomManager.getAllMappingsForLocal(localJid));
         for (RoomMapping m : mappings) {
-            pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
+            occupantSync.pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         }
         roomManager.removeMapping(localJid);
-        // Every mapping is gone — drop all virtual occupants in the room (incl. hub-relayed
-        // users tracked under a relay domain, which a per-domain evict would miss).
-        evictAllVirtualOccupantsInRoom(localJid);
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        occupantSync.evictAllVirtualOccupantsInRoom(localJid);
         for (RoomMapping m : mappings) {
-            String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.roomUnmapping(
-                              nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid(), m.token()));
-            } catch (Exception e) {
-                Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
-            }
+            sendRoomUnmap(localJid, m);
         }
     }
 
-    /** Removes only the mapping from localJid toward remoteDomain and notifies that remote. */
+    /** Removes the mapping from {@code localJid} to {@code remoteDomain} and tells that remote. */
     public void unmapRoom(String localJid, String remoteDomain) {
         RoomMapping m = roomManager.getMappingForLocal(localJid, remoteDomain);
         if (m == null) return;
-        pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
+        occupantSync.pushVirtualPresences(localJid, m.remoteDomain(), m.remoteRoomJid(), true);
         roomManager.removeMapping(localJid, remoteDomain);
-        // If this was the room's last active mapping, every virtual occupant is now unreachable
-        // (covers hub-relayed cross-spoke users); otherwise drop this remote's users by origin
-        // and propagate their leaves to the still-active spokes. Same path as mapping disable.
-        evictForInactiveMapping(localJid, remoteDomain);
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = routingTable.findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.roomUnmapping(
-                          nextHop, m.remoteDomain(), localDomain, localJid, m.remoteRoomJid(), m.token()));
-        } catch (Exception e) {
-            Log.warn("Failed to send room-unmap to {}: {}", m.remoteDomain(), e.getMessage());
-        }
+        occupantSync.evictForInactiveMapping(localJid, remoteDomain);
+        sendRoomUnmap(localJid, m);
     }
 
-    /**
-     * Drops every client ORIGINATING from remoteDomain across all local rooms — used
-     * when the route to remoteDomain is lost.  Eviction is keyed on the virtual nick's
-     * HOME domain rather than the domain it was tracked under, so multi-hop occupants
-     * (tracked under a relay) are also dropped when the far server becomes unreachable.
-     *
-     * <p>Like the arrivedVia pass, each leave is PROPAGATED to the occupant's other spokes.
-     * Without this, a spoke that learned the occupant through us (and so cannot evict it on its
-     * own route loss) keeps it as a ghost — and worse, racing this local eviction against an
-     * inbound propagated leave can untrack the occupant first, so the inbound leave then finds
-     * nothing to re-forward and the spoke is never told.
-     */
-    public void evictAllVirtualOccupantsFromDomain(String remoteDomain) {
-        for (String localJid : roomManager.getRoomsWithAnyVirtualOccupants()) {
-            List<FederatedRoomManager.VirtualOccupant> gone =
-                    roomManager.removeVirtualOccupantsByOrigin(localJid, remoteDomain);
-            if (gone.isEmpty()) continue;
-            sendVirtualLeaves(localJid,
-                    gone.stream().map(FederatedRoomManager.VirtualOccupant::nick)
-                        .collect(java.util.stream.Collectors.toSet()));
-            for (FederatedRoomManager.VirtualOccupant vo : gone) {
-                forwardVirtualLeave(localJid, vo.nick(), vo.origin(), vo.arrivedVia());
-            }
-        }
+    private void sendRoomUnmap(String localJid, RoomMapping m) {
+        String nextHop = nextHopToward(m.remoteDomain());
+        FederationSender.send("room-unmap", m.remoteDomain(), () -> FederationStanzaFactory.roomUnmapping(
+                nextHop, m.remoteDomain(), localDomain(), localJid, m.remoteRoomJid(), m.token()));
     }
 
-    /**
-     * Delivers leave presences to every current local occupant of localRoomJid for each
-     * virtual nick that ARRIVED VIA remoteDomain (the immediate neighbour we got them from).
-     * Used when tearing down a specific mapping while others on the room survive.
-     */
-    public void evictVirtualOccupants(String localRoomJid, String remoteDomain) {
-        sendVirtualLeaves(localRoomJid, roomManager.clearVirtualOccupantsByArrivedVia(localRoomJid, remoteDomain));
-    }
-
-    /**
-     * Cleans up virtual occupants after a mapping toward {@code remoteDomain} goes inactive
-     * (disabled by either end).  Two cases, mirroring {@link #unmapRoom}:
-     *
-     * <ul>
-     *   <li><b>No ACTIVE mapping still feeds the room</b> — every virtual occupant is now
-     *       unreachable (including hub-relayed cross-spoke users whose HOME is some other
-     *       server but who only reached us through this mapping), so drop them all.  This is
-     *       the spoke side of a hub disable: the spoke's single mapping is gone, so the hub's
-     *       own users <i>and</i> the other spokes' relayed users must all leave.</li>
-     *   <li><b>Other mappings remain</b> — drop only the virtual occupants that ARRIVED VIA the
-     *       now-inactive mapping (keyed on {@code arrivedVia == remoteDomain}, where arrivedVia
-     *       is the MAPPED server an occupant entered through).  This drops the disabled remote's
-     *       own users AND the cross-spoke users it relayed in (their arrivedVia is this mapping's
-     *       far server / hub, even though their HOME is elsewhere), while occupants reachable
-     *       through a <i>surviving</i> mapping keep that path and stay.  Each resulting leave is
-     *       propagated to the still-active spokes with the occupant's real origin so they stop
-     *       seeing those users too.</li>
-     * </ul>
-     *
-     * <p>Keying on arrivedVia (the mapping traversed) rather than on the user's HOME is what
-     * makes this correct for BOTH duals of a multi-mapping room: disabling the mapping a relayed
-     * user came through evicts it; disabling an UNRELATED mapping leaves it alone — a HOME-based
-     * key cannot tell those apart because the user's home is the same in both.
-     */
-    public void evictForInactiveMapping(String localRoomJid, String remoteDomain) {
-        if (roomManager.getMappingsForLocal(localRoomJid).isEmpty()) {
-            evictAllVirtualOccupantsInRoom(localRoomJid);
-            return;
-        }
-        List<FederatedRoomManager.VirtualOccupant> gone =
-                roomManager.removeVirtualOccupantsArrivedVia(localRoomJid, remoteDomain);
-        if (gone.isEmpty()) return;
-        sendVirtualLeaves(localRoomJid,
-                gone.stream().map(FederatedRoomManager.VirtualOccupant::nick)
-                    .collect(java.util.stream.Collectors.toSet()));
-        for (FederatedRoomManager.VirtualOccupant vo : gone) {
-            forwardVirtualLeave(localRoomJid, vo.nick(), vo.origin(), java.util.Set.of(remoteDomain));
-        }
-    }
-
-    /**
-     * Drops EVERY virtual occupant in a local room — used when its last federation mapping
-     * is removed (the whole federation feeding the room is gone).  Catches hub-relayed users
-     * tracked under a relay domain, which per-origin/per-domain eviction misses multi-hop.
-     */
-    public void evictAllVirtualOccupantsInRoom(String localRoomJid) {
-        sendVirtualLeaves(localRoomJid, roomManager.clearAllVirtualOccupants(localRoomJid));
-    }
-
-    /** Sends an unavailable presence for each given virtual nick to every real local occupant. */
-    private void sendVirtualLeaves(String localRoomJid, Set<String> nicks) {
-        if (nicks.isEmpty()) return;
-        try {
-            JID localRoomJID = new JID(localRoomJid);
-            MUCRoom room = findLocalMucRoom(localRoomJid);
-            if (room == null) return;
-            Collection<MUCOccupant> occupants = room.getOccupants();
-            if (occupants.isEmpty()) return;
-            for (String nick : nicks) {
-                JID virtualFrom = new JID(localRoomJID.getNode(), localRoomJID.getDomain(), nick);
-                for (MUCOccupant occupant : occupants) {
-                    Presence leave = new Presence();
-                    leave.setFrom(virtualFrom);
-                    leave.setTo(occupant.getUserAddress());
-                    leave.setType(Presence.Type.unavailable);
-                    Element x    = leave.getElement().addElement("x", "http://jabber.org/protocol/muc#user");
-                    Element item = x.addElement("item");
-                    item.addAttribute("affiliation", "none");
-                    item.addAttribute("role", "none");
-                    FederationStanzaFactory.markAsForwarded(leave);
-                    FederationStanzaFactory.directDeliver(leave);
-                }
-            }
-            Log.debug("sendVirtualLeaves: sent {} leave(s) in {}", nicks.size(), localRoomJid);
-        } catch (Exception e) {
-            Log.warn("sendVirtualLeaves: error for {}: {}", localRoomJid, e.getMessage());
-        }
-    }
-
-    /** Finds a local MUCRoom by full JID string (room@conference.domain), or null. */
+    /** The local MUC room with this JID (room@conference.domain), or null. */
     public MUCRoom findLocalMucRoom(String roomJid) {
         try {
             JID jid = new JID(roomJid);
@@ -1177,421 +503,34 @@ public class FederationManager {
                     return svc.getChatRoom(jid.getNode());
                 }
             }
-        } catch (Exception e) {
-            Log.warn("findLocalMucRoom: could not find room {}: {}", roomJid, e.getMessage());
+        } catch (RuntimeException e) {
+            Log.warn("Could not look up local room {}", roomJid, e);
         }
         return null;
     }
 
     /**
-     * Sends a synthetic join or leave presence for every current occupant of
-     * localRoom toward remoteRoomJid on remoteDomain.  Single code path behind
-     * pushVirtualPresences and pushInitialSyncPresences.
-     *
-     * @param markForwarded when true, presences carry fed-origin so the receiver
-     *        injects them without bouncing a reverse sync (in-session updates and
-     *        leaves).  When false (initial mapping sync), the receiver's
-     *        injectPresence runs syncLocalOccupantsToRemote and replies with its
-     *        own occupants — a bilateral exchange.  Only the FIRST occupant's
-     *        presence is left unmarked in that case: one unmarked join is enough to
-     *        trigger the reverse sync, and marking the rest collapses what was an
-     *        N×M reply burst (every unmarked join provoked a full-roster reply from
-     *        the remote) into a single M-occupant reply.
-     */
-    private void pushOccupants(String localRoom, String remoteDomain, String remoteRoomJid,
-                               boolean leaving, boolean markForwarded) {
-        try {
-            MUCRoom room = findLocalMucRoom(localRoom);
-            if (room == null) return;
-
-            Collection<MUCOccupant> occupants = room.getOccupants();
-            if (occupants.isEmpty()) return;
-
-            String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-            String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
-
-            boolean syncTriggerSent = false;
-            for (MUCOccupant occupant : occupants) {
-                Presence p = new Presence();
-                p.setFrom(occupant.getUserAddress());
-                if (leaving) {
-                    p.setType(Presence.Type.unavailable);
-                } else {
-                    // Carry current show/status so the remote sees accurate availability.
-                    Element curEl = occupant.getPresence().getElement();
-                    Element showEl = curEl.element("show");
-                    if (showEl != null) p.getElement().addElement("show").setText(showEl.getText());
-                    for (Element statusEl : curEl.elements("status")) {
-                        p.getElement().addElement("status").setText(statusEl.getText());
-                    }
-                }
-                if (markForwarded || syncTriggerSent) FederationStanzaFactory.markAsForwarded(p);
-                syncTriggerSent = true;
-                try {
-                    XMPPServer.getInstance().getPacketRouter().route(
-                        FederationStanzaFactory.mucForward(
-                            nextHop, remoteDomain, remoteRoomJid, localDomain, localDomain, p));
-                } catch (Exception ex) {
-                    Log.warn("pushOccupants: failed to push {} for {}: {}",
-                             leaving ? "leave" : "join", occupant.getUserAddress(), ex.getMessage());
-                }
-            }
-            Log.debug("pushOccupants: sent {} {} for {} occupant(s) toward {} (fedOrigin={})",
-                      leaving ? "leave" : "join", localRoom, occupants.size(), remoteRoomJid, markForwarded);
-        } catch (Exception e) {
-            Log.warn("pushOccupants: error for {}: {}", localRoom, e.getMessage());
-        }
-    }
-
-    /**
-     * Sends synthetic join/leave presences for current occupants of localRoom toward
-     * a spoke, marked fed-origin so the receiver does not bounce a reverse sync.
-     */
-    public void pushVirtualPresences(String localRoom, String remoteDomain,
-                                     String remoteRoomJid, boolean leaving) {
-        pushOccupants(localRoom, remoteDomain, remoteRoomJid, leaving, true);
-    }
-
-    /**
-     * Sends current local occupants' join presences to the remote, the first one WITHOUT
-     * fed-origin so the remote's injectPresence triggers syncLocalOccupantsToRemote exactly
-     * once and replies with its own occupants (the rest are marked — see pushOccupants).
-     * Used at mapping-creation and re-sync time.
-     */
-    public void pushInitialSyncPresences(String localRoom, String remoteDomain,
-                                         String remoteRoomJid) {
-        pushOccupants(localRoom, remoteDomain, remoteRoomJid, false, false);
-    }
-
-    /**
-     * Forwards the virtual occupants we know about in localRoom — users that reached
-     * us from OTHER federated domains — toward toDomain, marked fed-origin.  Excludes:
-     * (a) virtuals that arrived VIA toDomain (don't echo them back the way they came),
-     * and (b) users whose HOME (origin) server is toDomain (don't echo a server its own
-     * users — otherwise a user sees a ghost copy of themself looping back home).  Both are
-     * first-class fields on {@link FederatedRoomManager.VirtualOccupant}, so no nick parsing.
-     */
-    public void forwardVirtualOccupants(String localRoom, String toDomain, String remoteRoomJid) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop = routingTable.findNextHop(toDomain).orElse(toDomain);
-        for (FederatedRoomManager.VirtualOccupant vo : roomManager.getVirtualOccupants(localRoom)) {
-            if (vo.arrivedVia().contains(toDomain)) continue;     // don't echo back any way it came
-            if (toDomain.equals(vo.origin()))     continue;       // toDomain's own user — don't echo
-            try {
-                Presence vsync = new Presence();
-                vsync.setFrom(new JID(vo.nick()));
-                FederationStanzaFactory.markAsForwarded(vsync);
-                XMPPServer.getInstance().getPacketRouter().route(
-                    FederationStanzaFactory.mucForward(nextHop, toDomain, remoteRoomJid, localDomain, localDomain, vsync));
-            } catch (Exception e) {
-                Log.warn("forwardVirtualOccupants: failed for {}: {}", vo.nick(), e.getMessage());
-            }
-        }
-    }
-
-    /**
-     * Leave-equivalent of {@link #forwardVirtualOccupants}: when a virtual occupant leaves,
-     * propagate an unavailable presence for it toward every mapping of localRoom, using the
-     * SAME split-horizon exclusions — (a) don't echo it back down a path it arrived via, and
-     * (b) don't echo a server its own user.  Marked fed-origin like the join sync.
-     *
-     * <p>Why this is needed: a JOIN reaches distant (multi-hop) spokes via the state-based
-     * {@code forwardVirtualOccupants} path, but a LEAVE previously had no state-based
-     * equivalent — it relied solely on the transient hub fan-out, which does not reliably
-     * reach those spokes.  The result was a ghost occupant: the join propagated but the
-     * matching leave did not.  This makes leave propagation symmetric with join propagation.
-     */
-    public void forwardVirtualLeave(String localRoom, String leavingNick,
-                                    String origin, Set<String> arrivedVia) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        for (RoomMapping m : roomManager.getMappingsForLocal(localRoom)) {
-            String toDomain = m.remoteDomain();
-            if (arrivedVia.contains(toDomain)) continue;   // don't echo back the way it came
-            if (toDomain.equals(origin))       continue;   // toDomain's own user — don't echo
-            String nextHop = routingTable.findNextHop(toDomain).orElse(toDomain);
-            try {
-                Presence vleave = new Presence();
-                vleave.setFrom(new JID(leavingNick));
-                vleave.setType(Presence.Type.unavailable);
-                FederationStanzaFactory.markAsForwarded(vleave);
-                XMPPServer.getInstance().getPacketRouter().route(
-                    FederationStanzaFactory.mucForward(nextHop, toDomain, m.remoteRoomJid(), localDomain, localDomain, vleave));
-            } catch (Exception e) {
-                Log.warn("forwardVirtualLeave: failed for {}: {}", leavingNick, e.getMessage());
-            }
-        }
-        Log.debug("forwardVirtualLeave: propagated leave of {} from {} (origin={}, arrivedVia={})",
-                  leavingNick, localRoom, origin, arrivedVia);
-    }
-
-    /**
-     * Pushes our full roster of localRoom — real local occupants AND virtual occupants
-     * reached through us — toward a peer that just mapped this room, all marked
-     * fed-origin.  Called from the room-mapping handler so the mapping peer's clients
-     * see everyone immediately, even when it has no occupants of its own to trigger the
-     * reverse sync.
-     */
-    public void pushRosterToPeer(String localRoom, String toDomain, String remoteRoomJid) {
-        pushOccupants(localRoom, toDomain, remoteRoomJid, false, true);
-        forwardVirtualOccupants(localRoom, toDomain, remoteRoomJid);
-    }
-
-    // ── Routing propagation ────────────────────────────────────────────────────
-
-    /**
-     * Cleans up all cached state for destinations that just became unreachable:
-     * evicts their virtual occupants (so local clients see leave presences) and
-     * drops their advertised rooms.  Driven by routing-table withdrawals so the
-     * cleanup converges across every hop as the withdrawal gossips outward — not
-     * just on the directly-disconnected peer.  A destination still reachable by an
-     * alternate path is skipped, so diamond topologies don't lose live rooms.
+     * Cleans up after destinations become unreachable: evicts their virtual occupants and drops their
+     * cached rooms. A destination still reachable another way is skipped.
      */
     public void handleUnreachableDestinations(Collection<String> destinations) {
         for (String dest : destinations) {
-            if (routingTable.isReachable(dest)) continue;   // still reachable another way
-            evictOccupantsArrivedViaLostServer(dest);       // by ARRIVED-VIA mapping (catches relayed cross-spoke)
-            evictAllVirtualOccupantsFromDomain(dest);       // by ORIGIN home domain
-            evictOccupantsForLostHub(dest);                 // by mapped hub (catches un-routed origins)
+            if (routingTable.isReachable(dest)) continue;
+            occupantSync.evictOccupantsArrivedViaLostServer(dest);
+            occupantSync.evictAllVirtualOccupantsFromDomain(dest);
+            occupantSync.evictOccupantsForLostHub(dest);
             roomManager.clearRemoteRooms(dest);
-            // Contact lists from `dest` are deliberately kept: dropping them would empty every user's
-            // contact list on each link flap. They go when the origin withdraws them or is unmapped.
+            // Contact lists are kept on purpose, or every link flap would empty users' contact lists.
         }
     }
 
-    /**
-     * A mapped server (a peer or hub) just became unreachable: across every local room, drop the
-     * virtual occupants that ARRIVED VIA it and propagate those leaves to the room's other spokes
-     * so they stop seeing them too.  This is the route-loss analogue of
-     * {@link #evictForInactiveMapping}, and the reason it is needed alongside the by-origin pass:
-     * a user RELAYED in through this server (e.g. a cross-spoke occupant that reached us through a
-     * hub) has its own HOME domain — which may still be perfectly routable — so by-origin eviction
-     * keeps it as a ghost even though the only path it actually used is now gone.  Keying on
-     * arrivedVia (the mapped server traversed, recorded at injection) drops exactly those, while
-     * occupants still reachable through another mapping keep that path and stay.
-     */
-    public void evictOccupantsArrivedViaLostServer(String lostDomain) {
-        for (String localJid : roomManager.getRoomsWithAnyVirtualOccupants()) {
-            List<FederatedRoomManager.VirtualOccupant> gone =
-                    roomManager.removeVirtualOccupantsArrivedVia(localJid, lostDomain);
-            if (gone.isEmpty()) continue;
-            sendVirtualLeaves(localJid,
-                    gone.stream().map(FederatedRoomManager.VirtualOccupant::nick)
-                        .collect(java.util.stream.Collectors.toSet()));
-            for (FederatedRoomManager.VirtualOccupant vo : gone) {
-                forwardVirtualLeave(localJid, vo.nick(), vo.origin(), java.util.Set.of(lostDomain));
-            }
-        }
-    }
-
-    /**
-     * A room's federation hub just became unreachable: drop the occupants we learned through it.
-     *
-     * <p>{@link #evictAllVirtualOccupantsFromDomain} only evicts occupants whose HOME (origin)
-     * domain equals the lost destination — fine on a fully-trusted mesh, where every hop carries
-     * routes to all origins. But across an <b>untrusted edge</b>, routes are filtered down to the
-     * exposed rooms' hosting servers only: occupants from the servers <i>behind</i> the hub flow
-     * through as muc-forwards yet their origin domains are never routable here, so by-origin
-     * eviction misses them and they linger as ghosts after the link drops.
-     *
-     * <p>So for every local room mapped to the now-unreachable hub, if that was the room's only
-     * remaining reachable federation path, evict <i>every</i> virtual occupant in it — they all
-     * reached us through the hub we just lost. If the room still has another reachable mapping
-     * (multi-hub), we leave its occupants alone; the per-origin pass above covers what it can.
-     */
-    private void evictOccupantsForLostHub(String lostDomain) {
-        for (String localJid : roomManager.getRoomsWithAnyVirtualOccupants()) {
-            List<RoomMapping> mappings = roomManager.getMappingsForLocal(localJid);
-            boolean mappedToLost = mappings.stream().anyMatch(m -> m.remoteDomain().equals(lostDomain));
-            if (!mappedToLost) continue;
-            boolean anyReachable = mappings.stream().anyMatch(m -> routingTable.isReachable(m.remoteDomain()));
-            if (!anyReachable) {
-                evictAllVirtualOccupantsInRoom(localJid);
-            }
-        }
-    }
-
-    // ── End-to-end mapping path probe (mapping-ping / mapping-pong) ───────────
-    //
-    // The routing table only proves a route EXISTS from here — it cannot see a path
-    // silently broken mid-way in one direction (e.g. an intermediate server denying
-    // the reverse route while advertisements toward us still flow). Each ping
-    // interval we probe every distinct ACTIVE-mapped domain; the far end answers
-    // with a pong routed back across the overlay. Missing MAPPING_PING_MISS_LIMIT
-    // pongs in a row marks the path broken: mappings toward it show "not responding"
-    // and its virtual occupants are evicted, exactly as the other side already did.
-    // A returning pong clears the flag and re-syncs rosters bilaterally.
-
-    static final int MAPPING_PING_MISS_LIMIT = 3;
-
-    private static final class MappingPingState {
-        volatile boolean everPonged = false;   // this runtime; persisted capability survives restarts
-        volatile int     missed     = 0;       // pings sent since the last pong
-        volatile boolean broken     = false;
-        volatile long    lastPingAt = 0;       // epoch ms of the newest ping we sent
-        volatile long    lastPongAt = 0;       // epoch ms of the newest pong we received
-        volatile long    lastRttMs  = -1;      // round trip of the newest pong (-1 = none yet)
-    }
-
-    private final java.util.concurrent.ConcurrentHashMap<String, MappingPingState> mappingPingStates =
-        new java.util.concurrent.ConcurrentHashMap<>();
-
-    // Domains proven to speak the probe protocol (they ponged — or pinged — us at least once,
-    // ever). Persisted: everPonged alone resets with the JVM, so a path already broken when the
-    // plugin (re)starts would otherwise never be flagged and its ghost occupants never evicted.
-    private static final String PROBE_CAPABLE_KEY = "plugin.federation.probeCapableDomains";
-    private final Set<String> probeCapable = java.util.concurrent.ConcurrentHashMap.newKeySet();
-    private static final int MAX_PROBE_CAPABLE = 1024;
-    private volatile boolean probeCapableLoaded = false;
-
-    private Set<String> probeCapable() {
-        if (!probeCapableLoaded) {
-            synchronized (probeCapable) {
-                if (!probeCapableLoaded) {
-                    String csv = JiveGlobals.getProperty(PROBE_CAPABLE_KEY, "");
-                    for (String d : csv.split(",")) {
-                        if (!d.isBlank()) probeCapable.add(d.trim());
-                    }
-                    probeCapableLoaded = true;
-                }
-            }
-        }
-        return probeCapable;
-    }
-
-    /** Records (persistently) that this domain answers mapping probes, enabling break detection toward it. */
-    public void markProbeCapable(String domain) {
-        if (domain == null || domain.isEmpty()) return;
-        // Persisted, so only for a server we actually route to, and bounded: a peer can claim any
-        // origin on a mapping-ping.
-        if (routingTable.findNextHop(domain).isEmpty()) return;
-        if (probeCapable().size() >= MAX_PROBE_CAPABLE && !probeCapable().contains(domain)) return;
-        if (probeCapable().add(domain)) {
-            JiveGlobals.setProperty(PROBE_CAPABLE_KEY, String.join(",", probeCapable));
-        }
-    }
-
-    /** True when the mapped domain has stopped answering end-to-end probes (route may still exist). */
-    public boolean isMappingPathBroken(String remoteDomain) {
-        MappingPingState st = mappingPingStates.get(remoteDomain);
-        return st != null && st.broken;
-    }
-
-    /** Round trip (ms) of the newest pong from the domain; -1 when none was received this runtime. */
-    public long getMappingPingRttMs(String remoteDomain) {
-        MappingPingState st = mappingPingStates.get(remoteDomain);
-        return st == null ? -1 : st.lastRttMs;
-    }
-
-    /** Seconds since the newest pong from the domain; -1 when none was received this runtime. */
-    public long getMappingPongAgeSecs(String remoteDomain) {
-        MappingPingState st = mappingPingStates.get(remoteDomain);
-        return st == null || st.lastPongAt == 0 ? -1
-             : (System.currentTimeMillis() - st.lastPongAt) / 1000;
-    }
-
-    /** Sends one mapping-ping toward every distinct ACTIVE-mapped domain that is currently routable. */
-    public void sendMappingPings() {
-        Set<String> mapped = new LinkedHashSet<>();
-        for (List<RoomMapping> mappings : roomManager.getLocalMappings().values()) {
-            for (RoomMapping m : mappings) {
-                if (m.isActive()) mapped.add(m.remoteDomain());
-            }
-        }
-        mappingPingStates.keySet().retainAll(mapped);   // forget unmapped domains
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        for (String dest : mapped) {
-            java.util.Optional<String> nextHop = routingTable.findNextHop(dest);
-            if (nextHop.isEmpty()) continue;   // no route — routeMissing handling already covers this
-            MappingPingState st = mappingPingStates.computeIfAbsent(dest, k -> new MappingPingState());
-            if ((st.everPonged || probeCapable().contains(dest))
-                    && !st.broken && st.missed >= MAPPING_PING_MISS_LIMIT) {
-                st.broken = true;
-                onMappingPathBroken(dest);
-            }
-            st.missed++;
-            long now = System.currentTimeMillis();
-            st.lastPingAt = now;
-            try {
-                XMPPServer.getInstance().getPacketRouter().route(
-                    FederationStanzaFactory.mappingPing(nextHop.get(), dest, localDomain, "",
-                                                        Long.toString(now)));
-            } catch (Exception e) {
-                Log.warn("Could not send mapping-ping toward {}: {}", dest, e.getMessage());
-            }
-        }
-    }
-
-    /**
-     * A pong arrived from a mapped domain: the round trip works. Heals a broken-path state.
-     * {@code echoedTs} is our own ping timestamp echoed back by a ≥1.7.21 peer (null/empty from
-     * older peers — the newest ping's send time is used for the RTT instead).
-     */
-    public void onMappingPong(String remoteDomain, String echoedTs) {
-        // State exists only for domains we map to and probe; a pong for any other is unsolicited.
-        MappingPingState st = mappingPingStates.get(remoteDomain);
-        if (st == null) return;
-        boolean wasBroken = st.broken;
-        st.everPonged = true;
-        markProbeCapable(remoteDomain);
-        long now = System.currentTimeMillis();
-        long sentAt = st.lastPingAt;
-        if (echoedTs != null && !echoedTs.isEmpty()) {
-            try { sentAt = Long.parseLong(echoedTs); } catch (NumberFormatException ignored) { }
-        }
-        if (sentAt > 0 && sentAt <= now) st.lastRttMs = now - sentAt;
-        st.lastPongAt = now;
-        st.missed = 0;
-        st.broken = false;
-        if (wasBroken) {
-            Log.info("Federation mapping path to {} responds again — re-syncing occupants", remoteDomain);
-            resyncMappedDestinations(Set.of(remoteDomain));
-        }
-    }
-
-    /** The mapped domain stopped answering although a route exists: evict its ghosts. */
-    private void onMappingPathBroken(String remoteDomain) {
-        Log.warn("Federation mapping path to {} is broken end-to-end ({} pings unanswered while a route "
-               + "exists) — an intermediate server may be denying this traffic; evicting its occupants",
-                 remoteDomain, MAPPING_PING_MISS_LIMIT);
-        for (List<RoomMapping> mappings : roomManager.getLocalMappings().values()) {
-            for (RoomMapping m : mappings) {
-                if (m.isActive() && m.remoteDomain().equals(remoteDomain)) {
-                    evictForInactiveMapping(m.localRoomJid(), remoteDomain);
-                }
-            }
-        }
-    }
-
-    /**
-     * Re-pushes our local occupants toward each mapped remote that just became
-     * reachable, so occupant rosters self-heal after a link comes up or a route
-     * changes — without waiting for a user to leave and rejoin.  Sent WITHOUT
-     * fed-origin so the remote replies with its own occupants (bilateral sync).
-     */
-    public void resyncMappedDestinations(Collection<String> destinations) {
-        for (String dest : destinations) {
-            if (!routingTable.isReachable(dest)) continue;
-            for (List<RoomMapping> mappings : roomManager.getLocalMappings().values()) {
-                for (RoomMapping m : mappings) {
-                    if (m.remoteDomain().equals(dest)) {
-                        pushInitialSyncPresences(m.localRoomJid(), dest, m.remoteRoomJid());
-                    }
-                }
-            }
-        }
-    }
-
-    /** Sends our full room knowledge — own federated rooms + cached remote rooms — to one peer. */
+    /** Sends our own federated rooms and our cached remote rooms to one peer. */
     public void sendRoomState(String toDomain) {
         sendRoomAdvertisement(toDomain);
         sendCachedRemoteRoomAdvertisements(toDomain);
     }
 
-    /**
-     * Re-floods room knowledge to every reachable peer.  Called on routing changes so
-     * remote-room caches reconverge along new paths after a link is removed/disabled —
-     * e.g. a server that regains a destination via an alternate route gets its rooms back.
-     */
+    /** Sends our room state to every reachable peer, so room caches follow a routing change. */
     public void propagateRoomsToAll() {
         for (PeerServer peer : peerRegistry.getPeers()) {
             if (peer.getStatus() == PeerServer.Status.REACHABLE) {
@@ -1601,25 +540,11 @@ public class FederationManager {
     }
 
     /**
-     * Debounce window for routing-change-driven room re-floods.  A link flap delivers a burst
-     * of routing-updates (each peer's triggered update, then the solicit replies), and flooding
-     * full room state to every reachable peer for each one is O(N² · rooms) chatter across the
-     * mesh — every receiving hop relays the advertisements onward again.  Coalescing the burst
-     * into one flood is invisible to correctness: room gossip is eventually consistent, and
-     * solicits/keepalives cover any straggler.
-     */
-    private static final long ROOMS_FLOOD_DEBOUNCE_MS = 2000;
-    private final java.util.concurrent.atomic.AtomicBoolean roomsFloodPending =
-        new java.util.concurrent.atomic.AtomicBoolean(false);
-
-    /**
-     * As {@link #propagateRoomsToAll} but coalesced: bursts of calls within
-     * {@link #ROOMS_FLOOD_DEBOUNCE_MS} produce a single flood.  Used by the routing-update
-     * handler, where one topology change arrives as many gossip messages in quick succession.
-     * Falls back to an immediate flood when the monitor's scheduler is unavailable.
+     * {@link #propagateRoomsToAll}, coalesced: one topology change arrives as a burst of routing
+     * updates, and flooding for each would multiply traffic across the mesh.
      */
     public void propagateRoomsToAllDebounced() {
-        if (!roomsFloodPending.compareAndSet(false, true)) return;   // a flood is already queued
+        if (!roomsFloodPending.compareAndSet(false, true)) return;
         S2SMonitor monitor = s2sMonitor;
         boolean scheduled = monitor != null && monitor.schedule(() -> {
             roomsFloodPending.set(false);
@@ -1632,103 +557,60 @@ public class FederationManager {
     }
 
     /**
-     * Asks every reachable peer (except excludeDomain) to re-send its routing table and
-     * room cache.  Sent when we lose routes so alternate paths re-form: a peer that still
-     * reaches a now-lost destination advertises it (and its rooms) back to us.  Without
-     * this, triggered-only distance-vector never re-learns a route via an alternate path.
-     */
-    /**
-     * Asks a single peer to (re-)send its routing table and room cache.  Sent on
-     * peer-UP so we PULL the peer's state instead of only pushing ours: an S2S link
-     * is two independent one-way sockets, so a reap/flap is asymmetric — the far peer
-     * may never have seen us go down and so still considers us REACHABLE.  In that case
-     * its reply to our peer-announce is only a keepalive (no routing-update), and we would
-     * never re-learn the destinations reachable through it.  A solicit forces a full reply
-     * (sendRoutingUpdate + sendRoomState) regardless of the peer's view of the link.
+     * Asks one peer to re-send its routing table and room cache. Sent when a link comes up, because
+     * the far end may never have seen it go down and would otherwise send only a keepalive.
      */
     public void solicitRouting(String toDomain) {
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.routingSolicit(toDomain));
-        } catch (Exception e) {
-            Log.warn("Failed to send routing-solicit to {}: {}", toDomain, e.getMessage());
-        }
+        FederationSender.send("routing-solicit", toDomain, () -> FederationStanzaFactory.routingSolicit(toDomain));
     }
 
+    /** Asks every reachable peer but {@code excludeDomain} for its routes, so a lost destination is re-learned. */
     public void solicitRoutingFromAll(String excludeDomain) {
         for (PeerServer peer : peerRegistry.getPeers()) {
-            if (peer.getStatus() == PeerServer.Status.REACHABLE
-                    && !peer.getDomain().equals(excludeDomain)) {
-                try {
-                    XMPPServer.getInstance().getPacketRouter()
-                              .route(FederationStanzaFactory.routingSolicit(peer.getDomain()));
-                } catch (Exception e) {
-                    Log.warn("Failed to send routing-solicit to {}: {}", peer.getDomain(), e.getMessage());
-                }
+            if (peer.getStatus() == PeerServer.Status.REACHABLE && !peer.getDomain().equals(excludeDomain)) {
+                solicitRouting(peer.getDomain());
             }
         }
     }
 
-    /**
-     * A link was removed/disabled: gossip the routing change, re-flood room caches, and
-     * solicit alternate routes so reachability and room visibility reconverge across the
-     * whole network (not just on the directly-affected node).
-     */
+    /** After a link is removed or disabled: gossips routes and rooms and solicits alternate routes. */
     public void propagateTopologyChange(String excludeDomain) {
         propagateRoutingToAll(excludeDomain);
         propagateRoomsToAll();
         solicitRoutingFromAll(excludeDomain);
     }
 
+    /** Sends our routing table to every reachable peer but {@code excludeDomain}. */
     public void propagateRoutingToAll(String excludeDomain) {
         for (PeerServer peer : peerRegistry.getPeers()) {
-            if (!peer.getDomain().equals(excludeDomain)
-                    && peer.getStatus() == PeerServer.Status.REACHABLE) {
+            if (!peer.getDomain().equals(excludeDomain) && peer.getStatus() == PeerServer.Status.REACHABLE) {
                 sendRoutingUpdate(peer.getDomain());
             }
         }
     }
 
+    /**
+     * Relays a room advertisement to every other reachable peer, filtered for each. An empty list is
+     * still sent, because it is what tells a newly excluded peer to drop the origin's rooms.
+     */
     public void relayRoomAdvertisement(String excludeDomain, String originDomain,
                                        List<FederatedRoom> rooms, String via) {
         for (PeerServer peer : peerRegistry.getPeers()) {
-            if (peer.getDomain().equals(excludeDomain)) continue;
-            if (FederationStanzaFactory.viaContains(via, peer.getDomain())) continue;
-            // An untrusted peer hears nothing about an origin it was not exposed to — not even the
-            // empty list below, whose origin attribute alone names a server on our side of the edge.
-            if (isUntrusted(peer.getDomain())
-                    && !peerRegistry.getExposedServers(peer.getDomain()).contains(originDomain)) continue;
-            if (peer.getStatus() == PeerServer.Status.REACHABLE) {
-                // Untrusted-peer exposure + per-room visibility: relay only the allowed subset.
-                // Always send the filtered list, EVEN WHEN EMPTY: a peer that was previously on the
-                // path for this origin but is now excluded (e.g. dropped from a room's visibility
-                // ACL) must receive the empty list so it withdraws the origin's rooms. Safe because
-                // updateRemoteRooms REPLACES the origin's room set per receiver and an empty list
-                // clears only THIS origin's rooms, so an off-path peer drops exactly them and relays
-                // the withdrawal onward — to trusted peers and to untrusted peers exposed to this
-                // origin only (see above). (The old "skip empty unless the origin's list is empty"
-                // guard never delivered the withdrawal to multi-hop excluded peers — the ACL-removal
-                // bug where unchecking one server left it still seeing the room.)
-                List<FederatedRoom> toSend = filterRoomsForHop(peer.getDomain(), rooms);
-                try {
-                    XMPPServer.getInstance().getPacketRouter()
-                              .route(FederationStanzaFactory.roomAdvertisement(
-                                  peer.getDomain(), toSend, originDomain, via));
-                } catch (Exception e) {
-                    Log.warn("Failed to relay room-advertisement to {}: {}", peer.getDomain(), e.getMessage());
-                }
-            }
+            String peerDomain = peer.getDomain();
+            if (peerDomain.equals(excludeDomain)) continue;
+            if (FederationStanzaFactory.viaContains(via, peerDomain)) continue;
+            // Even an empty list names the origin, so an untrusted peer must be exposed to it.
+            if (isUntrusted(peerDomain) && !peerRegistry.getExposedServers(peerDomain).contains(originDomain)) continue;
+            if (peer.getStatus() != PeerServer.Status.REACHABLE) continue;
+            List<FederatedRoom> toSend = filterRoomsForHop(peerDomain, rooms);
+            FederationSender.send("room-advertisement", peerDomain, () -> FederationStanzaFactory.roomAdvertisement(
+                    peerDomain, toSend, originDomain, via));
         }
     }
 
-    // ── 1:1 message relay ──────────────────────────────────────────────────────
-
     /**
-     * Egress counterpart of the inbound untrusted-peer exposure gate, for the three 1:1 actions: a
-     * stanza may cross INTO an untrusted peer only when its sender is on a server exposed to that
-     * peer (or a subdomain of one, e.g. its MUC service). The inbound gate on the far side checks
-     * only the destination, so without this a user on any server behind us could reach the far side
-     * of the edge — revealing a server we never exposed, and to a party that cannot even reply.
+     * Egress gate for the 1:1 forwards: a stanza may go to an untrusted peer only when its sender is
+     * on a server exposed to that peer, or a subdomain of one.
      */
     public boolean egressExposureOk(String nextHop, JID from, String action) {
         if (!isUntrusted(nextHop)) return true;
@@ -1744,87 +626,57 @@ public class FederationManager {
     }
 
     /**
-     * Relays an outbound 1:1 message toward its destination domain over the overlay.  Called by the
-     * packet interceptor once it has decided the message targets an overlay-reachable peer user.
-     * Returns true if the message was handed to a next hop, or deliberately dropped by
-     * {@link #egressExposureOk} (the caller then suppresses native S2S either way), false if there is
-     * no route (the caller leaves Openfire to handle it normally).
+     * Relays an outbound 1:1 message over the overlay. True when it was sent or deliberately dropped,
+     * so the caller suppresses native S2S; false when there is no route or the send failed.
      */
     public boolean forwardDirectMessage(Message msg) {
         return forwardDirectMessage(msg, msg.getTo().getDomain());
     }
 
-    /**
-     * As {@link #forwardDirectMessage(Message)} but routes toward an explicit destination SERVER
-     * domain while the embedded payload keeps its real {@code to}.  Used to carry a MUC message
-     * (addressed to {@code room@conference.<server>}) over the overlay: the wrapper is routed on the
-     * host server domain ({@code <server>}), which the routing table knows, and the destination hands
-     * the unwrapped message to its local MUC.
-     */
+    /** As {@link #forwardDirectMessage(Message)}, but routed toward the server {@code destDomain}. */
     public boolean forwardDirectMessage(Message msg, String destDomain) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
-        if (nextHop == null) return false;
-        if (!egressExposureOk(nextHop, msg.getFrom(), "direct-forward")) return true;   // consumed: dropped, never native S2S
-        try {
-            Message copy = new Message(msg.getElement().createCopy());
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.directForward(nextHop, destDomain, localDomain, copy));
-            Log.debug("direct-forward: {} -> {} via {} (dest {})", msg.getFrom(), msg.getTo(), nextHop, destDomain);
-            return true;
-        } catch (Exception e) {
-            Log.warn("Failed to forward message to {}: {}", destDomain, e.getMessage());
-            return false;
-        }
+        return forwardDirect("direct-forward", msg, destDomain);
     }
 
-    /**
-     * Relays an outbound 1:1 presence stanza (subscribe/subscribed/probe/directed presence) toward
-     * its destination domain over the overlay.  Counterpart of {@link #forwardDirectMessage}; lets a
-     * remote contact's subscription handshake and presence cross the overlay (incl. untrusted edges).
-     * Returns true if handed to a next hop (caller suppresses native S2S), false if no route.
-     */
+    /** Relays an outbound 1:1 presence over the overlay; same contract as {@link #forwardDirectMessage(Message)}. */
     public boolean forwardDirectPresence(Presence pres) {
         return forwardDirectPresence(pres, pres.getTo().getDomain());
     }
 
-    /**
-     * As {@link #forwardDirectPresence(Presence)} but routes toward an explicit destination SERVER
-     * domain while the embedded payload keeps its real {@code to}.  Used to carry a MUC join/leave
-     * presence (addressed to {@code room@conference.<server>/nick}) over the overlay.
-     */
+    /** As {@link #forwardDirectPresence(Presence)}, but routed toward the server {@code destDomain}. */
     public boolean forwardDirectPresence(Presence pres, String destDomain) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
-        if (nextHop == null) return false;
-        if (!egressExposureOk(nextHop, pres.getFrom(), "presence-forward")) return true;   // consumed: dropped, never native S2S
-        try {
-            Presence copy = new Presence(pres.getElement().createCopy());
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.presenceForward(nextHop, destDomain, localDomain, copy));
-            // Guarded: avatarHashOf is a diagnostic that scans the stanza's child elements, and a log
-            // argument is evaluated whether or not the level is enabled. Presence relay is the hottest
-            // path here (every status change × every subscriber), so it must cost nothing at INFO.
-            if (Log.isDebugEnabled()) {
-                Log.debug("presence-forward: {} {} -> {} via {} (dest {}) avatarHash={}",
-                          pres.getType() == null ? "available" : pres.getType(), pres.getFrom(), pres.getTo(),
-                          nextHop, destDomain, avatarHashOf(pres));
-            }
-            return true;
-        } catch (Exception e) {
-            Log.warn("Failed to forward presence to {}: {}", destDomain, e.getMessage());
-            return false;
-        }
+        return forwardDirect("presence-forward", pres, destDomain);
     }
 
-    /**
-     * Diagnostic only (see [[architecture-protocol]] avatar-hash investigation): reports whether a
-     * presence being relayed actually carries XEP-0153's {@code vcard-temp:x:update} photo hash, and
-     * what it is. Distinguishes "no x:update element at all" (client didn't advertise one — e.g. a
-     * bare subscribe/subscribed presence, or one from a client that has nothing to advertise) from
-     * "x:update present but empty" (client is signaling no avatar) from an actual hash.
-     */
-    private String avatarHashOf(Presence pres) {
+    /** Relays a user-addressed IQ over the overlay; same contract as {@link #forwardDirectMessage(Message)}. */
+    public boolean forwardDirectIq(IQ iq) {
+        return forwardDirectIq(iq, iq.getTo().getDomain());
+    }
+
+    /** As {@link #forwardDirectIq(IQ)}, but routed toward the server {@code destDomain}. */
+    public boolean forwardDirectIq(IQ iq, String destDomain) {
+        return forwardDirect("iq-forward", iq, destDomain);
+    }
+
+    /** Relays a copy of a 1:1 stanza in the {@code action} envelope toward {@code destDomain}. */
+    private boolean forwardDirect(String action, Packet stanza, String destDomain) {
+        String nextHop = routingTable.findNextHop(destDomain).orElse(null);
+        if (nextHop == null) return false;
+        if (!egressExposureOk(nextHop, stanza.getFrom(), action)) return true;
+        boolean sent = FederationSender.send(action, destDomain, () -> FederationStanzaFactory.oneToOneForward(
+                action, nextHop, destDomain, localDomain(), stanza));
+        // Guarded: presence relay is the hottest path, and the avatar hash would be computed even at INFO.
+        if (sent && Log.isDebugEnabled()) {
+            String absentType = stanza instanceof Presence ? "available" : "normal";
+            String type = stanza.getElement().attributeValue("type", absentType);
+            Log.debug("{}: {} {} -> {} via {} (dest {}){}", action, type, stanza.getFrom(), stanza.getTo(), nextHop,
+                      destDomain, stanza instanceof Presence p ? " avatarHash=" + avatarHashOf(p) : "");
+        }
+        return sent;
+    }
+
+    /** For logging: the XEP-0153 photo hash a presence carries, or which part of it is missing. */
+    public static String avatarHashOf(Presence pres) {
         for (Element xEl : pres.getElement().elements("x")) {
             if (!"vcard-temp:x:update".equals(xEl.getNamespaceURI())) continue;
             Element photo = xEl.element("photo");
@@ -1835,147 +687,11 @@ public class FederationManager {
         return "no-x-update-element";
     }
 
-    /**
-     * Relays a user-addressed IQ (vCard/disco/caps/version/ping/PEP) toward its destination domain
-     * over the overlay.  Counterpart of {@link #forwardDirectMessage}; lets profile/avatar/discovery
-     * round-trips cross multi-hop links.  Returns true if handed to a next hop (caller suppresses
-     * native S2S), false if no route.
-     */
-    public boolean forwardDirectIq(IQ iq) {
-        return forwardDirectIq(iq, iq.getTo().getDomain());
-    }
-
-    /**
-     * As {@link #forwardDirectIq(IQ)} but routes toward an explicit destination SERVER domain while
-     * the embedded payload keeps its real {@code to}.  Used to carry a MUC IQ (disco/config addressed
-     * to {@code room@conference.<server>}) over the overlay; the result relays back the same way.
-     */
-    public boolean forwardDirectIq(IQ iq, String destDomain) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String nextHop     = routingTable.findNextHop(destDomain).orElse(null);
-        if (nextHop == null) return false;
-        if (!egressExposureOk(nextHop, iq.getFrom(), "iq-forward")) return true;   // consumed: dropped, never native S2S
-        try {
-            IQ copy = new IQ(iq.getElement().createCopy());
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.iqForward(nextHop, destDomain, localDomain, copy));
-            Log.debug("iq-forward: {} {} -> {} via {} (dest {})", iq.getType(), iq.getFrom(), iq.getTo(), nextHop, destDomain);
-            return true;
-        } catch (Exception e) {
-            Log.warn("Failed to forward IQ to {}: {}", destDomain, e.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Occupant roster of a local room for the admin "who's here" tracking view: real local occupants
-     * (live presence from {@link MUCOccupant#getPresence()}) plus remote virtual occupants (cached
-     * presence). Each entry: name, jid, kind (local|remote), show, status.
-     */
-    public List<Map<String, String>> getRoomOccupants(String localRoomJid) {
-        List<Map<String, String>> out = new ArrayList<>();
-        MUCRoom room = findLocalMucRoom(localRoomJid);
-        if (room != null) {
-            for (MUCOccupant occ : room.getOccupants()) {
-                String show = "", status = "";
-                Presence p = occ.getPresence();
-                if (p != null) {
-                    Element s  = p.getElement().element("show");
-                    Element st = p.getElement().element("status");
-                    if (s  != null) show   = s.getText();
-                    if (st != null) status = st.getText();
-                }
-                Map<String, String> m = new LinkedHashMap<>();
-                m.put("name", occ.getNickname());
-                m.put("jid", occ.getUserAddress() != null ? occ.getUserAddress().toBareJID() : "");
-                m.put("kind", "local");
-                m.put("show", show);
-                m.put("status", status);
-                out.add(m);
-            }
-        }
-        for (Map.Entry<String, String> e : roomManager.getVirtualOccupantPresence(localRoomJid).entrySet()) {
-            String[] ps = e.getValue().split("\\|", 2);
-            Map<String, String> m = new LinkedHashMap<>();
-            m.put("name", e.getKey());                 // MUC nick "user@home"
-            m.put("jid", e.getKey());
-            m.put("kind", "remote");
-            m.put("show",   ps.length > 0 ? ps[0] : "");
-            m.put("status", ps.length > 1 ? ps[1] : "");
-            out.add(m);
-        }
-        return out;
-    }
-
-    /**
-     * Forwards a local user's updated presence (availability/show/status change) to the peers mapped
-     * to each federated room the user occupies.  Needed because a client changes status by sending a
-     * BROADCAST presence (no {@code to}); Openfire updates MUC occupancy internally and never emits a
-     * directed room/nick stanza, so the packet interceptor (which only forwards directed join/leave
-     * presence) never sees the change.  Without this, an in-room status change only propagates on a
-     * full roster re-sync (mapping/peer disable-enable).  Driven by the {@link PresenceEventListener}.
-     */
-    public void forwardLocalOccupantPresence(JID user, Presence presence) {
-        if (user == null || user.getNode() == null) return;
-        JID bareUser = user.asBareJID();
-        for (String localRoomJid : roomManager.getLocalMappings().keySet()) {
-            List<RoomMapping> mappings = roomManager.getMappingsForLocal(localRoomJid);   // ACTIVE only
-            if (mappings.isEmpty()) continue;
-            MUCRoom room = findLocalMucRoom(localRoomJid);
-            if (room == null) continue;
-            boolean present = room.getOccupants().stream().anyMatch(o ->
-                    o.getUserAddress() != null && bareUser.equals(o.getUserAddress().asBareJID()));
-            if (!present) continue;
-
-            // Build the room presence the interceptor would have forwarded for a directed change.
-            // injectPresence derives the remote nick from this 'from' (user@home), so a bare JID
-            // updates the same virtual occupant created at join time.
-            JID roomJid = new JID(localRoomJid);
-            Presence fwd = new Presence();
-            fwd.setFrom(bareUser);
-            fwd.setTo(new JID(roomJid.getNode(), roomJid.getDomain(), bareUser.toString()));
-            if (presence != null && presence.getType() == Presence.Type.unavailable) {
-                fwd.setType(Presence.Type.unavailable);
-            } else if (presence != null) {
-                if (presence.getShow()   != null) fwd.setShow(presence.getShow());
-                if (presence.getStatus() != null) fwd.setStatus(presence.getStatus());
-            }
-            for (RoomMapping m : mappings) {
-                forwardMucPresence(fwd, m);
-            }
-        }
-    }
-
-    /** Wraps a room presence in a muc-forward toward a mapped peer (same path as the interceptor). */
-    private void forwardMucPresence(Presence pres, RoomMapping mapping) {
-        String localDomain  = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        String remoteDomain = mapping.remoteDomain();
-        String nextHop = routingTable.findNextHop(remoteDomain).orElse(remoteDomain);
-        try {
-            Presence copy = new Presence(pres.getElement().createCopy());
-            XMPPServer.getInstance().getPacketRouter().route(
-                FederationStanzaFactory.mucForward(
-                    nextHop, remoteDomain, mapping.remoteRoomJid(), localDomain, localDomain, copy));
-        } catch (Exception e) {
-            Log.warn("Failed to forward occupant presence to {}: {}", remoteDomain, e.getMessage());
-        }
-    }
-
-    // ── Untrusted-peer exposure filtering ──────────────────────────────────────
-    //
-    // An untrusted peer (e.g. a foreign org reached only through this edge server) gets
-    // NO routes and NO room advertisements except for the SERVERS the admin has explicitly
-    // exposed to it: it sees each exposed server's federated rooms and a route to reach it.
-    // A room is exposed to the peer iff its originServer is in the exposed set (local rooms
-    // carry originServer == our domain, so the admin exposes them by listing our own domain).
-    // All per-peer senders funnel through the methods below, so filtering here covers
-    // gossip/propagate/solicit.
-
     private boolean isUntrusted(String domain) {
         return peerRegistry.isUntrusted(domain);
     }
 
-    /** Restricts a room list to rooms homed on a peer's exposed servers; unchanged for trusted peers. */
+    /** Keeps only rooms homed on a server exposed to an untrusted peer; trusted peers get the list unchanged. */
     private List<FederatedRoom> filterRoomsForPeer(String domain, List<FederatedRoom> rooms) {
         if (!isUntrusted(domain)) return rooms;
         Set<String> exposed = peerRegistry.getExposedServers(domain);
@@ -1984,20 +700,12 @@ public class FederationManager {
     }
 
     /**
-     * Per-room visibility ACL check for one outbound hop. The ACL semantics are:
-     * <ul>
-     *   <li>empty → visible to <b>nobody</b> (the default for a newly-federated room);</li>
-     *   <li>contains the {@code "*"} sentinel → visible to <b>all</b> peers;</li>
-     *   <li>otherwise → visible to the named servers and the path toward them.</li>
-     * </ul>
-     * For the named-servers case a room is sent/relayed to {@code peerDomain} when the ACL names the
-     * peer directly, or the peer is the next hop toward some allowed destination — so the ad both
-     * reaches multi-hop destinations and stays on the route toward them. An allowed destination with
-     * no current route is simply pending until one appears.
+     * Whether a room with this visibility list may go to {@code peerDomain}: never when empty, always
+     * with {@code "*"}, else when the list names the peer or a server reached through it.
      */
     private boolean roomVisibleAtHop(Set<String> visibleTo, String peerDomain) {
-        if (visibleTo == null || visibleTo.isEmpty()) return false;                 // none
-        if (visibleTo.contains(FederatedRoomManager.VISIBLE_ALL)) return true;      // all
+        if (visibleTo == null || visibleTo.isEmpty()) return false;
+        if (visibleTo.contains(FederatedRoomManager.VISIBLE_ALL)) return true;
         if (visibleTo.contains(peerDomain)) return true;
         for (String member : visibleTo) {
             if (routingTable.findNextHop(member).map(h -> h.equals(peerDomain)).orElse(false)) return true;
@@ -2005,7 +713,7 @@ public class FederationManager {
         return false;
     }
 
-    /** Untrusted-peer server filter AND per-room visibility ACL, for one destination peer. */
+    /** The rooms that may be sent to one peer: the untrusted-peer filter plus each room's visibility list. */
     private List<FederatedRoom> filterRoomsForHop(String toDomain, List<FederatedRoom> rooms) {
         return filterRoomsForPeer(toDomain, rooms).stream()
                 .filter(r -> roomVisibleAtHop(r.visibleTo(), toDomain))
@@ -2013,10 +721,8 @@ public class FederationManager {
     }
 
     /**
-     * Reciprocity gate for mapping: true iff our local room {@code localJid} is federation-enabled
-     * AND its visibility ACL shares it with {@code destDomain}. A server may map one of its rooms to
-     * a peer's room only when it has first exposed THAT room to the peer — you cannot consume a
-     * peer's room without offering your own room to it in return.
+     * Whether our room is federated and shared with {@code destDomain}. A server may map a peer's
+     * room only after exposing its own room to that peer.
      */
     public boolean roomSharedWith(String localJid, String destDomain) {
         if (destDomain == null || !roomManager.isFederated(localJid)) return false;
@@ -2027,9 +733,8 @@ public class FederationManager {
     }
 
     /**
-     * Applies the most-specific matching default-settings rule to a (typically just-created) room.
-     * No-op when no rule matches the room name, or the matching rule is non-federated (rules with
-     * {@code federated=false} are used to <em>exclude</em> a name pattern from a broader rule).
+     * Applies the most specific matching room-default rule to a room, typically one just created. A
+     * rule with {@code federated=false} only excludes names from a broader rule, so it does nothing here.
      */
     public void applyDefaultsTo(String roomJid) {
         if (roomJid == null) return;
@@ -2042,27 +747,20 @@ public class FederationManager {
         if (rule == null || !rule.federated()) return;
 
         roomManager.setFederated(roomJid, true);
-
-        // Visibility ACL: "*" → visible to all peers, else the explicit domain list.
         List<String> vis = rule.visible();
-        if (vis.contains(RoomDefaultsManager.VISIBLE_ALL)) {
-            roomManager.setRoomVisibility(roomJid, List.of(FederatedRoomManager.VISIBLE_ALL));
-        } else {
-            roomManager.setRoomVisibility(roomJid, vis);
-        }
-
+        boolean visibleToAll = vis.contains(RoomDefaultsManager.VISIBLE_ALL);
+        roomManager.setRoomVisibility(roomJid, visibleToAll ? List.of(FederatedRoomManager.VISIBLE_ALL) : vis);
         roomManager.setAutoAccept(roomJid, rule.autoAccept());
         roomManager.setFilesEnabled(roomJid, rule.filesEnabled());
 
         Log.info("Applied room-default rule '{}' to {} (federated, visible={}, autoAccept={}, autoMap={}, files={})",
-                 rule.pattern(), roomJid,
-                 vis.contains(RoomDefaultsManager.VISIBLE_ALL) ? "all peers" : vis,
+                 rule.pattern(), roomJid, visibleToAll ? "all peers" : vis,
                  rule.autoAccept(), rule.autoMap(), rule.filesEnabled());
 
         if (rule.autoMap()) autoMapRoom(roomJid, node, service, vis);
     }
 
-    /** Re-applies the default-settings rules to every existing local room. Returns how many matched. */
+    /** Re-applies the room-default rules to every existing local room; returns how many matched. */
     public int applyDefaultsToAllRooms() {
         int applied = 0;
         for (Map<String, Object> room : roomManager.getAllLocalRoomsWithTag()) {
@@ -2080,20 +778,13 @@ public class FederationManager {
     }
 
     /**
-     * Auto-requests a same-named mapping ({@code node@<mucService>.<peer>}) toward each target peer.
-     * Targets are the room's visibility list, or every routing destination when visibility is "*".
-     * Skips peers the room isn't actually shared with, or where a mapping already exists.
+     * Requests a same-named mapping on each target peer: the room's visibility list, or every routable
+     * server for {@code "*"}. Peers the room is not shared with, or already mapped to, are skipped.
      */
     private void autoMapRoom(String localJid, String node, String localService, List<String> visible) {
-        Set<String> targets = new LinkedHashSet<>();
-        if (visible.contains(RoomDefaultsManager.VISIBLE_ALL)) {
-            targets.addAll(routableServers());
-        } else {
-            targets.addAll(visible);
-        }
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        // Derive the MUC subdomain (e.g. "conference") from the local service domain so the
-        // remote room JID is node@<sameSubdomain>.<peerDomain>.
+        Set<String> targets = new LinkedHashSet<>(
+                visible.contains(RoomDefaultsManager.VISIBLE_ALL) ? routableServers() : visible);
+        String localDomain = localDomain();
         String mucSub = localService.endsWith("." + localDomain)
                 ? localService.substring(0, localService.length() - localDomain.length() - 1)
                 : "conference";
@@ -2101,13 +792,12 @@ public class FederationManager {
         for (String dest : targets) {
             if (dest == null || dest.isBlank() || dest.equalsIgnoreCase(localDomain)) continue;
             if (!roomSharedWith(localJid, dest)) continue;
-            if (roomManager.getMappingForLocal(localJid, dest) != null) continue;   // already mapped
-            String remoteJid = node + "@" + mucSub + "." + dest;
-            requestMapping(localJid, remoteJid, dest);
+            if (roomManager.getMappingForLocal(localJid, dest) != null) continue;
+            requestMapping(localJid, node + "@" + mucSub + "." + dest, dest);
         }
     }
 
-    /** Distinct routing-table destinations — the candidate servers for a room's visibility ACL. */
+    /** Every routing-table destination; the candidate servers for a room's visibility list. */
     public Set<String> routableServers() {
         Set<String> out = new LinkedHashSet<>();
         for (RouteEntry e : routingTable.getAll()) out.add(e.destination());
@@ -2115,15 +805,12 @@ public class FederationManager {
     }
 
     /**
-     * The servers the admin may expose to an untrusted peer: this server (its local rooms) plus
-     * every routing destination reachable WITHOUT going through that peer. Destinations whose next
-     * hop is the peer itself — or the peer's own domain — are excluded, so we never offer to
-     * re-expose to a peer the servers it is advertising to us (a meaningless echo). Used by the
-     * admin UI to build the per-peer exposed-server checklist.
+     * The servers the admin may expose to an untrusted peer: this server plus every destination
+     * reached without going through that peer.
      */
     public Set<String> exposableServers(String peerDomain) {
         Set<String> out = new LinkedHashSet<>();
-        out.add(XMPPServer.getInstance().getServerInfo().getXMPPDomain());
+        out.add(localDomain());
         for (RouteEntry e : routingTable.getAll()) {
             String dest = e.destination();
             if (dest.equals(peerDomain) || peerDomain.equals(e.nextHop())) continue;
@@ -2132,13 +819,9 @@ public class FederationManager {
         return out;
     }
 
-    // ── Per-peer route advertisement deny ───────────────────────────────────────
-
     /**
-     * Denies {@code destination}'s route/room advertisements arriving from {@code peerDomain}.
-     * Future advertisements are filtered on receive; any route currently installed via that
-     * peer is torn down immediately (with ghost/room clean-up and topology re-propagation),
-     * while a route to the same destination via a DIFFERENT peer is left intact.
+     * Refuses {@code destination}'s advertisements from {@code peerDomain} and tears down any route to
+     * it through that peer; a route through another peer stays.
      */
     public void denyRouteFromPeer(String peerDomain, String destination) {
         peerRegistry.setRouteDenied(peerDomain, destination, true);
@@ -2147,17 +830,13 @@ public class FederationManager {
             handleUnreachableDestinations(Set.of(destination));
             propagateTopologyChange(peerDomain);
         } else if (!routingTable.isReachable(destination)) {
-            // No live route, but cached rooms/directory entries may have arrived via this peer.
             handleUnreachableDestinations(Set.of(destination));
         }
         Log.info("Denied route advertisements for {} from peer {}{}", destination, peerDomain,
                  removed ? " (installed route removed)" : "");
     }
 
-    /**
-     * Lifts a route-advertisement deny and asks the peer to re-send its routing table and
-     * room cache so the destination is re-learned without waiting for the next gossip.
-     */
+    /** Lifts a route deny and asks the peer to re-send its routes, so the destination is re-learned at once. */
     public void allowRouteFromPeer(String peerDomain, String destination) {
         peerRegistry.setRouteDenied(peerDomain, destination, false);
         PeerServer.Status st = peerRegistry.getPeer(peerDomain).map(PeerServer::getStatus).orElse(null);
@@ -2167,29 +846,12 @@ public class FederationManager {
         Log.info("Allowed route advertisements for {} from peer {}", destination, peerDomain);
     }
 
-    // ── Trust-on-first-use: foreign-domain default + S2S key pinning ────────────
-    //
-    // A peer whose PARENT domain differs from ours is treated as a stranger and defaults to
-    // untrusted on add. Separately, the PUBLIC KEY of the leaf cert each peer presents on the
-    // S2S link (its SPKI, stored as "spki:<sha256>") is pinned on first sighting; if it later
-    // changes (a server re-created under the same domain name presents a different key) the
-    // peer is auto-untrusted and the admin is alerted.
-    //
-    // Why the leaf SPKI and not the top-of-chain cert (the pre-1.7.13 scheme): pinning the
-    // chain top pins the CA — any impersonator with a cert from the SAME public CA (e.g.
-    // Let's Encrypt) passes unnoticed, which defeats the check's purpose. The leaf's public
-    // key identifies the actual server: it survives renewals that reuse the key, and a
-    // re-created server (new key) trips the alarm even under the same CA. Trade-off: a
-    // renewal that ROTATES the key (certbot's default) also trips it — the admin clears it
-    // with the existing "Trust new cert" button. Legacy cert-hash pins are upgraded in place
-    // on the next sighting when the old hash still matches.
-
-    /** Number of trailing DNS labels that define the "parent" (registrable) domain. */
+    /** How many trailing DNS labels make up the parent domain used to spot foreign peers. */
     private int trustDomainLabels() {
         return Math.max(1, JiveGlobals.getIntProperty("plugin.federation.trustDomainLabels", 2));
     }
 
-    /** The last {@link #trustDomainLabels()} dot-separated labels of {@code domain}, lowercased. */
+    /** The last {@link #trustDomainLabels()} labels of {@code domain}, lowercased. */
     private String parentDomain(String domain) {
         if (domain == null) return "";
         String[] labels = domain.strip().toLowerCase().split("\\.");
@@ -2197,148 +859,14 @@ public class FederationManager {
         return String.join(".", Arrays.copyOfRange(labels, labels.length - n, labels.length));
     }
 
-    /** True if {@code peerDomain} is under a different parent domain than this server. */
+    /** Whether {@code peerDomain} sits under a different parent domain than this server. */
     public boolean isForeignDomain(String peerDomain) {
-        String local = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        return !parentDomain(peerDomain).equals(parentDomain(local));
-    }
-
-    /** SHA-256 (lowercase hex) of arbitrary bytes, or null on failure. */
-    private static String sha256Hex(byte[] data) {
-        try {
-            byte[] d = MessageDigest.getInstance("SHA-256").digest(data);
-            StringBuilder sb = new StringBuilder(d.length * 2);
-            for (byte b : d) sb.append(Character.forDigit((b >> 4) & 0xF, 16))
-                               .append(Character.forDigit(b & 0xF, 16));
-            return sb.toString();
-        } catch (NoSuchAlgorithmException e) {
-            // Every JVM is required to ship SHA-256, so reaching this means the platform is broken
-            // — and certificate pinning silently stops working. It must not pass unremarked.
-            Log.error("SHA-256 unavailable — certificate pinning is disabled", e);
-            return null;
-        }
-    }
-
-    /** SHA-256 (lowercase hex) of a certificate's encoded form (legacy pin format), or null. */
-    private static String sha256Hex(Certificate cert) {
-        try {
-            return sha256Hex(cert.getEncoded());
-        } catch (CertificateEncodingException e) {
-            Log.warn("Peer certificate could not be encoded for pinning: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    /** Prefix marking a pin in the leaf-SPKI format (vs a legacy bare top-of-chain cert hash). */
-    private static final String SPKI_PREFIX = "spki:";
-
-    /** {@code "spki:<sha256>"} of the LEAF certificate's SubjectPublicKeyInfo, or null on failure. */
-    private static String leafSpkiFp(Certificate[] chain) {
-        if (chain == null || chain.length == 0 || chain[0].getPublicKey() == null) return null;
-        String hex = sha256Hex(chain[0].getPublicKey().getEncoded());
-        return hex == null ? null : SPKI_PREFIX + hex;
-    }
-
-    /** The top-of-chain cert the peer presents on the S2S link (outgoing session preferred). */
-    private Certificate[] peerCertChain(String domain) {
-        String local = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
-        SessionManager sm = XMPPServer.getInstance().getSessionManager();
-        try {
-            OutgoingServerSession out = sm.getOutgoingServerSession(new DomainPair(local, domain));
-            if (out != null) {
-                Certificate[] c = out.getPeerCertificates();
-                if (c != null && c.length > 0) return c;
-            }
-            for (IncomingServerSession in : sm.getIncomingServerSessions(domain)) {
-                Certificate[] c = in.getPeerCertificates();
-                if (c != null && c.length > 0) return c;
-            }
-        } catch (Exception e) {
-            Log.debug("Could not read S2S certificates for {}: {}", domain, e.getMessage());
-        }
-        return null;
+        return !parentDomain(peerDomain).equals(parentDomain(localDomain()));
     }
 
     /**
-     * Observes the peer's current S2S identity and applies TOFU pinning on the LEAF cert's
-     * public key (SPKI): pins on first sighting, accepts a matching key, and on a CHANGED key
-     * auto-untrusts the peer and raises an alert. A legacy (pre-1.7.13) top-of-chain cert-hash
-     * pin that still matches is upgraded to the SPKI format in place — same server, new scheme,
-     * no alarm. Called from the poll loop for each REACHABLE peer. No-op when no certificate is
-     * available (e.g. a plain server-dialback link with no TLS).
-     */
-    public void observePeerCertificate(String domain) {
-        Certificate[] chain = peerCertChain(domain);
-        if (chain == null || chain.length == 0) return;   // no TLS cert visible — nothing to pin
-        String fp = leafSpkiFp(chain);
-        if (fp == null) return;
-        peerRegistry.setLastSeenCertFp(domain, fp);
-
-        String pinned = peerRegistry.getPinnedCertFp(domain);
-        if (pinned == null || pinned.isBlank()) {
-            peerRegistry.setPinnedCertFp(domain, fp);
-            peerRegistry.setCertMismatch(domain, false);
-            Log.info("Pinned S2S leaf key for {} ({}…)", domain, abbrevFp(fp));
-            return;
-        }
-        if (pinned.equals(fp)) {
-            peerRegistry.setCertMismatch(domain, false);
-            return;
-        }
-        // Legacy pin (bare SHA-256 of the top-of-chain CERT): if it still matches what the peer
-        // presents, this is the same server observed under the new scheme — upgrade the pin.
-        if (!pinned.startsWith(SPKI_PREFIX)) {
-            String legacy = sha256Hex(chain[chain.length - 1]);
-            if (pinned.equals(legacy)) {
-                peerRegistry.setPinnedCertFp(domain, fp);
-                peerRegistry.setCertMismatch(domain, false);
-                Log.info("Upgraded S2S pin for {} from legacy cert-hash to leaf-SPKI ({}…)",
-                         domain, abbrevFp(fp));
-                return;
-            }
-        }
-        // Key changed under the same domain name — possible impersonation. Act once on transition.
-        if (!peerRegistry.isCertMismatch(domain)) {
-            peerRegistry.setCertMismatch(domain, true);
-            Log.warn("SECURITY: S2S identity key for {} changed (pinned={}…, seen={}…) — auto-untrusting; "
-                   + "admin must accept the new key to restore", domain, abbrevFp(pinned), abbrevFp(fp));
-            if (!peerRegistry.isUntrusted(domain)) {
-                peerRegistry.setUntrusted(domain, true);
-                applyLocalTrustChange(domain);
-            }
-        }
-    }
-
-    /** First 12 hex chars of a fingerprint for logging, with the format prefix stripped. */
-    private static String abbrevFp(String fp) {
-        String hex = fp.startsWith(SPKI_PREFIX) ? fp.substring(SPKI_PREFIX.length()) : fp;
-        return hex.substring(0, Math.min(12, hex.length()));
-    }
-
-    /** Admin accepted a changed key: re-pin the last observed fingerprint and clear the alert. */
-    public void acceptNewCertificate(String domain) {
-        String fp = peerRegistry.getPeer(domain).map(PeerServer::getLastSeenCertFp).orElse(null);
-        if (fp == null || fp.isBlank()) {
-            Log.warn("accept-cert for {} ignored — no observed certificate to pin", domain);
-            return;
-        }
-        peerRegistry.setPinnedCertFp(domain, fp);
-        peerRegistry.setCertMismatch(domain, false);
-        Log.info("Admin accepted new S2S identity key for {} ({}…)", domain, abbrevFp(fp));
-    }
-
-    // ── Link-level trust negotiation ────────────────────────────────────────────
-    //
-    // Trust is a property of the LINK, not one local flag. Each side announces its stance
-    // (untrusted true/false) in peer-announce; if the two ends disagree the link is blocked
-    // (TRUST_MISMATCH) until both match. Most-restrictive does NOT silently win — the admins
-    // must agree — so an accidental one-sided change is visible rather than quietly downgrading.
-
-    /**
-     * Blocks federation with a peer because the two ends disagree on trust. Tears down routes
-     * and mappings toward it and marks TRUST_MISMATCH. Idempotent; only re-announces our stance
-     * on the transition INTO mismatch so the two sides don't ping-pong announces. The link
-     * auto-recovers once both ends declare the same stance.
+     * Blocks a peer whose trust stance differs from ours: drops its mappings and routes and marks
+     * TRUST_MISMATCH. Announces our stance only on the way into the mismatch, so the two ends do not ping-pong.
      */
     public void blockForTrustMismatch(String domain) {
         boolean wasMismatch = peerRegistry.getPeer(domain)
@@ -2354,38 +882,31 @@ public class FederationManager {
         if (!removed.isEmpty()) propagateTopologyChange(domain);
         if (!wasMismatch) {
             Log.warn("SECURITY: trust mismatch with {} — link blocked until both ends agree", domain);
-            sendPeerAnnounce(domain);   // notify the peer once so it blocks too
+            sendPeerAnnounce(domain);
         }
     }
 
     /**
-     * Re-evaluates a link after the LOCAL admin changed our trust stance: announces the new
-     * stance, then blocks or clears the block immediately based on the remote's last-known
-     * stance, so the UI reflects the change without waiting for the next keepalive cycle.
+     * Announces a trust change made by our admin, then blocks or unblocks the link at once by
+     * comparing it with the remote's last known stance.
      */
     public void applyLocalTrustChange(String domain) {
-        sendPeerAnnounce(domain);   // tell the peer our new stance
+        sendPeerAnnounce(domain);
         peerRegistry.getPeer(domain).ifPresent(p -> {
             Boolean remote = p.getRemoteUntrusted();
-            if (remote == null) return;                     // not heard from them yet; defer to announce
-            boolean local = p.isUntrusted();
-            if (local != remote) {
+            if (remote == null) return;
+            if (p.isUntrusted() != remote) {
                 blockForTrustMismatch(domain);
-            } else {
-                // Stances agree. Clear any prior block (the announce round-trip re-gossips), and
-                // if the link is live re-push filtered routing + rooms so the new stance applies.
-                if (p.getStatus() == PeerServer.Status.TRUST_MISMATCH) {
-                    peerRegistry.clearTrustMismatch(domain);
-                } else if (p.getStatus() == PeerServer.Status.REACHABLE) {
-                    sendRoutingUpdate(domain);
-                    sendRoomState(domain);
-                }
+            } else if (p.getStatus() == PeerServer.Status.TRUST_MISMATCH) {
+                peerRegistry.clearTrustMismatch(domain);
+            } else if (p.getStatus() == PeerServer.Status.REACHABLE) {
+                sendRoutingUpdate(domain);
+                sendRoomState(domain);
             }
         });
     }
 
-    // ── Gossip sending ─────────────────────────────────────────────────────────
-
+    /** Sends a peer everything it needs on link-up: announce, routes, our rooms and cached rooms. */
     public void sendFullGossip(String toDomain) {
         Log.debug("Sending full gossip to {}", toDomain);
         sendPeerAnnounce(toDomain);
@@ -2394,97 +915,58 @@ public class FederationManager {
         sendCachedRemoteRoomAdvertisements(toDomain);
     }
 
-    /**
-     * Replays every remote room advertisement this server has cached to a
-     * newly-connected peer.  Without this, a server that joins mid-session
-     * would never see rooms that were advertised before it connected.
-     * The local domain is set as the via trail so the recipient can relay
-     * further without bouncing back to us.
-     */
+    /** Replays every cached remote room advertisement to a peer, so a late joiner learns earlier rooms. */
     public void sendCachedRemoteRoomAdvertisements(String toDomain) {
-        String localDomain = XMPPServer.getInstance().getServerInfo().getXMPPDomain();
+        String localDomain = localDomain();
         for (Map.Entry<String, List<FederatedRoom>> entry : roomManager.getRemoteRooms().entrySet()) {
             String originDomain = entry.getKey();
-            if (originDomain.equals(toDomain)) continue;  // don't send a server its own rooms
+            if (originDomain.equals(toDomain)) continue;
             List<FederatedRoom> rooms = filterRoomsForHop(toDomain, entry.getValue());
-            if (rooms.isEmpty()) continue;                // untrusted/not-visible: nothing for this peer
-            try {
-                XMPPServer.getInstance().getPacketRouter()
-                          .route(FederationStanzaFactory.roomAdvertisement(
-                              toDomain, rooms, originDomain, localDomain));
-            } catch (Exception e) {
-                Log.warn("Failed to send cached room-advertisement for {} to {}: {}",
-                         originDomain, toDomain, e.getMessage());
-            }
+            if (rooms.isEmpty()) continue;
+            FederationSender.send("cached room-advertisement of " + originDomain, toDomain,
+                    () -> FederationStanzaFactory.roomAdvertisement(toDomain, rooms, originDomain, localDomain));
         }
     }
 
     public void sendPeerAnnounce(String toDomain) {
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.peerAnnounce(toDomain, false, isUntrusted(toDomain)));
-        } catch (Exception e) {
-            Log.warn("Failed to send peer-announce to {}: {}", toDomain, e.getMessage());
-        }
+        FederationSender.send("peer-announce", toDomain,
+                () -> FederationStanzaFactory.peerAnnounce(toDomain, false, isUntrusted(toDomain)));
     }
 
     public void sendPeerDisable(String toDomain) {
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.peerDisable(toDomain));
-        } catch (Exception e) {
-            Log.warn("Failed to send peer-disable to {}: {}", toDomain, e.getMessage());
-        }
+        FederationSender.send("peer-disable", toDomain, () -> FederationStanzaFactory.peerDisable(toDomain));
+    }
+
+    /** Sends a keepalive reply, which warms the reverse S2S socket and is never answered. */
+    public void sendPeerAnnounceReply(String toDomain) {
+        FederationSender.send("peer-announce reply", toDomain,
+                () -> FederationStanzaFactory.peerAnnounce(toDomain, true, isUntrusted(toDomain)));
     }
 
     /**
-     * Sends a one-shot keepalive reply that warms the reverse S2S socket without
-     * eliciting another reply.  Sent when a steady-state peer-announce arrives so a
-     * single peer's keepalive timer keeps both directions of the link alive.
+     * Sends our routing table to a peer with split horizon, flagging routes that cross an untrusted
+     * peer. An untrusted peer only learns routes to the servers exposed to it.
      */
-    public void sendPeerAnnounceReply(String toDomain) {
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.peerAnnounce(toDomain, true, isUntrusted(toDomain)));
-        } catch (Exception e) {
-            Log.warn("Failed to send peer-announce reply to {}: {}", toDomain, e.getMessage());
-        }
-    }
-
     public void sendRoutingUpdate(String toDomain) {
-        try {
-            // Advertise each route's trust class (see FederationRoutingTable.updateFromPeer): a path
-            // that crosses an untrusted edge is flagged, so no downstream hop can mistake it — or a
-            // route derived from it through us — for a clean route through the trusted mesh.
+        FederationSender.send("routing-update", toDomain, () -> {
             Collection<RouteEntry> table = routingTable.getRoutesExcludingNextHop(toDomain).stream()
                     .map(e -> new RouteEntry(e.destination(), e.nextHop(), e.hops(), e.updatedAt(),
                                              FederationRoutingTable.isEdge(e, this::isUntrusted)))
                     .collect(Collectors.toList());
             if (isUntrusted(toDomain)) {
-                // Untrusted peer: reveal only routes to the servers the admin has exposed to it.
                 Set<String> allowed = peerRegistry.getExposedServers(toDomain);
-                table = table.stream()
-                             .filter(e -> allowed.contains(e.destination()))
-                             .collect(Collectors.toList());
+                table = table.stream().filter(e -> allowed.contains(e.destination())).collect(Collectors.toList());
             }
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.routingUpdate(toDomain, table));
-        } catch (Exception e) {
-            Log.warn("Failed to send routing-update to {}: {}", toDomain, e.getMessage());
-        }
+            return FederationStanzaFactory.routingUpdate(toDomain, table);
+        });
     }
 
+    /** Advertises our federated rooms to a peer, filtered by exposure and visibility. */
     public void sendRoomAdvertisement(String toDomain) {
         List<FederatedRoom> rooms = filterRoomsForHop(toDomain, roomManager.getLocalFederatedRoomsWithDetails());
-        try {
-            XMPPServer.getInstance().getPacketRouter()
-                      .route(FederationStanzaFactory.roomAdvertisement(toDomain, rooms));
-        } catch (Exception e) {
-            Log.warn("Failed to send room-advertisement to {}: {}", toDomain, e.getMessage());
-        }
+        FederationSender.send("room-advertisement", toDomain,
+                () -> FederationStanzaFactory.roomAdvertisement(toDomain, rooms));
     }
-
-    // ── Accessors for subsystems ───────────────────────────────────────────────
 
     public int  getKeepaliveSeconds()            { return s2sMonitor.getKeepaliveSeconds(); }
     public int  getEffectiveKeepaliveSeconds()   { return s2sMonitor.getEffectiveKeepaliveSeconds(); }
@@ -2495,13 +977,27 @@ public class FederationManager {
     public void setMappingPingSeconds(int sec)   { s2sMonitor.setMappingPingSeconds(sec); }
     public long getNextRetryAt(String domain)    { return s2sMonitor.getNextRetryAt(domain); }
 
-    public PeerRegistry           getPeerRegistry()  { return peerRegistry;  }
-    public FederationRoutingTable getRoutingTable()  { return routingTable;  }
-    public FederatedRoomManager   getRoomManager()   { return roomManager;   }
-    public RoomDefaultsManager    getRoomDefaults()  { return roomDefaults;  }
-    public ContactListManager     getContactLists()  { return contactLists;  }
-    public com.igniterealtime.openfire.plugin.federation.files.FileRelayManager getFileRelay() { return fileRelay; }
-    public FederationIQHandler    getIQHandler()     { return iqHandler;      }
-    public RoomMessageIds         getRoomMessageIds() { return roomMessageIds; }
-    public RedundantArrivals      getRedundantArrivals() { return redundantArrivals; }
+    public PeerRegistry           getPeerRegistry()       { return peerRegistry; }
+    public FederationRoutingTable getRoutingTable()       { return routingTable; }
+    public FederatedRoomManager   getRoomManager()        { return roomManager; }
+    public RoomDefaultsManager    getRoomDefaults()       { return roomDefaults; }
+    public ContactListManager     getContactLists()       { return contactLists; }
+    public FederationFileConfig   getFileConfig()         { return fileConfig; }
+    public FileRelayManager       getFileRelay()          { return fileRelay; }
+    public RoomMessageIds         getRoomMessageIds()     { return roomMessageIds; }
+    public RedundantArrivals      getRedundantArrivals()  { return redundantArrivals; }
+    public PresenceRelay          getPresenceRelay()      { return presenceRelay; }
+    public OccupantSync           getOccupantSync()       { return occupantSync; }
+    public MappingProbe           getMappingProbe()       { return mappingProbe; }
+    public CertificatePinning     getCertificatePinning() { return certificatePinning; }
+
+    /** The room traffic handler, or null before the plugin has started. */
+    public MucTrafficHandler getMucTraffic() {
+        return iqHandler == null ? null : iqHandler.getMucTraffic();
+    }
+
+    /** The 1:1 traffic handler, or null before the plugin has started. */
+    public DirectTrafficHandler getDirectTraffic() {
+        return iqHandler == null ? null : iqHandler.getDirectTraffic();
+    }
 }

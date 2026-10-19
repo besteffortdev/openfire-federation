@@ -151,10 +151,12 @@ The **Federation** tab has three sub‑views:
 |-----|----------------|
 | **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
 | **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
-| **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers. |
+| **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers, one collapsed card per server showing how many federated rooms it offers. |
 | **Users** | *Contact Sharing*: local groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups. *Sent lists*: what each server currently receives. |
 
-The page auto‑refreshes every 5 seconds.
+Every table sorts by any column: click its header for ascending, again for descending, a third time for
+the original order (numbers sort as numbers, anything else alphabetically; the choice is remembered per
+browser). Each list has a filter box. The page updates live as things change.
 
 ---
 
@@ -378,12 +380,21 @@ has a screenshot‑level admin walkthrough.
 
 ```
 src/main/java/.../federation/
-  FederationPlugin.java         Openfire entry point
-  FederationManager.java        orchestrator; sending side of the protocol
+  FederationPlugin.java         Openfire entry point; undoes a failed start
+  FederationManager.java        coordinator: peers, room mappings, gossip, trust
+  PresenceRelay.java            local presence and PEP data to remote contacts
+  OccupantSync.java             remote occupants: roster sync and eviction
+  MappingProbe.java             end-to-end mapping probes
+  CertificatePinning.java       trust on first use for peers' S2S keys
+  ContactListManager.java       contact-list sharing
   FederatedRoomManager.java     local/remote room state + virtual occupants
   FederationRoutingTable.java   distance-vector routing
   S2SMonitor.java               peer poll, keepalive, reconnect, idle-reaper handling
-  protocol/                     IQ handler + stanza factory
+  FederationApiServlet.java     JSON API behind the admin console
+  protocol/                     inbound IQ dispatch, room traffic, 1:1 traffic, validation;
+                                outbound interceptor, stanza factory, sender
+  files/                        HTTP-upload file relay
+src/test/java/                  unit tests (mvn -o test)
 src/main/resources/
   plugin.xml                    Openfire plugin descriptor
   readme.html                   in-console usage documentation

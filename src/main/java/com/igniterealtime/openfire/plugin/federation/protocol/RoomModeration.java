@@ -6,26 +6,9 @@ import org.dom4j.QName;
 import org.xmpp.packet.JID;
 
 /**
- * Moderated message retraction (XEP-0425) across mapped rooms.
- *
- * <p>Openfire core does not implement XEP-0425; a separate plugin may. When one does, the room
- * announces a moderation as a body-less groupchat from its bare JID:
- * <pre>{@code
- * <message type="groupchat" from="room@conference.home">
- *   <retract xmlns="urn:xmpp:message-retract:1" id="STANZA-ID">
- *     <moderated xmlns="urn:xmpp:message-moderate:1" by="room@conference.home/mod"/>
- *     <reason>optional</reason>
- *   </retract>
- * </message>
- * }</pre>
- * Clients act on that envelope only when it comes from the room's bare JID.
- *
- * <p>A moderation crosses the federation only for a message its author's own server can moderate.
- * The sending side forwards one only when the message was written by one of its own users. The
- * receiving side applies one only when the message came from the room the moderation comes from
- * and its author belongs to that room's server, so a modified peer cannot remove other servers'
- * messages either. Anything else stays on the server where it was moderated. With no XEP-0425
- * plugin, nothing is ever announced and nothing here runs on the sending side.
+ * Parses and builds XEP-0425 moderation announcements for mapped rooms. A moderation crosses the
+ * federation only for a message written by a user of the moderating room's own server, so no server
+ * can remove another server's messages.
  */
 public final class RoomModeration {
 
@@ -61,10 +44,7 @@ public final class RoomModeration {
         return text.length() > MAX_REASON ? text.substring(0, MAX_REASON) : text;
     }
 
-    /**
-     * A moderation announcement for {@code roomJid}: retract {@code targetId}, moderated by
-     * {@code by} (the moderator's room address, or null), with an optional reason and occupant-id.
-     */
+    /** A moderation announcement from {@code roomJid} retracting {@code targetId}; {@code by} may be null. */
     public static Element announcement(String roomJid, String msgId, String targetId,
                                        String by, String occupantId, String reason) {
         Element msg = DocumentHelper.createElement(QName.get("message", "jabber:client"));
@@ -76,18 +56,14 @@ public final class RoomModeration {
         Element moderated = retract.addElement(QName.get("moderated", NS_MODERATE));
         if (by != null) moderated.addAttribute("by", by);
         if (occupantId != null) {
-            moderated.addElement(QName.get("occupant-id", FederationIQHandler.NS_OCCUPANT_ID))
+            moderated.addElement(QName.get("occupant-id", MucTrafficHandler.NS_OCCUPANT_ID))
                      .addAttribute("id", occupantId);
         }
         if (reason != null) retract.addElement(QName.get("reason", NS_RETRACT)).setText(reason);
         return msg;
     }
 
-    /**
-     * Removes every moderation marker from an ordinary relayed message, so nothing reaches clients
-     * as a moderation unless it went through the checks for one. Clients honor a moderation only from
-     * the room's bare JID, which a relayed message never comes from; this keeps it so.
-     */
+    /** Removes every moderation marker from an ordinary relayed message, so clients never act on one. */
     public static void stripModeration(Element msg) {
         for (Element retract : msg.elements(QName.get("retract", NS_RETRACT))) {
             for (Element m : retract.elements(QName.get("moderated", NS_MODERATE))) retract.remove(m);
@@ -97,10 +73,7 @@ public final class RoomModeration {
         }
     }
 
-    /**
-     * Whether {@code user} belongs to the server hosting {@code roomJid}: its domain is the room's
-     * service domain or the parent of it ({@code conference.home} → {@code home}).
-     */
+    /** Whether {@code user}'s domain is the room's service domain or its parent ({@code conference.home → home}). */
     public static boolean belongsToRoomServer(String user, String roomJid) {
         try {
             String userDomain = new JID(user).getDomain();
@@ -108,7 +81,8 @@ public final class RoomModeration {
             int dot = roomDomain.indexOf('.');
             return roomDomain.equals(userDomain)
                 || (dot > 0 && roomDomain.substring(dot + 1).equals(userDomain));
-        } catch (Exception e) {
+        } catch (IllegalArgumentException notAJid) {
+            // Null or unparseable: belongs to no server.
             return false;
         }
     }

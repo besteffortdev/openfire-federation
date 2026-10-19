@@ -2,8 +2,10 @@
 
 How a message typed into a room on one server reaches occupants of a *mapped* room on servers that may be
 several hops away — and how remote occupants appear locally. Snippets are from
-[`FederationIQHandler.java`](../src/main/java/com/igniterealtime/openfire/plugin/federation/protocol/FederationIQHandler.java)
-and [`FederationManager.java`](../src/main/java/com/igniterealtime/openfire/plugin/federation/FederationManager.java).
+[`MucTrafficHandler.java`](../src/main/java/com/igniterealtime/openfire/plugin/federation/protocol/MucTrafficHandler.java),
+which handles inbound room traffic, and
+[`OccupantSync.java`](../src/main/java/com/igniterealtime/openfire/plugin/federation/OccupantSync.java), which
+keeps the remote occupants in step.
 
 ## The moving parts
 
@@ -19,92 +21,110 @@ and [`FederationManager.java`](../src/main/java/com/igniterealtime/openfire/plug
 
 ## Egress: a local packet goes out
 
-When a local occupant speaks or changes presence, `FederationManager` wraps the packet in a `muc-forward`
+When a local occupant speaks or changes presence, `FederationPacketInterceptor` wraps the packet in a `muc-forward`
 addressed to each active mapping's `remoteDomain`/`remoteRoomJid` and routes it to the next hop toward that
 domain (via the [routing table](routing.md)). The envelope records `src` = this server (the mapped entry
 point) and seeds the `via` trail for loop prevention.
 
-## The hop decision: `handleMucForward`
+## The hop decision: `MucTrafficHandler.handle`
 
-Every server that receives a `muc-forward` runs the same routine. First, loop and spoofing guards:
+Every server that receives a `muc-forward` runs the same routine. First, the loop and spoofing guards,
+in the order [09-validation.md](protocol/09-validation.md) gives:
 
 ```java
-if (FederationStanzaFactory.viaContains(via, localDomain)) {
+if (viaContains(via, localDomain())) {
     Log.warn("muc-forward loop detected (via={}), dropping", via);
     return;
 }
-...
-// Origin (from-spoofing) gate ... untrusted-peer exposure gate ...
-String targetServer = (finalDest == null || localDomain.equals(finalDest)) ? localDomain : finalDest;
-if (!untrustedAllowsServer(fromDomain, targetServer)) {
-    Log.warn("SECURITY: dropping muc-forward from untrusted peer {} for room {} on non-exposed server {} ...");
-    return;
-}
+// ... hub-trail length, and a payload that must be a message or a presence ...
+if (!validation.payloadOriginOk(fromDomain, payloadEl.attributeValue("from"), "muc-forward", false,
+                                el.attributeValue(ATTR_SRC))) return;           // from-spoofing gate
+if (!validation.claimedOriginOk(fromDomain, src, "muc-forward")) return;
+if (!validation.exposureOk(fromDomain, finalDest, "muc-forward")) return;      // untrusted-peer exposure
 ```
 
 Then the fork — **are we the destination, or a relay?**
 
 ```java
-if (finalDest == null || localDomain.equals(finalDest)) {
-    // We are the destination — inject into the local MUC room.
-    if (!isFederatedLocalRoom(targetRoom)) { /* SECURITY: drop */ return; }
-    if (manager.getRoomManager().getMappingsForLocal(targetRoom).isEmpty()) { /* SECURITY: drop */ return; }
-    if (viaContains(hubs, localDomain)) return;                     // been round a ring/mesh
-    if (injectLocally(payloadEl, via, targetRoom, fromDomain, src))  // false for a duplicate
-        fanOutToOtherMappings(fromDomain, payloadEl, targetRoom, via, hubs);   // hub behaviour
+if (InboundValidation.isForUs(finalDest)) {
+    deliverHere(fromDomain, payloadEl, targetRoom, via, src, hubs);     // inject, then fan out
 } else {
-    // We are an intermediate hop — forward toward the next hop.
-    String newVia = via.isEmpty() ? localDomain : via + "," + localDomain;
-    ...
-    manager.getRoutingTable().findNextHop(finalDest).ifPresentOrElse(
-        nextHop -> route(mucForward(nextHop, finalDest, targetRoom, newVia, src, embedded)),
-        ()      -> Log.warn("muc-forward: no route to {}, dropping", finalDest));
+    relay(fromDomain, payloadEl, finalDest, targetRoom, via, src, hubs); // on toward the room's server
 }
 ```
 
-Two authorization gates guard injection, and the comments in the source spell out *why* each is
-load-bearing:
+`deliverHere` holds the gates in front of injection:
 
-1. **`isFederatedLocalRoom`** — `directDeliver` bypasses MUC's own non-occupant check, so without this a peer
+```java
+if (!isFederatedLocalRoom(targetRoom)) { /* SECURITY: drop */ return; }
+if (manager.getRoomManager().getMappingsForLocal(targetRoom).isEmpty()) { /* SECURITY: drop */ return; }
+if (!mappedToEntry(targetRoom, src, fromDomain, payloadEl)) return;      // SECURITY: wrong entry server
+if (viaContains(hubs, localDomain())) return;                            // been round a ring/mesh
+Arrival arrival = deliver(payloadEl, targetRoom, fromDomain, src);       // DUPLICATE for a repeat
+if (arrival == Arrival.NEW) fanOut(fromDomain, payloadEl, targetRoom, via, hubs);   // hub behaviour
+```
+
+and `relay` passes it on, appending itself to the `via` trail:
+
+```java
+String newVia = appendToTrail(via, localDomain());
+// ...
+FederationSender.send("muc-forward", finalDest, () -> FederationStanzaFactory.mucForward(
+        nextHop, finalDest, targetRoom, newVia, src, relayHubs, roomStanza(payloadEl)));
+```
+
+Three authorization gates guard injection, and each is load-bearing:
+
+1. **`isFederatedLocalRoom`** — delivery bypasses MUC's own non-occupant check, so without this a peer
    could inject into *any* local room.
-2. **non-empty active mappings** — "federation-enabled is NOT consent on its own"; a tagged-but-unmapped room
+2. **non-empty active mappings** — federation-enabled is not consent on its own; a tagged-but-unmapped room
    is still closed to traffic.
+3. **`mappedToEntry`** — the payload must enter through a server the room is actually mapped to (`src`),
+   see [09 § Room injection — bound to the entry server](protocol/09-validation.md#room-injection--bound-to-the-entry-server).
 
-A relay hop that *also* holds its own spoke mapping for `targetRoom` injects locally right there (it won't
-receive the hub's fan-out because its domain will already be in the `via` trail).
+A relay hop that *also* holds its own spoke mapping for `targetRoom` delivers locally right there
+(`deliverAtRelay`); it won't receive the hub's fan-out because its domain is already in the `via` trail.
 
 ## Injection bypasses the non-occupant check
 
-`injectLocally` dispatches by payload type; `injectMessage`/`injectPresence` deliver **straight to each
+`deliver` dispatches by payload type; `injectMessage`/`injectPresence` deliver **straight to each
 occupant**, deliberately going around MUC's membership check (which is exactly why the gates above exist):
 
 ```java
-private void injectLocally(Element payloadEl, String via, String targetRoom, String fromDomain, String src) {
-    switch (payloadEl.getName()) {
-        case "message"  -> injectMessage(payloadEl, targetRoom, fromDomain, src);
-        case "presence" -> injectPresence(payloadEl, targetRoom, fromDomain, src);
-        default -> Log.warn("injectLocally: unexpected payload type '{}'", payloadEl.getName());
+private Arrival deliver(Element payloadEl, String targetRoom, String fromDomain, String src) {
+    try {
+        if ("message".equals(payloadEl.getName())) {
+            return injectMessage(payloadEl, targetRoom, fromDomain, src);
+        }
+        injectPresence(payloadEl, targetRoom, fromDomain, src);
+    } catch (RuntimeException e) {
+        Log.warn("Could not deliver a relayed {} into {}", payloadEl.getName(), targetRoom, e);
     }
+    return Arrival.NEW;
 }
 ```
+
+A delivery that fails is logged and still counts as new, so a fault in one room never stops the room's
+other spokes getting the payload.
 
 `injectPresence` is also where a newly-seen remote occupant is registered as a virtual occupant and (on a
 `fed-origin`-marked join) triggers `syncLocalOccupantsToRemote` so the two rooms exchange rosters exactly
 once — the marker stops that reverse sync from bouncing back.
 
-## Hubs: bridging spokes with `fanOutToOtherMappings`
+## Hubs: bridging spokes with `fanOut`
 
 A server mapped to *several* rooms for the same local room is a **hub**. After injecting, it relays the packet
 to every *other* spoke, so servers that can't see each other still share a room through the hub:
 
 ```java
-String newHubs = FederationStanzaFactory.appendToTrail(hubs, localDomain);   // appended, never reset
+String newHubs = appendToTrail(hubs, localDomain);   // appended, never reset
 for (RoomMapping m : mappings) {
     // skips: the direct sender, the incoming via, the payload's home, and servers already in hubs
     if (RoomFanOut.skipReason(m.remoteDomain(), fromDomain, viaServers, hubs, payloadHome) != null) continue;
     String nextHop = manager.getRoutingTable().findNextHop(m.remoteDomain()).orElse(m.remoteDomain());
-    // We are the hub, so occupants enter the spoke through US — stamp src with our own domain.
-    route(mucForward(nextHop, m.remoteDomain(), m.remoteRoomJid(), /*newVia=*/localDomain, localDomain, newHubs, embedded));
+    // We are the hub, so occupants enter the spoke through US: via and src restart at our own domain.
+    FederationSender.send("muc-forward fan-out", m.remoteDomain(), () -> FederationStanzaFactory.mucForward(
+            nextHop, m.remoteDomain(), m.remoteRoomJid(), localDomain, localDomain, newHubs, roomStanza(payloadEl)));
 }
 ```
 
@@ -132,15 +152,16 @@ reset on restart.
 
 ## Teardown: no stale ghosts
 
-Because every virtual occupant carries both its **origin** and its **arrivedVia** neighbour, the manager can
-evict precisely the right set on each kind of failure:
+Because every virtual occupant carries both its **origin** and its **arrivedVia** neighbour, `OccupantSync`
+can evict precisely the right set on each kind of failure:
 
 | Trigger | Method | Evicts by |
 |---|---|---|
 | A user's **home** server becomes unreachable | `evictAllVirtualOccupantsFromDomain` | origin domain |
-| A **mapping** is disabled/removed | `evictVirtualOccupants` / `evictForInactiveMapping` | arrivedVia |
+| A **mapping** is disabled/removed | `evictForInactiveMapping` | arrivedVia |
 | A **transit hub** is lost | `evictOccupantsArrivedViaLostServer` | arrivedVia |
-| A **mapping probe** goes silent (3 misses) | `onMappingPathBroken` | that mapping's occupants |
+| A room's **only reachable hub** is lost | `evictOccupantsForLostHub` | every occupant of that room |
+| A **mapping probe** goes silent (3 misses) | `MappingProbe.onPathBroken` | that mapping's occupants |
 
 Each eviction sends the corresponding virtual-leave presences outward, so the ghost disappears from every
 room across the federation — the same multi-hop path, in reverse.

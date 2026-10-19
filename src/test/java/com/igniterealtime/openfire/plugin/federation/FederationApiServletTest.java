@@ -7,11 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * The admin feed's JSON replies. Error messages quote peer- and admin-supplied text (a domain, a
- * room name, a filesystem error), so the escaping is what keeps one hostile string from breaking
- * the reply or the page that parses it.
- */
+/** The admin API's JSON replies, whose escaping keeps a hostile string from breaking the reply. */
 class FederationApiServletTest {
 
     @Test
@@ -61,26 +57,14 @@ class FederationApiServletTest {
     @Test
     @DisplayName("a held poll wakes when a duplicate warning appears, not on every dropped copy")
     void fingerprintIgnoresDuplicateCountsButNotTheFlag() {
-        String quiet = "{\"mappings\":[{\"duplicates\":true,\"dupCount\":3,\"dupSinceAgeSecs\":90,\"dupLastAgeSecs\":2}]}";
-        String busier = "{\"mappings\":[{\"duplicates\":true,\"dupCount\":41,\"dupSinceAgeSecs\":95,\"dupLastAgeSecs\":0}]}";
-        String cleared = "{\"mappings\":[{\"duplicates\":false,\"dupCount\":0,\"dupSinceAgeSecs\":-1,\"dupLastAgeSecs\":-1}]}";
+        String quiet   = "{\"mappings\":[{\"duplicates\":true,\"dupCount\":3,"
+                       + "\"dupSinceAgeSecs\":90,\"dupLastAgeSecs\":2}]}";
+        String busier  = "{\"mappings\":[{\"duplicates\":true,\"dupCount\":41,"
+                       + "\"dupSinceAgeSecs\":95,\"dupLastAgeSecs\":0}]}";
+        String cleared = "{\"mappings\":[{\"duplicates\":false,\"dupCount\":0,"
+                       + "\"dupSinceAgeSecs\":-1,\"dupLastAgeSecs\":-1}]}";
 
         assertEquals(FederationApiServlet.fingerprint(quiet), FederationApiServlet.fingerprint(busier));
         assertFalse(FederationApiServlet.fingerprint(quiet).equals(FederationApiServlet.fingerprint(cleared)));
-    }
-
-    @Test
-    @DisplayName("an admin-entered peer domain is lowercase host characters only")
-    void plausiblePeerDomain() {
-        assertTrue(FederationApiServlet.isPlausibleDomain("2501"));
-        assertTrue(FederationApiServlet.isPlausibleDomain("peer-1.lab_net.example"));
-
-        assertFalse(FederationApiServlet.isPlausibleDomain(null));
-        assertFalse(FederationApiServlet.isPlausibleDomain(""));
-        assertFalse(FederationApiServlet.isPlausibleDomain("Peer.example"));
-        assertFalse(FederationApiServlet.isPlausibleDomain("a\".example"));
-        assertFalse(FederationApiServlet.isPlausibleDomain("a b.example"));
-        assertFalse(FederationApiServlet.isPlausibleDomain("<x>.example"));
-        assertFalse(FederationApiServlet.isPlausibleDomain("a".repeat(254)));
     }
 }

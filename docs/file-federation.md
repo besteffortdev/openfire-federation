@@ -82,10 +82,12 @@ private void sendRequest(Transfer t) {
     candidates.addAll(t.hints);
     candidates.remove(localDomain());
     for (String target : candidates) {
-        var nextHop = manager.getRoutingTable().findNextHop(target);
-        if (nextHop.isEmpty()) continue;
-        route(FederationStanzaFactory.fileRequest(nextHop.get(), target, localDomain(), t.id, t.token, ""));
-        t.expectedFrom = nextHop.get();   // legitimate offer/chunk/error must come back this way
+        String nextHop = manager.getRoutingTable().findNextHop(target).orElse(null);
+        if (nextHop == null) continue;
+        boolean sent = FederationSender.send("file-request", target, () -> FederationStanzaFactory.fileRequest(
+                nextHop, target, localDomain(), t.id, t.token, ""));
+        if (!sent) continue;
+        t.expectedFrom = nextHop;   // legitimate offer/chunk/error must come back this way
         t.requestAttempts.incrementAndGet();
         return;
     }
@@ -134,7 +136,8 @@ public void relayToward(String elementName, Element el, String fromDomain) {
     if (FederationStanzaFactory.viaContains(via, local)) { /* loop → drop */ return; }
     String newVia = via.isEmpty() ? local : via + "," + local;
     manager.getRoutingTable().findNextHop(destination).ifPresentOrElse(
-        nextHop -> route(FederationStanzaFactory.fileRelay(nextHop, el, newVia)),
+        nextHop -> FederationSender.send(elementName, destination,
+                                         () -> FederationStanzaFactory.relay(nextHop, el, newVia)),
         ()      -> Log.debug("{}: no route to {}, dropping", elementName, destination));
 }
 ```

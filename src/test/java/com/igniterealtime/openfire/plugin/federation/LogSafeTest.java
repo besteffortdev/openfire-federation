@@ -8,14 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Guards the log-forging defence (CERT IDS03-J). Ported from the sister SAMessage and xep-0425
- * suites, as {@link LogSafe} itself is shared, so the one helper is held to the one contract in
- * every repo.
- *
- * <p>The property that matters is the invariant, not the substitution character: whatever a peer
- * puts in an attribute, the result occupies exactly one log line and carries no terminal escape.</p>
- */
+/** The log-forging defence (CERT IDS03-J): any peer value ends up as one log line with no terminal escape. */
 class LogSafeTest {
 
     /** ESC, as an ANSI sequence would start. */

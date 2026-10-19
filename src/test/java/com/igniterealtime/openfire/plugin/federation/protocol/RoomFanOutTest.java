@@ -20,14 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * How a payload spreads through rooms mapped to each other, and that it stops.
- *
- * <p>The mesh tests pass one payload between simulated servers with direct links, following the
- * steps {@code FederationIQHandler.handleMucForward} takes on arrival: the via loop guard, the
- * hub-trail check, the self-echo drop, the duplicate check ({@link RoomMessageIds#firstArrival}),
- * then the fan-out ({@link RoomFanOut#skipReason} and the trail helpers). Those decisions are the
- * real code; only the transport is simulated. Each fix can be switched off, which shows what each
- * one is needed for, and that the harness reproduces the loop seen in a real four-server mesh.</p>
+ * How a payload spreads through mapped rooms, and that it stops. The mesh tests run the real
+ * arrival and fan-out decisions over a simulated transport, with each loop fix switchable.
  */
 class RoomFanOutTest {
 
@@ -38,8 +32,6 @@ class RoomFanOutTest {
 
     /** Deliveries past this mean the payload is circling. */
     private static final int LOOP_LIMIT = 10_000;
-
-    // ── the rules ─────────────────────────────────────────────────────────────
 
     @Test
     @DisplayName("a hub skips the sender, the via trail, the user's home and every server already a hub")
@@ -73,8 +65,6 @@ class RoomFanOutTest {
         assertEquals(2, FederationStanzaFactory.trailLength(A + "," + B));
         assertEquals(2, FederationStanzaFactory.trailLength(A + ",," + B + ","));
     }
-
-    // ── meshes, with both fixes ───────────────────────────────────────────────
 
     @Test
     @DisplayName("full mesh of four: a message reaches every room exactly once")
@@ -141,8 +131,6 @@ class RoomFanOutTest {
         assertEachOnce(spread(chain, A, false, true, true), B, C, D);
     }
 
-    // ── what each fix is for ──────────────────────────────────────────────────
-
     @Test
     @DisplayName("without either fix the payload circles a full mesh forever (the reported bug)")
     void withoutFixesMeshLoops() {
@@ -183,8 +171,6 @@ class RoomFanOutTest {
         assertFalse(r.looped);
         assertTrue(r.delivered.values().stream().anyMatch(n -> n > 1), "expected a duplicate: " + r.delivered);
     }
-
-    // ── harness ───────────────────────────────────────────────────────────────
 
     private record Envelope(String to, String from, String via, String hubs) { }
 

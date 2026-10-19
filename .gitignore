@@ -16,4 +16,4 @@ downloads/
 test/
 docs/takchat-xmpp-behavior.md
 /test/
-
+create-rooms.sh

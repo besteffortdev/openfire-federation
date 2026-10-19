@@ -9,25 +9,13 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 /**
- * Default federation settings applied to a MUC room the moment it is created,
- * selected by a glob match on the room's name (the localpart of the room JID).
- *
- * <p>The admin defines an ordered set of <em>rules</em>; each rule is a name
- * pattern ({@code *} = any run of characters, {@code ?} = one character — Linux
- * glob style) plus the settings to apply: whether the room is federated, its
- * visibility ACL, whether incoming mapping requests auto-accept, and whether to
- * auto-request a same-named mapping on each visible peer.</p>
- *
- * <p>When several patterns match a name, the <strong>most specific</strong> wins:
- * the pattern with the most literal (non-wildcard) characters. {@code *} therefore
- * acts as the catch-all fallback. Ties break toward the longer pattern, then the
- * earlier-defined rule.</p>
- *
- * <p>Persistence: a count plus per-index properties in JiveGlobals, rewritten
- * wholesale on every change (the rule set is small).</p>
+ * Default federation settings for new MUC rooms, chosen by a glob on the room name ({@code *} and
+ * {@code ?}). When several rules match, the one with the most literal characters wins. Rules are
+ * persisted in Openfire properties.
  */
 public class RoomDefaultsManager {
 
@@ -37,25 +25,21 @@ public class RoomDefaultsManager {
     private static final String PROP_PATTERN    = "federation.roomdefaults.%d.pattern";
     private static final String PROP_FEDERATED  = "federation.roomdefaults.%d.federated";
     private static final String PROP_AUTOACCEPT = "federation.roomdefaults.%d.autoaccept";
-    private static final String PROP_VISIBLE    = "federation.roomdefaults.%d.visible";   // csv of domains, or "*"
+    private static final String PROP_VISIBLE    = "federation.roomdefaults.%d.visible";
     private static final String PROP_AUTOMAP    = "federation.roomdefaults.%d.automap";
-    private static final String PROP_FILES      = "federation.roomdefaults.%d.files";     // per-rule file federation (default true)
+    private static final String PROP_FILES      = "federation.roomdefaults.%d.files";
 
-    /** The wildcard token that means "visible to every peer" (mirrors {@link FederatedRoomManager#VISIBLE_ALL}). */
+    /** The visibility entry meaning "every peer". */
     public static final String VISIBLE_ALL = FederatedRoomManager.VISIBLE_ALL;
 
-    /**
-     * One rule. {@code pattern} doubles as the unique id — there is at most one
-     * rule per pattern. {@code visible} is a list of server domains, or the single
-     * element {@code "*"} meaning all peers; it is only meaningful when federated.
-     */
+    /** One rule, keyed by its pattern; {@code visible} holds server domains or the single entry {@code "*"}. */
     public record Rule(String pattern, boolean federated, boolean autoAccept,
                        List<String> visible, boolean autoMap, boolean filesEnabled) {
         public Rule {
             visible = (visible == null) ? List.of() : List.copyOf(visible);
         }
 
-        /** Literal (non-wildcard) character count — the specificity score. */
+        /** The number of literal characters, which ranks overlapping rules. */
         int specificity() {
             int n = 0;
             for (int i = 0; i < pattern.length(); i++) {
@@ -66,9 +50,10 @@ public class RoomDefaultsManager {
         }
     }
 
-    /** Ordered by insertion; pattern is the de-dup key. */
+    /** Rules in insertion order. */
     private final List<Rule> rules = Collections.synchronizedList(new ArrayList<>());
 
+    /** Loads the persisted rules. */
     public void load() {
         rules.clear();
         int count = JiveGlobals.getIntProperty(PROP_COUNT, 0);
@@ -78,14 +63,14 @@ public class RoomDefaultsManager {
             boolean federated  = JiveGlobals.getBooleanProperty(String.format(PROP_FEDERATED, i), false);
             boolean autoAccept = JiveGlobals.getBooleanProperty(String.format(PROP_AUTOACCEPT, i), false);
             boolean autoMap    = JiveGlobals.getBooleanProperty(String.format(PROP_AUTOMAP, i), false);
-            boolean files      = JiveGlobals.getBooleanProperty(String.format(PROP_FILES, i), true);   // default on
+            boolean files      = JiveGlobals.getBooleanProperty(String.format(PROP_FILES, i), true);
             List<String> visible = parseCsv(JiveGlobals.getProperty(String.format(PROP_VISIBLE, i)));
             rules.add(new Rule(pattern.strip(), federated, autoAccept, visible, autoMap, files));
         }
         Log.info("Loaded {} room-default rule(s)", rules.size());
     }
 
-    /** Snapshot of the current rules, most-specific first (matching evaluation order). */
+    /** The rules, most specific first. */
     public List<Rule> getRules() {
         synchronized (rules) {
             List<Rule> copy = new ArrayList<>(rules);
@@ -98,7 +83,7 @@ public class RoomDefaultsManager {
         }
     }
 
-    /** Adds or replaces (by pattern) a rule, then persists. */
+    /** Adds a rule or replaces the one with the same pattern, and persists the rules. */
     public void save(String pattern, boolean federated, boolean autoAccept,
                      List<String> visible, boolean autoMap, boolean filesEnabled) {
         if (pattern == null || pattern.isBlank()) return;
@@ -113,7 +98,7 @@ public class RoomDefaultsManager {
                  p, federated, autoAccept, rule.visible(), autoMap, filesEnabled);
     }
 
-    /** Removes the rule with this exact pattern (case-insensitive), then persists. */
+    /** Removes the rule with this pattern, ignoring case, and persists the rules. */
     public void delete(String pattern) {
         if (pattern == null) return;
         String p = pattern.strip();
@@ -125,10 +110,7 @@ public class RoomDefaultsManager {
         }
     }
 
-    /**
-     * The most-specific rule whose pattern matches {@code roomName} (the room JID
-     * localpart), or {@code null} when no rule matches.
-     */
+    /** The most specific rule matching {@code roomName}, the room JID's local part, or null. */
     public Rule bestMatch(String roomName) {
         if (roomName == null) return null;
         Rule best = null;
@@ -146,10 +128,7 @@ public class RoomDefaultsManager {
         return best;
     }
 
-    // ── helpers ────────────────────────────────────────────────────────────────
-
     private void persist() {
-        // Clear any stale tail from a previously larger set, then write the new set.
         int old = JiveGlobals.getIntProperty(PROP_COUNT, 0);
         for (int i = 0; i < old; i++) {
             JiveGlobals.deleteProperty(String.format(PROP_PATTERN, i));
@@ -172,7 +151,7 @@ public class RoomDefaultsManager {
         JiveGlobals.setProperty(PROP_COUNT, String.valueOf(rules.size()));
     }
 
-    /** Normalizes a visibility list: lower-cases domains, collapses any "*" to the single sentinel. */
+    /** Lowercases a visibility list and reduces it to {@code "*"} alone when it contains it. */
     private static List<String> normalizeVisible(List<String> visible) {
         if (visible == null) return List.of();
         Set<String> set = new LinkedHashSet<>();
@@ -196,16 +175,11 @@ public class RoomDefaultsManager {
         return out;
     }
 
-    /**
-     * Compiled-glob cache.  bestMatch runs every rule's glob on every room creation (and
-     * applyDefaultsToAllRooms runs it across every existing room), so recompiling the regex per
-     * call was pure waste.  Keyed by the glob string; bounded in practice by the small
-     * admin-defined rule set (deleted rules leave a stale entry, which is negligible).
-     */
-    private static final java.util.concurrent.ConcurrentHashMap<String, Pattern> GLOB_CACHE =
-        new java.util.concurrent.ConcurrentHashMap<>();
+    /** Compiled globs, since every rule is matched on each room creation; bounded by the small rule set. */
+    private static final ConcurrentHashMap<String, Pattern> GLOB_CACHE =
+        new ConcurrentHashMap<>();
 
-    /** Case-insensitive Linux-style glob match ({@code *} = any run, {@code ?} = one char). */
+    /** Case-insensitive glob match, where {@code *} is any run of characters and {@code ?} one character. */
     static boolean globMatches(String glob, String name) {
         if (glob == null || name == null) return false;
         return GLOB_CACHE.computeIfAbsent(glob, RoomDefaultsManager::compileGlob)

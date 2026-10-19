@@ -1,28 +1,31 @@
 package com.igniterealtime.openfire.plugin.federation.model;
 
 /**
- * A bilateral pairing between a local MUC room and a remote MUC room.
- *
- * A mapping is a negotiated, revocable relationship (since 1.3.46): the requester stores it
- * {@link State#PENDING_OUT} and sends a request; the remote stores {@link State#PENDING_IN}
- * (or auto-accepts) and, on accept, mints a {@link #token} shared by both ends. Only
- * {@link State#ACTIVE} mappings forward MUC traffic. Either end can {@link State#DISABLED_LOCAL
- * disable} a mapping (the other sees {@link State#DISABLED_REMOTE} — "disabled by peer").
+ * A negotiated pairing between a local MUC room and a room on {@code remoteDomain}. Only an
+ * {@link State#ACTIVE} mapping carries traffic. Both ends hold the same {@code token}, minted on
+ * accept, and it authorises later lifecycle requests.
  */
 public record RoomMapping(
-        String localRoomJid,   // room@conference.local-domain
-        String remoteRoomJid,  // room@conference.remote-domain
-        String remoteDomain,   // the XMPP domain that owns the remote room
+        String localRoomJid,
+        String remoteRoomJid,
+        String remoteDomain,
         State  state,
-        String token           // shared per-mapping consent token (empty until accepted / legacy)
+        String token
 ) {
+    /** Lifecycle state of a mapping, as seen from this server. */
     public enum State {
-        PENDING_OUT,      // we requested it; awaiting the remote's accept
-        PENDING_IN,       // the remote requested it; awaiting our accept
-        ACTIVE,           // accepted on both ends — the only state that forwards
-        DISABLED_LOCAL,   // we disabled it
-        DISABLED_REMOTE,  // the remote disabled it ("disabled by peer")
-        REJECTED          // the remote rejected our request
+        /** Requested by us and waiting for the remote to accept. */
+        PENDING_OUT,
+        /** Requested by the remote and waiting for our admin to accept. */
+        PENDING_IN,
+        /** Accepted by both ends; the only state that forwards traffic. */
+        ACTIVE,
+        /** Disabled by our admin. */
+        DISABLED_LOCAL,
+        /** Disabled by the remote admin. */
+        DISABLED_REMOTE,
+        /** Rejected by the remote. */
+        REJECTED
     }
 
     public RoomMapping {
@@ -30,7 +33,7 @@ public record RoomMapping(
         if (token == null) token = "";
     }
 
-    /** Convenience constructor for a freshly-requested (outgoing, untokenised) mapping. */
+    /** A new outgoing request that has no token yet. */
     public RoomMapping(String localRoomJid, String remoteRoomJid, String remoteDomain) {
         this(localRoomJid, remoteRoomJid, remoteDomain, State.PENDING_OUT, "");
     }
@@ -39,7 +42,7 @@ public record RoomMapping(
         return state == State.ACTIVE;
     }
 
-    /** Returns a copy of this mapping with a new state and token. */
+    /** A copy of this mapping with a new state and token. */
     public RoomMapping with(State newState, String newToken) {
         return new RoomMapping(localRoomJid, remoteRoomJid, remoteDomain, newState, newToken);
     }
