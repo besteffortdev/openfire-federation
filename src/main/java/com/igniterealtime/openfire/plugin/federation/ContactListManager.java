@@ -45,8 +45,9 @@ import static com.igniterealtime.openfire.plugin.federation.FederationNames.loca
 /**
  * Shares contact lists between servers, after Openfire's own shared groups. The admin shares local
  * groups with peer servers, and each list received from another server can be mapped into a
- * plugin-owned Openfire group shown in chosen local rosters. Sharing a user with a server also lets
- * that server's users see the user's presence and PEP data.
+ * plugin-owned Openfire group shown in chosen local rosters, made searchable in the
+ * {@link FederatedDirectory}, or both. Sharing a user with a server also lets that server's users see
+ * the user's presence and PEP data.
  */
 public class ContactListManager {
 
@@ -62,6 +63,10 @@ public class ContactListManager {
     private static final String PROP_MAP_ORIGIN  = "federation.contactmap.%d.origin";
     private static final String PROP_MAP_DISPLAY = "federation.contactmap.%d.display";
     private static final String PROP_MAP_GROUPS  = "federation.contactmap.%d.groups";
+    private static final String PROP_MAP_DIRECTORY = "federation.contactmap.%d.directory";
+
+    /** Origins whose lists the admin denied, comma-separated. */
+    private static final String PROP_DENIED = "federation.contactlist.denied";
 
     /** Prefix of the Openfire group the plugin keeps for one origin's list. */
     public static final String GROUP_PREFIX = "federation-contacts-";
@@ -101,12 +106,16 @@ public class ContactListManager {
         }
     }
 
-    /** How a received list is placed into local rosters: the local groups, or {@link #EVERYBODY}. */
-    public record ListMapping(String origin, String displayName, List<String> groups) {
+    /**
+     * How a received list is used here: placed into the rosters of {@code groups} (or {@link #EVERYBODY};
+     * none keeps it out of every roster), and searchable in the federated directory when {@code directory}.
+     */
+    public record ListMapping(String origin, String displayName, List<String> groups, boolean directory) {
         public ListMapping {
             groups = (groups == null) ? List.of() : List.copyOf(groups);
         }
         public boolean everybody() { return groups.contains(EVERYBODY); }
+        public boolean inRosters() { return !groups.isEmpty(); }
     }
 
     /** A list another server shared with us; {@code crossedUntrusted} if it came across an untrusted link. */
@@ -117,6 +126,8 @@ public class ContactListManager {
     private final List<ShareRule> rules = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, ListMapping> mappings = new ConcurrentHashMap<>();
     private final Map<String, ReceivedList> received = new ConcurrentHashMap<>();
+    /** Origins whose lists are dropped on arrival, and whose last list is not used, until allowed again. */
+    private final Set<String> denied = ConcurrentHashMap.newKeySet();
 
     /** Target domain to the list last sent to it, sorted by JID. */
     private final Map<String, List<Contact>> sent = new ConcurrentHashMap<>();
@@ -188,8 +199,12 @@ public class ContactListManager {
             if (origin == null || origin.isBlank()) continue;
             String display = JiveGlobals.getProperty(String.format(PROP_MAP_DISPLAY, i), origin);
             List<String> groups = parseCsv(JiveGlobals.getProperty(String.format(PROP_MAP_GROUPS, i)));
-            mappings.put(origin.strip(), new ListMapping(origin.strip(), display, groups));
+            boolean directory = JiveGlobals.getBooleanProperty(String.format(PROP_MAP_DIRECTORY, i), false);
+            mappings.put(origin.strip(), new ListMapping(origin.strip(), display, groups, directory));
         }
+
+        denied.clear();
+        denied.addAll(parseCsv(JiveGlobals.getProperty(PROP_DENIED)));
 
         // Needed before the first S2S poll: a contact's server probes our users as soon as the link is back.
         authorized = computeAuthorization();
@@ -320,6 +335,7 @@ public class ContactListManager {
         Set<String> origins = new HashSet<>(mappings.keySet());
         origins.addAll(received.keySet());
         Set<String> originsUp = new HashSet<>();
+        origins.removeAll(denied);
         for (String origin : origins) {
             if (!canRequestFrom(origin)) continue;
             originsUp.add(origin);
@@ -467,14 +483,19 @@ public class ContactListManager {
 
     /**
      * Records the list {@code origin} shares with us, where empty means withdrawn, and applies it to
-     * its group. An unmapped list is kept only within the unmapped budget.
+     * its group. An unmapped list is kept only within the unmapped budget; a denied origin's is dropped.
      */
     public void handleContactList(String origin, List<Contact> contacts, boolean crossedUntrusted) {
         List<Contact> sorted = new ArrayList<>(contacts);
         sorted.sort((a, b) -> a.jid().compareTo(b.jid()));
         boolean mapped = mappings.containsKey(origin);
         ReceivedList prev;
+        // Under the lock that denyOrigin takes, so a list arriving during a deny is not kept after it.
         synchronized (receiveLock) {
+            if (denied.contains(origin)) {
+                logDeniedList(origin);
+                return;
+            }
             prev = received.get(origin);
             if (!mapped) {
                 if (sorted.isEmpty()) {
@@ -513,6 +534,15 @@ public class ContactListManager {
         if (mapped) syncGroupAsync(origin);
     }
 
+    private void logDeniedList(String origin) {
+        long now = System.currentTimeMillis();
+        Long last = loggedAt.get(origin);
+        if (last == null || now - last >= LOG_EVERY_MS) {
+            loggedAt.put(origin, now);
+            Log.info("contact-list: dropped the list from {} — its lists are denied here", origin);
+        }
+    }
+
     /** Whether one more unmapped list of {@code size} contacts from {@code origin} fits the budget. */
     private boolean unmappedBudgetAllows(String origin, int size) {
         int lists = 0;
@@ -548,21 +578,42 @@ public class ContactListManager {
         return new TreeMap<>(mappings);
     }
 
+    /** The received lists the admin made searchable in the federated directory, by origin; none denied. */
+    public Map<String, List<Contact>> searchableLists() {
+        Map<String, List<Contact>> out = new TreeMap<>();
+        for (ListMapping m : mappings.values()) {
+            if (!m.directory() || denied.contains(m.origin())) continue;
+            ReceivedList list = received.get(m.origin());
+            if (list != null) out.put(m.origin(), list.contacts());
+        }
+        return out;
+    }
+
+    /** Whether any list not denied is searchable, received yet or not; the directory runs while one is. */
+    public boolean hasSearchableList() {
+        return mappings.values().stream().anyMatch(m -> m.directory() && !denied.contains(m.origin()));
+    }
+
     public Map<String, String> getMappingErrors() {
         return new HashMap<>(mappingErrors);
     }
 
-    /** Maps, or re-maps, {@code origin}'s list into the rosters of the given local groups. */
-    public void setMapping(String origin, String displayName, List<String> groups) {
+    /**
+     * Maps, or re-maps, {@code origin}'s list into the rosters of the given local groups, none for no
+     * roster, and into the federated directory when {@code directory}.
+     */
+    public void setMapping(String origin, String displayName, List<String> groups, boolean directory) {
         if (origin == null || origin.isBlank()) return;
         String o = origin.strip();
         String display = (displayName == null || displayName.isBlank()) ? o : displayName.strip();
         List<String> g = groups.contains(EVERYBODY) ? List.of(EVERYBODY) : List.copyOf(new LinkedHashSet<>(groups));
-        mappings.put(o, new ListMapping(o, display, g));
+        mappings.put(o, new ListMapping(o, display, g, directory));
         persistMappings();
         registerNameProvider(o);
-        Log.info("Contact list from {} mapped as '{}' for {}", o, display, g);
+        Log.info("Contact list from {} mapped as '{}' for {}{}", o, display, g.isEmpty() ? "no roster" : g,
+                 directory ? ", searchable in the directory" : "");
         syncGroupAsync(o);
+        manager.refreshDirectory();
     }
 
     /** Unmaps {@code origin}'s list; its group is deleted, which takes the contacts out of every roster. */
@@ -574,6 +625,63 @@ public class ContactListManager {
         if (nameProviders.remove(origin.strip())) UserNameManager.removeUserNameProvider(origin.strip());
         Log.info("Contact list from {} unmapped", origin);
         syncGroupAsync(origin.strip());
+        manager.refreshDirectory();
+    }
+
+    /**
+     * Drops {@code origin}'s later lists and stops using the one held: its contacts leave every roster
+     * and the directory. The entry and its mapping are kept, so {@link #allowOrigin} restores them.
+     */
+    public void denyOrigin(String origin) {
+        if (origin == null || origin.isBlank()) return;
+        String o = origin.strip();
+        synchronized (receiveLock) {
+            if (!denied.add(o)) return;
+            persistDenied();
+        }
+        Log.info("Contact lists from {} denied: its lists are dropped and its contacts are not used", o);
+        syncGroupAsync(o);
+        manager.refreshDirectory();
+    }
+
+    /** Uses {@code origin}'s list and mapping again, and asks it for a fresh list. */
+    public void allowOrigin(String origin) {
+        if (origin == null) return;
+        String o = origin.strip();
+        synchronized (receiveLock) {
+            if (!denied.remove(o)) return;
+            persistDenied();
+        }
+        Log.info("Contact lists from {} allowed again", o);
+        syncGroupAsync(o);
+        manager.refreshDirectory();
+        if (canRequestFrom(o)) sendRequest(o);
+    }
+
+    /**
+     * Forgets {@code origin}: its list, any mapping (which takes its contacts out of every roster and
+     * the directory) and any deny. A list it sends later is shown again as a new one.
+     */
+    public void deleteOrigin(String origin) {
+        if (origin == null || origin.isBlank()) return;
+        String o = origin.strip();
+        synchronized (receiveLock) {
+            received.remove(o);
+            loggedAt.remove(o);
+            if (denied.remove(o)) persistDenied();
+        }
+        if (mappings.containsKey(o)) removeMapping(o);
+        Log.info("Contact list from {} deleted; a list it sends later is shown again", o);
+    }
+
+    /** Whether {@code origin}'s lists are denied. */
+    public boolean isDenied(String origin) {
+        return denied.contains(origin);
+    }
+
+    /** Origins whose lists are denied, sorted. */
+    public Set<String> getDenied() {
+        return new TreeSet<>(denied);
     }
 
     /** The name of the Openfire group holding {@code origin}'s contacts. */
@@ -619,8 +727,9 @@ public class ContactListManager {
     }
 
     /**
-     * Brings the plugin's group for {@code origin} in line with its mapping and the last list
-     * received. Until a list arrives after start-up the members are kept, so a restart empties nothing.
+     * Brings the plugin's group for {@code origin} in line with its mapping and the last list received;
+     * a list in no roster, or denied, has no group. Until a list arrives after start-up the members are
+     * kept, so a restart empties nothing.
      */
     private void syncGroup(String origin) {
         synchronized (groupLock) {
@@ -645,7 +754,7 @@ public class ContactListManager {
         }
 
         ListMapping mapping = mappings.get(origin);
-        if (mapping == null) {
+        if (mapping == null || !mapping.inRosters() || denied.contains(origin)) {
             if (group != null) deleteGroup(gm, group, origin);
             mappingErrors.remove(origin);
             return;
@@ -686,7 +795,8 @@ public class ContactListManager {
     private static void deleteGroup(GroupManager gm, Group group, String origin) {
         try {
             gm.deleteGroup(group);
-            Log.info("contact-list: deleted group '{}' (list from {} unmapped)", group.getName(), origin);
+            Log.info("contact-list: deleted group '{}' (list from {} is in no roster now, or denied)",
+                     group.getName(), origin);
         } catch (GroupNotFoundException ignored) {
             // Already deleted by someone else, which is the state we want.
         }
@@ -855,15 +965,25 @@ public class ContactListManager {
             JiveGlobals.deleteProperty(String.format(PROP_MAP_ORIGIN, i));
             JiveGlobals.deleteProperty(String.format(PROP_MAP_DISPLAY, i));
             JiveGlobals.deleteProperty(String.format(PROP_MAP_GROUPS, i));
+            JiveGlobals.deleteProperty(String.format(PROP_MAP_DIRECTORY, i));
         }
         int i = 0;
         for (ListMapping m : getMappings().values()) {
             JiveGlobals.setProperty(String.format(PROP_MAP_ORIGIN, i), m.origin());
             JiveGlobals.setProperty(String.format(PROP_MAP_DISPLAY, i), m.displayName());
             JiveGlobals.setProperty(String.format(PROP_MAP_GROUPS, i), String.join(",", m.groups()));
+            if (m.directory()) JiveGlobals.setProperty(String.format(PROP_MAP_DIRECTORY, i), "true");
             i++;
         }
         JiveGlobals.setProperty(PROP_MAP_COUNT, String.valueOf(i));
+    }
+
+    private void persistDenied() {
+        if (denied.isEmpty()) {
+            JiveGlobals.deleteProperty(PROP_DENIED);
+        } else {
+            JiveGlobals.setProperty(PROP_DENIED, String.join(",", new TreeSet<>(denied)));
+        }
     }
 
     private static List<String> parseCsv(String csv) {

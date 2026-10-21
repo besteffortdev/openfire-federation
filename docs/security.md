@@ -236,6 +236,30 @@ Two server-side answers given on a user's behalf follow that user's own access r
   check Openfire applies to a local request. A refused read gets `forbidden`. Without this, private
   nodes such as XEP-0402 bookmarks (which can hold room passwords) were readable by any peer.
 
+## User searches from other servers
+
+Openfire's Search plugin (and any other XEP-0055 service on the server) answers every requester with every
+matching user: username, name and email, `*` listing them all. It has no notion of a remote requester. Its
+only restriction, `plugin.search.groupOnly`, limits local users too. Federation made this reachable from
+every server on the overlay, multi-hop included, whatever contact lists the admin chose to share.
+
+Since 1.12.0 the packet interceptor refuses a `jabber:iq:search` request (`get` for the form, `set` for
+results) when its sender is on another server and its target is this server or one of its services, unless
+the sender's server, or a server it is a subdomain of, is listed in `plugin.federation.search.allowedServers`
+(*Users → Directory search*). The default list is empty.
+
+- **Both arrival paths.** Openfire runs interceptors in `IQRouter.route`, which a search reaches both from a
+  native S2S session and from an `iq-forward` the overlay delivers, so one check covers both.
+- **The requester gets an answer.** On a rejection Openfire only answers a local client session, so a remote
+  searcher would time out. The guard sends `forbidden` (type `auth`) itself; it travels back natively or over
+  the overlay like any reply.
+- **Local users are unaffected,** including their searches of other servers' services.
+- Refusals are counted per server for the admin page (the 64 most recent servers) and logged at INFO at most
+  once a minute per server.
+
+The plugin's own **federated directory** holds other servers' contacts, so it answers only this server's
+users, whatever the allowed list says.
+
 ## Admin API CSRF
 
 The Federation tab's API uses a double-submit token (a `fed-csrf` cookie echoed back as a request

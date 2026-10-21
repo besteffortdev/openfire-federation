@@ -179,6 +179,7 @@
         .btn-danger { background: var(--red-soft);  color: var(--red-ink);   border-color: #fbcfca; }
         .btn-danger:hover { background: #fdd; }
         .btn-warn   { background: var(--amber-soft); color: var(--amber-ink); border-color: #fde7ab; }
+        button:disabled { opacity: .45; cursor: not-allowed; }
         .btn-warn:hover { background: #fdecb8; }
         .btn-ghost  { background: var(--surface-2); color: #475467; }
         .btn-ghost:hover { background: #e6e9ee; }
@@ -276,6 +277,8 @@
             margin-left: auto; background: var(--green-soft); color: var(--green-ink);
             border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 700;
         }
+        /* On contact-list cards the chips follow the contact count, like the badges; the date takes the right. */
+        #contact-received-container .peer-map-count { margin-left: 0; }
         .peer-section-body  { border-top: 1px solid var(--line); }
 
         /* Badges */
@@ -782,6 +785,7 @@
         <div class="fed-subtabs">
             <button class="fed-subtab active" data-subtab="contact-sharing">Contact Sharing</button>
             <button class="fed-subtab"        data-subtab="contact-delivery">Sent lists</button>
+            <button class="fed-subtab"        data-subtab="contact-directory">Directory search</button>
         </div>
 
         <!-- Contact Sharing -->
@@ -831,6 +835,12 @@
                     contacts, which puts them in each chosen user's contact list under the roster group
                     name you pick. If the server stops sharing someone, they're removed. Removing the
                     mapping deletes the group, which takes the contacts out of every contact list.
+                    Instead of or as well as that, tick <em>Searchable in the federated directory</em>:
+                    your users can then look the contacts up and add the ones they want, and nothing is
+                    put in anyone's contact list. <em>Deny</em> keeps a server's entry but drops every list it
+                    sends and stops using its contacts until you allow it again. <em>Delete</em> removes the
+                    entry, for a server that stopped sharing or no longer exists; if it shares again, its list
+                    shows up as a new one.
                 </p>
                 <p id="contact-readonly-note" class="hint" style="display:none;color:var(--red-ink)">
                     The Openfire group provider is read-only (for example LDAP), so the plugin cannot
@@ -857,6 +867,38 @@
         </div>
 
         </div><!-- /subpanel-contact-delivery -->
+
+        <!-- Directory search -->
+        <div id="subpanel-contact-directory" class="fed-subpanel">
+
+        <div class="section-box">
+            <div class="section-box-header">Federated directory</div>
+            <div class="section-box-body">
+                <p class="hint" style="margin-top:0">
+                    A user search service (XEP-0055) over the received lists you make searchable on
+                    <em>Contact Sharing</em>. Your users find it in their client's user search or service
+                    discovery, look people up on other servers, and add or message the ones they want.
+                    Only this server's users can search it. It runs while at least one list is searchable.
+                </p>
+                <p id="directory-status" style="margin-bottom:0;font-size:13px">Loading…</p>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Searches from other servers</div>
+            <div class="section-box-body">
+                <p class="hint" style="margin-top:0">
+                    Openfire's Search plugin answers anyone with every user on this server, whatever you
+                    share, and other search services may do the same. So the federation plugin refuses
+                    user searches from other servers' users, over native S2S or the overlay, unless their
+                    server is ticked here. A server that tried is listed with how many searches were refused.
+                    Your own users' searches are not affected.
+                </p>
+                <div id="search-allowed-container"><p class="empty">Loading…</p></div>
+            </div>
+        </div>
+
+        </div><!-- /subpanel-contact-directory -->
     </div>
 
     <!-- Files panel -->

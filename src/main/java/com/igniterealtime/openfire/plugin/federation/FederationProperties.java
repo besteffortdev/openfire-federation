@@ -92,6 +92,10 @@ public final class FederationProperties {
     public static final SystemProperty<Integer> MAPPING_PING_SECONDS =
         intProp("plugin.federation.mappingPingSeconds", 30, 0);
 
+    /** Comma-separated servers whose users may search this server's users (XEP-0055); blank allows none. */
+    public static final SystemProperty<String> SEARCH_ALLOWED_SERVERS =
+        stringProp("plugin.federation.search.allowedServers", "");
+
     /** Whether HTTP File Upload shares are relayed to the servers that deliver them (default true). */
     public static final SystemProperty<Boolean> FILES_ENABLED =
         boolProp("plugin.federation.files.enabled", true, true);

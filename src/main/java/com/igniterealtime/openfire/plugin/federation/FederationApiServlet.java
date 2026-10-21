@@ -510,12 +510,15 @@ public class FederationApiServlet extends HttpServlet {
         Map<String, String> errors = cl.getMappingErrors();
         Set<String> origins = new TreeSet<>(received.keySet());
         origins.addAll(mappings.keySet());
+        // A denied server stays listed even when no list from it is held, so it can be allowed again.
+        origins.addAll(cl.getDenied());
         sb.append(",\"received\":");
         array(sb, origins, (b, o) -> {
             ContactListManager.ReceivedList list = received.get(o);
             ContactListManager.ListMapping m = mappings.get(o);
             b.append("{\"origin\":\"").append(esc(o))
              .append("\",\"reachable\":").append(cl.canRequestFrom(o))
+             .append(",\"denied\":").append(cl.isDenied(o))
              .append(",\"receivedAt\":").append(list == null ? "null" : String.valueOf(list.receivedAt()))
              .append(",\"crossedUntrusted\":").append(list != null && list.crossedUntrusted())
              .append(",\"count\":").append(list == null ? 0 : list.contacts().size())
@@ -529,10 +532,43 @@ public class FederationApiServlet extends HttpServlet {
             } else {
                 b.append("{\"displayName\":\"").append(esc(m.displayName())).append("\",\"groups\":");
                 strings(b, m.groups());
-                b.append("}");
+                b.append(",\"directory\":").append(m.directory()).append("}");
             }
             b.append("}");
         });
+
+        sb.append(",\"directory\":");
+        appendDirectory(sb, mgr);
+        sb.append("}");
+    }
+
+    /** The federated directory, and which servers may search this server's users. */
+    private static void appendDirectory(StringBuilder sb, FederationManager mgr) {
+        Map<String, List<ContactListManager.Contact>> lists = mgr.getContactLists().searchableLists();
+        RemoteSearchGuard guard = mgr.getSearchGuard();
+        Set<String> allowed = guard.allowedServers();
+        Map<String, RemoteSearchGuard.Refusal> refusals = guard.refusals();
+        // Every server the admin may want to tick: known routes, plus any already allowed or refused.
+        Set<String> servers = new TreeSet<>(allowed);
+        servers.addAll(refusals.keySet());
+        for (RouteEntry e : mgr.getRoutingTable().getAll()) servers.add(e.destination());
+
+        sb.append("{\"address\":\"").append(esc(FederationManager.directoryAddress()))
+          .append("\",\"running\":").append(mgr.isDirectoryRunning())
+          .append(",\"error\":\"").append(esc(mgr.getDirectoryError()))
+          .append("\",\"lists\":").append(lists.size())
+          .append(",\"contacts\":").append(lists.values().stream().mapToInt(List::size).sum())
+          .append(",\"allowedServers\":");
+        strings(sb, allowed);
+        sb.append(",\"servers\":");
+        strings(sb, servers);
+        sb.append(",\"refusals\":");
+        array(sb, refusals.entrySet(), (b, e) -> b
+            .append("{\"server\":\"").append(esc(e.getKey()))
+            .append("\",\"count\":").append(e.getValue().count())
+            .append(",\"lastAt\":").append(e.getValue().lastAt())
+            .append(",\"lastFrom\":\"").append(esc(e.getValue().lastFrom()))
+            .append("\",\"lastTo\":\"").append(esc(e.getValue().lastTo())).append("\"}"));
         sb.append("}");
     }
 
@@ -859,7 +895,7 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    /** Contact-list sharing: what this server shares with whom, and where received lists appear. */
+    /** Contact-list sharing, where received lists appear, and which servers may search this server's users. */
     private String contactListAction(String action, HttpServletRequest req, FederationManager mgr) {
         ContactListManager cl = mgr.getContactLists();
         switch (action) {
@@ -888,7 +924,6 @@ public class FederationApiServlet extends HttpServlet {
             case "map-contact-list": {
                 String origin = domainParam(req, "origin");
                 if (origin == null) return required("origin");
-                if (cl.groupsReadOnly()) return error("the group provider is read-only, so lists cannot be mapped");
                 List<String> groups = new ArrayList<>();
                 String raw = req.getParameter("groups");
                 if (raw != null) {
@@ -902,8 +937,14 @@ public class FederationApiServlet extends HttpServlet {
                         groups.add(t);
                     }
                 }
-                if (groups.isEmpty()) return error("choose at least one group, or all users");
-                cl.setMapping(origin, param(req, "displayName"), groups);
+                boolean directory = Boolean.parseBoolean(req.getParameter("directory"));
+                if (groups.isEmpty() && !directory) {
+                    return error("choose at least one group or all users, or make the list searchable");
+                }
+                if (!groups.isEmpty() && cl.groupsReadOnly()) {
+                    return error("the group provider is read-only, so lists cannot be put in rosters");
+                }
+                cl.setMapping(origin, param(req, "displayName"), groups, directory);
                 return OK;
             }
             case "unmap-contact-list": {
@@ -912,9 +953,35 @@ public class FederationApiServlet extends HttpServlet {
                 cl.removeMapping(origin);
                 return OK;
             }
+            case "deny-contact-list": {
+                String origin = domainParam(req, "origin");
+                if (origin == null) return required("origin");
+                cl.denyOrigin(origin);
+                return OK;
+            }
+            case "allow-contact-list": {
+                String origin = domainParam(req, "origin");
+                if (origin == null) return required("origin");
+                cl.allowOrigin(origin);
+                return OK;
+            }
+            case "delete-contact-list": {
+                String origin = domainParam(req, "origin");
+                if (origin == null) return required("origin");
+                cl.deleteOrigin(origin);
+                return OK;
+            }
             case "resend-contact-lists":
                 cl.resendAll();
                 return OK;
+            case "set-search-allowed": {
+                List<String> servers = csvDomains(req, "servers");
+                for (String s : servers) {
+                    if (!isPlausibleDomain(s)) return error("not a server address: " + s);
+                }
+                mgr.getSearchGuard().setAllowedServers(servers);
+                return OK;
+            }
             default:
                 return null;
         }

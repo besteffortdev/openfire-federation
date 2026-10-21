@@ -162,6 +162,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         handleOverlayBounce(packet);
 
+        // IQRouter runs interceptors on overlay deliveries too, so this covers both ways a search arrives.
+        if (incoming && manager.getSearchGuard().refuse(packet)) {
+            throw new PacketRejectedException("Refused a user search from " + packet.getFrom());
+        }
+
         if (incoming) answerSharedContact(packet);
 
         rewriteInboundFileShare(packet);

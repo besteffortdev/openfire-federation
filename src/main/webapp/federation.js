@@ -793,6 +793,7 @@ function renderUsersTab(cl) {
     renderLocalGroups();
     renderReceivedLists(cl.received || [], cl.localGroups || [], !!cl.groupsReadOnly);
     renderSentLists(cl.sent || []);
+    renderDirectory(cl.directory || {});
 }
 
 // A contact as "Name <jid>" (or just the JID when its server gave no name).
@@ -1008,26 +1009,40 @@ function renderReceivedList(r, localGroups, readOnly) {
     const display = edit ? edit.displayName : (m ? m.displayName : o);
     const groups = new Set(edit ? edit.groups : (m ? m.groups : []));
     const everybody = groups.has('*');
+    const directory = edit ? edit.directory : !!(m && m.directory);
+    const denied = !!r.denied;
+    // A denied list keeps its mapping but is not used, so its controls are locked until it is allowed.
+    const locked = readOnly || denied;
 
     const received = r.receivedAt
         ? 'received ' + new Date(r.receivedAt).toLocaleString()
         : 'not received since restart';
-    const mapInfo = m ? '<span class="peer-map-count">mapped</span>' : '';
+    const mapInfo = denied
+        ? '<span class="badge badge-untrusted" title="Every list this server sends is dropped">denied</span>'
+        : (m && m.groups.length ? '<span class="peer-map-count">in rosters</span>' : '')
+          + (m && m.directory ? '<span class="peer-map-count">searchable</span>' : '');
     const untrustedBadge = r.crossedUntrusted
         ? '<span class="badge badge-untrusted" title="An untrusted server relayed this list and could have altered it. '
           + 'Check the contacts before mapping it.">via untrusted link</span>' : '';
-    const status = m
-        ? `Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
-          + (m.groups.includes('*') ? 'all users' : escHtml(m.groups.join(', ')))
-          + ` as <strong>${escHtml(m.displayName)}</strong>. Untick everything and save to unmap.`
-        : 'Not mapped — no local user sees these contacts yet.';
+    const rosterStatus = !m ? 'Not mapped — no local user sees these contacts yet.'
+        : m.groups.length
+            ? `Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
+              + (m.groups.includes('*') ? 'all users' : escHtml(m.groups.join(', ')))
+              + ` as <strong>${escHtml(m.displayName)}</strong>.`
+            : 'In no contact list.';
+    const status = denied
+        ? `Denied: every list ${escHtml(o)} sends is dropped, and these contacts are in no contact list or directory.`
+          + (m ? ' Your mapping is kept; Allow uses it again.' : ' Allow accepts its lists again.')
+        : rosterStatus
+          + (m && m.directory ? ' Your users can find these contacts in the federated directory.' : '')
+          + (m ? ' Untick everything and save to unmap.' : '');
     const error = r.error ? `<p class="hint" style="color:var(--red-ink);margin:6px 0 0">${escHtml(r.error)}</p>` : '';
 
     const listId = 'cmgroups-' + id;
     const groupRows = localGroups.map(g => `
         <label class="exposed-room">
             <input type="checkbox" class="cm-group" value="${escHtml(g)}" ${groups.has(g) ? 'checked' : ''}
-                   ${everybody || readOnly ? 'disabled' : ''} onchange="captureContactMapEdit('${oj}')">
+                   ${everybody || locked ? 'disabled' : ''} onchange="captureContactMapEdit('${oj}')">
             <span>${escHtml(g)}</span>
         </label>`).join('');
 
@@ -1038,13 +1053,23 @@ function renderReceivedList(r, localGroups, readOnly) {
               ? `<tr><td colspan="2" class="hint">… and ${r.count - r.contacts.length} more</td></tr>` : '');
 
     return card({
-        list: 'contact-received', key: o, id: 'cm-' + id,
+        list: 'contact-received', key: o, id: 'cm-' + id, startCollapsed: true,
         header: `<span class="status-dot ${r.reachable ? 'green' : 'grey'}" title="${r.reachable ? 'reachable' : 'unreachable'}"></span>
             <strong>${escHtml(o)}</strong>
             <span class="peer-room-count">${r.count} contact(s)</span>
             ${mapInfo}
             ${untrustedBadge}
-            <span class="hint" style="margin-left:auto">${received}</span>`,
+            <span class="hint" style="margin-left:auto">${received}</span>
+            <span class="cm-actions" style="display:inline-flex;gap:4px;margin-left:10px" onclick="event.stopPropagation()">
+                ${denied
+                    ? `<button class="btn-small btn-ghost cm-allow" title="Accept the lists ${escHtml(o)} sends again"
+                               onclick="allowContactList('${oj}')">Allow</button>`
+                    : `<button class="btn-small btn-warn cm-deny" title="Drop every list ${escHtml(o)} sends; this entry stays"
+                               onclick="denyContactList('${oj}')">Deny</button>`}
+                <button class="btn-small btn-danger cm-delete"
+                        title="Remove this entry; if ${escHtml(o)} shares a list again, it shows up as new"
+                        onclick="deleteContactList('${oj}')">Delete</button>
+            </span>`,
         body: `
             <div class="exposed-cols" style="padding:12px 14px;align-items:flex-start">
                 <div class="exposed-col" style="flex:0 0 300px">
@@ -1055,21 +1080,32 @@ function renderReceivedList(r, localGroups, readOnly) {
                     <label style="display:flex;flex-direction:column;font-size:12px;color:#555;margin-bottom:8px">
                         Roster group name
                         <input type="text" id="cm-name-${id}" value="${escHtml(display)}" style="margin-top:3px"
-                               oninput="captureContactMapEdit('${oj}')" ${readOnly ? 'disabled' : ''}>
+                               oninput="captureContactMapEdit('${oj}')" ${locked ? 'disabled' : ''}>
                     </label>
                     <label class="exposed-room" style="font-weight:600">
-                        <input type="checkbox" class="cm-all" ${everybody ? 'checked' : ''} ${readOnly ? 'disabled' : ''}
+                        <input type="checkbox" class="cm-all" ${everybody ? 'checked' : ''} ${locked ? 'disabled' : ''}
                                onchange="captureContactMapEdit('${oj}')">
                         <span>Show to all users</span>
                     </label>
                     ${filteredChecklist(listId, groupRows, 'Filter groups…', checklistFilters,
                         '<p class="empty" style="margin:4px 0">No local groups — create one in Openfire, or show the list to all users.</p>')}
-                    <div style="margin-top:8px">
-                        <button class="btn-small btn-primary" onclick="saveContactMapping('${oj}')" ${readOnly ? 'disabled' : ''}>
+                    <div style="margin-top:8px;display:flex;gap:4px">
+                        <button class="btn-small btn-primary" onclick="saveContactMapping('${oj}')" ${denied ? 'disabled' : ''}>
                             ${m ? 'Save' : 'Map'}</button>
-                        ${edit ? `<button class="btn-small btn-ghost" style="margin-left:4px"
+                        ${edit ? `<button class="btn-small btn-ghost"
                                           onclick="discardContactMapEdit('${oj}')">Discard</button>` : ''}
                     </div>
+                </div>
+                <div class="exposed-col" style="flex:0 0 230px">
+                    <div class="exposed-col-h">Federated directory
+                        <span class="exposed-col-sub">Your users can look these contacts up and add the ones they
+                            want. Nothing is put in any contact list. Applied with the ${m ? 'Save' : 'Map'} button.</span>
+                    </div>
+                    <label class="exposed-room" style="font-weight:600">
+                        <input type="checkbox" class="cm-dir" ${directory ? 'checked' : ''} ${denied ? 'disabled' : ''}
+                               onchange="captureContactMapEdit('${oj}')">
+                        <span>Searchable in the federated directory</span>
+                    </label>
                 </div>
                 <div class="exposed-col">
                     <div class="exposed-col-h">Contacts
@@ -1091,10 +1127,13 @@ function readContactMapForm(origin) {
     const card = document.getElementById('cm-' + id);
     if (!card) return null;
     const all = card.querySelector('.cm-all');
-    const groups = all && all.checked
-        ? ['*']
+    const dir = card.querySelector('.cm-dir');
+    // A read-only group provider cannot hold a roster group, so only the directory choice is sent.
+    const readOnly = !!(lastData.contactLists && lastData.contactLists.groupsReadOnly);
+    const groups = readOnly ? []
+        : all && all.checked ? ['*']
         : [...card.querySelectorAll('.cm-group:checked')].map(i => i.value);
-    return { displayName: document.getElementById('cm-name-' + id).value, groups };
+    return { displayName: document.getElementById('cm-name-' + id).value, groups, directory: !!(dir && dir.checked) };
 }
 
 function captureContactMapEdit(origin) {
@@ -1115,25 +1154,127 @@ function discardContactMapEdit(origin) {
 function saveContactMapping(origin) {
     const f = readContactMapForm(origin);
     if (!f) return;
-    if (!f.groups.length) {
+    if (!f.groups.length && !f.directory) {
         // Nothing ticked on a mapped list = unmap it; on an unmapped one there is nothing to save.
         if (lastMappingOf(origin)) { unmapContactList(origin); return; }
-        alert('Choose at least one group, or Show to all users.');
+        alert('Choose at least one group or Show to all users, or make the list searchable.');
         return;
     }
-    save({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n') },
-         'Mapping saved')
+    save({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n'),
+           directory: f.directory }, 'Mapping saved')
         .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
 }
 
-function lastMappingOf(origin) {
+function receivedEntry(origin) {
     const received = (lastData.contactLists && lastData.contactLists.received) || [];
-    const r = received.find(x => x.origin === origin);
+    return received.find(x => x.origin === origin) || null;
+}
+
+function lastMappingOf(origin) {
+    const r = receivedEntry(origin);
     return r ? r.mapping : null;
 }
 
 function unmapContactList(origin) {
     save({ action: 'unmap-contact-list', origin }, 'Mapping removed')
+        .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
+}
+
+// Unsaved ticks under "Searches from other servers", or null when the server's list is shown as is.
+let editedSearchAllowed = null;
+
+function renderDirectory(d) {
+    const status = document.getElementById('directory-status');
+    if (status) status.innerHTML = directoryStatus(d);
+    const el = document.getElementById('search-allowed-container');
+    if (!el) return;
+    const allowed = editedSearchAllowed || new Set(d.allowedServers || []);
+    const refusals = new Map((d.refusals || []).map(r => [r.server, r]));
+    const rows = (d.servers || []).map(s => {
+        const r = refusals.get(s);
+        const refused = r
+            ? `<span class="badge badge-out" title="Last: ${escHtml(r.lastFrom)} searched ${escHtml(r.lastTo)}">`
+              + `refused ${r.count}× · last ${escHtml(new Date(r.lastAt).toLocaleString())}</span>` : '';
+        return `
+            <label class="exposed-room">
+                <input type="checkbox" class="search-allow-cb" value="${escHtml(s)}" ${allowed.has(s) ? 'checked' : ''}
+                       onchange="captureSearchAllowedEdits()">
+                <span>${escHtml(s)}</span> ${refused}
+            </label>`;
+    }).join('');
+    const focus = rememberFocus(el);
+    el.innerHTML = filteredChecklist('search-allowed', rows, 'Filter servers…', checklistFilters,
+            '<p class="empty" style="margin:4px 0">No other server is known yet.</p>')
+        + `<div style="margin-top:8px">
+               <button class="btn-small btn-primary" onclick="saveSearchAllowed()">Save</button>
+               ${editedSearchAllowed ? `<button class="btn-small btn-ghost" style="margin-left:4px"
+                                                onclick="discardSearchAllowed()">Discard</button>` : ''}
+           </div>`;
+    reapplyChecklistFilters();
+    restoreFocus(focus);
+}
+
+function directoryStatus(d) {
+    const addr = `<code>${escHtml(d.address || '')}</code>`;
+    if (d.error) return `<span class="status-dot orange"></span> ${escHtml(d.error)}`;
+    if (!d.running) {
+        return `<span class="status-dot grey"></span> Not running. Tick <em>Searchable in the federated directory</em> `
+            + `on a received list under Contact Sharing to start it at ${addr}.`;
+    }
+    return `<span class="status-dot green"></span> Running at ${addr}: ${d.contacts} contact(s) from `
+        + `${d.lists} server(s) searchable.`;
+}
+
+function currentSearchAllowed() {
+    const d = (lastData.contactLists && lastData.contactLists.directory) || {};
+    return new Set(d.allowedServers || []);
+}
+
+function captureSearchAllowedEdits() {
+    const set = captureChecks('.search-allow-cb', editedSearchAllowed || currentSearchAllowed());
+    if (set) editedSearchAllowed = set;
+}
+
+function discardSearchAllowed() {
+    editedSearchAllowed = null;
+    refresh();
+}
+
+function saveSearchAllowed() {
+    const servers = Array.from(editedSearchAllowed || currentSearchAllowed());
+    save({ action: 'set-search-allowed', servers: servers.join(',') },
+         servers.length ? 'Searches allowed' : 'Searches refused from every server')
+        .then(result => { if (result && result.ok) editedSearchAllowed = null; });
+}
+
+// What removing a mapping does, for the confirmations: "<roster part> and <directory part>".
+function mappingEffect(m) {
+    const parts = [];
+    if (m.groups.length) parts.push('these contacts leave every contact list');
+    if (m.directory) parts.push('they leave the federated directory');
+    return parts.join(' and ');
+}
+
+function denyContactList(origin) {
+    const m = lastMappingOf(origin);
+    if (m && !confirm('Deny contact lists from ' + origin + '?\n\n'
+            + 'Every list it sends is dropped, and while it stays denied ' + mappingEffect(m) + '. '
+            + 'The entry and your mapping stay; Allow undoes this.')) return;
+    save({ action: 'deny-contact-list', origin }, 'Denied');
+}
+
+function allowContactList(origin) {
+    save({ action: 'allow-contact-list', origin }, 'Allowed — its list was requested');
+}
+
+function deleteContactList(origin) {
+    const r = receivedEntry(origin);
+    const m = r && r.mapping;
+    if ((m || (r && r.denied)) && !confirm('Delete the contact list from ' + origin + '?\n\n'
+            + (m ? 'Its mapping goes too: ' + mappingEffect(m) + '. ' : '')
+            + (r.denied ? 'It is no longer denied. ' : '')
+            + 'If ' + origin + ' shares a list again, it shows up here as a new one.')) return;
+    save({ action: 'delete-contact-list', origin }, 'Deleted')
         .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
 }
 

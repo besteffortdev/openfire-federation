@@ -76,6 +76,7 @@ if destination != our own domain:
 contact-list-request → send our list for `origin` (empty if nothing is shared with it),
                        at most once per 30 s per `origin` here
 contact-list:
+    if `origin` is denied here (an admin choice, see below) → drop
     keep only bare JIDs whose domain is `origin`; cap the count (5000 here)
     if `origin` is not mapped here:
         empty → forget any stored list; stop
@@ -155,6 +156,23 @@ Entirely local; nothing about it crosses the wire. This implementation does noth
 `federation-contacts-<origin>`, whose members are the remote contacts, shown in the rosters of the
 mapped groups (or of every user). Openfire's roster engine gives each recipient a roster item with
 subscription `to`. Unmapping deletes the group, which removes the contacts from every roster.
+
+This implementation offers a second use, chosen per list and combinable with the first: **searchable in
+the federated directory**. The receiver runs a user search service (XEP-0055) at `directory.<its domain>`
+over the lists marked so, for its own users only. A contact found there is in nobody's roster until a user
+adds it, and that subscription is answered by the sharing server as described above. A list that is only
+searchable has no group. Either use counts as mapped for the budget and request rules above.
+
+A receiver MAY also refuse an origin's lists outright. This implementation offers two admin actions, both
+local; the origin is not told and keeps sending on its usual schedule, and what the receiver shares with it
+is unaffected:
+
+- **Deny** keeps the entry and the admin's mapping but drops every list the origin sends, and stops using
+  the one held: its contacts leave rosters and the directory, and no `contact-list-request` goes to it.
+  **Allow** undoes this and sends a `contact-list-request` for a fresh list.
+- **Delete** forgets the origin: its list, any mapping and any deny. It is meant for a server that stopped
+  sharing or no longer exists, whose mapped list would otherwise be kept forever. A list the origin sends
+  later is treated as new.
 
 A receiver MAY keep a list after the origin becomes unreachable (this one does, so a link flap does
 not empty everyone's contact list) and MUST apply a withdrawal when it arrives.

@@ -139,6 +139,27 @@
     every roster.
 </p>
 <p>
+    Instead of or as well as rosters, tick <em>Searchable in the federated directory</em> on a received
+    list. The plugin then runs a user search service (XEP‑0055) at <code>directory.&lt;your domain&gt;</code>,
+    which your users find in their client's user search or service discovery. They look people up by
+    name or address and add or message the ones they want; nothing is put in any roster and no group is
+    created for a list that is only searchable. Only this server's users can search it.
+</p>
+<p>
+    Each card's header has two buttons. <em>Deny</em> keeps the entry, marked <em>denied</em>, but drops
+    every list that server sends and stops using its contacts: they leave rosters and the directory, while
+    your mapping is kept. <em>Allow</em> undoes it and asks for a fresh list. <em>Delete</em> removes the
+    entry, its list and its mapping, for a server that stopped sharing or no longer exists; if it shares
+    again, its list shows up as a new one. Neither is sent to the other server, and what you share with it
+    does not change.
+</p>
+<p>
+    The <em>Directory search</em> sub‑tab shows the directory's state and the servers allowed to search
+    <em>this</em> server's users. Openfire's Search plugin answers anyone with every user on the server,
+    whatever you share, so the plugin refuses user searches from other servers' users unless their server
+    is ticked there. Servers that tried are listed with a count, so you can see who is asking.
+</p>
+<p>
     This replaces the online‑user directory and the XEP‑0048 bookmark push from 1.10.12 and earlier.
     Bookmarks injected by that feature are removed from users' storage once, on the first start of
     1.10.13.

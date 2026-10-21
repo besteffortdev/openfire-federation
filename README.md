@@ -66,6 +66,13 @@ the server on its list, which is exactly what room B needs and nothing more.*
   groups and the contacts appear in those users' rosters, with presence and avatars and no approval
   prompts. Presence is one‑way: each server decides which of its own users the others may see. Lists
   cross an untrusted link only where both admins allow it on that link (per‑peer setting).
+- **Federated directory** — make a received contact list *searchable* instead of (or as well as) putting it
+  in rosters: your users look people up from their client's user search (XEP‑0055) at
+  `directory.<your domain>` and add the ones they want. A list that is only searchable puts nothing in any
+  roster and creates no user or group. Only local users can search it.
+- **User-search guard** — Openfire's Search plugin answers anyone with every user on the server. The plugin
+  refuses `jabber:iq:search` from other servers' users, over native S2S or the overlay, unless the admin
+  allowed that server.
 - **Multi‑hop forwarding** — rooms federate across servers that aren't directly connected, relayed hop‑by‑hop.
 - **Dynamic routing** — a distance‑vector (Bellman‑Ford) routing table is learned automatically via gossip
   when peers connect, and reconverges when the topology changes.
@@ -152,7 +159,7 @@ The **Federation** tab has three sub‑views:
 | **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
 | **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
 | **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers, one collapsed card per server showing how many federated rooms it offers. |
-| **Users** | *Contact Sharing*: local groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups. *Sent lists*: what each server currently receives. |
+| **Users** | *Contact Sharing*: local groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups, made searchable in the federated directory, or both. Each card's header has *Deny* (keep the entry, drop every list that server sends and stop using its contacts; *Allow* undoes it) and *Delete* (remove the entry of a server that stopped sharing or is gone; a later list shows up as new). *Sent lists*: what each server currently receives. *Directory search*: the federated directory's state, and which servers may search this server's users (refused attempts are counted per server). |
 
 Every table sorts by any column: click its header for ascending, again for descending, a third time for
 the original order (numbers sort as numbers, anything else alphabetically; the choice is remembered per
@@ -223,6 +230,7 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.keepaliveSeconds` | `240` | Interval for lightweight keepalive pings to reachable peers. Min 30. Auto‑clamped below Openfire's S2S idle timeout. |
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
+| `plugin.federation.search.allowedServers` | *(empty)* | Comma‑separated servers whose users may search this server's users (XEP‑0055), for example through Openfire's Search plugin. Empty refuses every other server. Also in *Users → Directory search*. |
 | `plugin.federation.peerAllowlist` | `true` | Secure‑by‑default trust mode. Only configured peers may drive federation; every action from any other peer is rejected. Set `false` for open federation. See [Security](#security). |
 | `plugin.federation.files.enabled` | `true` | Federate HTTP File Upload shares: relay content to the servers that deliver the message and rewrite the link to their local `/federation-files` endpoint (HTTP‑bind port). Also in the *Files* tab. |
 | `plugin.federation.files.maxSizeMB` | `25` | Largest file the relay will stage, transfer, or accept. Also in the *Files* tab. |
@@ -317,6 +325,7 @@ talking to. The controls at a glance:
 | **Anti‑spoofing** | Every forwarded stanza's `from` is validated per hop — no peer may speak for your users or from the wrong direction. |
 | **Per‑room visibility** | Each room lists which servers may see it (default: none); the set travels with the advertisement so off‑path servers never learn it exists. |
 | **Mapping consent** | Mapping requires the other admin's **Accept**; each lifecycle message is valid only from the matching state, a per‑mapping token is re‑checked on every later one, and room traffic must arrive through a mapping on that room. |
+| **User-search guard** | `jabber:iq:search` from another server's user is refused (`forbidden`) unless that server is allowed, so the Search plugin cannot hand out your user list. The federated directory serves local users only. |
 | **Presence & PEP privacy** | Relayed presence probes are answered only for subscribers; relayed PEP reads honour each node's access model. |
 | **Admin API CSRF** | A double‑submit `fed-csrf` token guards all Federation‑tab API calls. |
 | **File filtering & AV** | Extension allowlist (egress + ingress) + magic‑number sniff + optional ClamAV (fails closed); transit hops never decode content. |
