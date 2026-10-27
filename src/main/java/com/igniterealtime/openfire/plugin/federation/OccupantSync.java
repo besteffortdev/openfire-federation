@@ -4,6 +4,7 @@ import com.igniterealtime.openfire.plugin.federation.FederatedRoomManager.Virtua
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationSender;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomCatchup;
 import org.dom4j.Element;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
@@ -247,14 +248,19 @@ public final class OccupantSync {
                   leavingNick, localRoom, origin, arrivedVia);
     }
 
-    /** Re-sends our occupants to every mapped room on destinations that just became reachable. */
+    /**
+     * Re-sends our occupants to every mapped room on destinations that just became reachable, and
+     * starts a catch-up on each active mapping for the room traffic the outage lost.
+     */
     public void resyncMappedDestinations(Collection<String> destinations) {
+        RoomCatchup catchup = manager.getRoomCatchup();
         for (String dest : destinations) {
             if (!manager.getRoutingTable().isReachable(dest)) continue;
             for (List<RoomMapping> mappings : rooms().getLocalMappings().values()) {
                 for (RoomMapping m : mappings) {
                     if (m.remoteDomain().equals(dest)) {
                         pushInitialSyncPresences(m.localRoomJid(), dest, m.remoteRoomJid());
+                        if (catchup != null) catchup.pathBack(m);
                     }
                 }
             }

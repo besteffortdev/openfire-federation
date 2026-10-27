@@ -92,6 +92,14 @@ public final class FederationProperties {
     public static final SystemProperty<Integer> MAPPING_PING_SECONDS =
         intProp("plugin.federation.mappingPingSeconds", 30, 0);
 
+    /** Whether a mapping whose path comes back replays the room traffic it missed (default true). */
+    public static final SystemProperty<Boolean> CATCHUP_ENABLED =
+        boolProp("plugin.federation.catchup.enabled", true, true);
+
+    /** Hours of room traffic the journal keeps and a catch-up may replay; values above 168 are lowered to 168. */
+    public static final SystemProperty<Integer> CATCHUP_WINDOW_HOURS =
+        intProp("plugin.federation.catchup.windowHours", 24, 1);
+
     /** Comma-separated servers whose users may search this server's users (XEP-0055); blank allows none. */
     public static final SystemProperty<String> SEARCH_ALLOWED_SERVERS =
         stringProp("plugin.federation.search.allowedServers", "");

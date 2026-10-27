@@ -55,26 +55,33 @@ public class FederationIQHandler extends IQHandler {
     private final InboundValidation validation;
     private final MucTrafficHandler mucTraffic;
     private final DirectTrafficHandler directTraffic;
+    private final RoomCatchup roomCatchup;
 
-    FederationIQHandler(FederationManager manager, InboundValidation validation,
-                               MucTrafficHandler mucTraffic, DirectTrafficHandler directTraffic) {
+    FederationIQHandler(FederationManager manager, InboundValidation validation, MucTrafficHandler mucTraffic,
+                        DirectTrafficHandler directTraffic, RoomCatchup roomCatchup) {
         super("Federation IQ Handler");
         this.manager       = manager;
         this.validation    = validation;
         this.mucTraffic    = mucTraffic;
         this.directTraffic = directTraffic;
+        this.roomCatchup   = roomCatchup;
         this.info          = new IQHandlerInfo(FederationStanzaFactory.ELEMENT, FederationStanzaFactory.NS);
     }
 
     /** Creates the IQ handler with its traffic handlers, which the manager exposes to the other hooks. */
     public static FederationIQHandler create(FederationManager manager) {
         InboundValidation validation = new InboundValidation(manager);
-        return new FederationIQHandler(manager, validation,
-                new MucTrafficHandler(manager, validation), new DirectTrafficHandler(manager, validation));
+        RoomCatchup catchup = new RoomCatchup(manager, validation);
+        return new FederationIQHandler(manager, validation, new MucTrafficHandler(manager, validation, catchup),
+                new DirectTrafficHandler(manager, validation), catchup);
     }
 
     public MucTrafficHandler getMucTraffic() {
         return mucTraffic;
+    }
+
+    public RoomCatchup getRoomCatchup() {
+        return roomCatchup;
     }
 
     public DirectTrafficHandler getDirectTraffic() {
@@ -131,6 +138,8 @@ public class FederationIQHandler extends IQHandler {
             case "mapping-ping"        -> handleMappingPing(fromDomain, child);
             case "mapping-pong"        -> handleMappingPong(fromDomain, child);
             case "muc-forward"         -> mucTraffic.handle(fromDomain, child);
+            case RoomCatchup.REQUEST, RoomCatchup.DONE
+                                       -> roomCatchup.handle(child.getName(), fromDomain, child);
             case "direct-forward"      -> directTraffic.handleDirectForward(fromDomain, child);
             case "presence-forward"    -> directTraffic.handlePresenceForward(fromDomain, child);
             case "iq-forward"          -> directTraffic.handleIqForward(fromDomain, child);
@@ -622,8 +631,7 @@ public class FederationIQHandler extends IQHandler {
     private boolean tokenOk(String localJid, String remoteDomain, String incomingToken, String op) {
         RoomMapping m = manager.getRoomManager().getMappingForLocal(localJid, remoteDomain);
         if (m == null) return false;
-        String stored = m.token();
-        if (stored == null || stored.isEmpty() || stored.equals(incomingToken)) return true;
+        if (m.acceptsToken(incomingToken)) return true;
         Log.warn("SECURITY: dropping mapping-{} for {} from {} — token mismatch", op, localJid, remoteDomain);
         return false;
     }

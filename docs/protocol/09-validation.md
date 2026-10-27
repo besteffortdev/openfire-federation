@@ -203,7 +203,8 @@ claimedOriginOk(sender, origin):
 
 Applies, from an untrusted sender, to `room-advertisement`, `room-mapping`, every
 `room-mapping-*` lifecycle action, `room-unmap`, `mapping-ping`/`mapping-pong` (on both the relay and
-the local branch), and to `muc-forward`'s `src`.
+the local branch), `room-catchup-request`/`room-catchup-done` (both branches too), and to
+`muc-forward`'s `src`.
 
 Unlike rule 3, an **unroutable** origin is refused: a control action for a server you cannot reach is
 not one you could carry out, so there is nothing to give the benefit of the doubt to. Without this
@@ -234,6 +235,7 @@ Where it applies, and against what:
 | `room-mapping`, local branch | **our own domain** |
 | `room-mapping-*` lifecycle, `room-unmap`, relay | the `destination` |
 | `mapping-ping` / `mapping-pong`, relay | the `destination` |
+| `room-catchup-request` / `room-catchup-done` | the `destination`, or our own domain when we are it |
 | `muc-forward` | the `destination`, or our own domain when we are it |
 | `file-*`, relay branch | the `destination` |
 | `file-*`, addressed to us | **our own domain** |
@@ -443,6 +445,57 @@ room injection), so whatever the sender forwards is shown. Forwarding refused tr
 kicked, muted or never-joined user post into, or appear present in, every federated copy of the room.
 (Since 1.10.11.)
 
+### Room catch-up
+
+Applies to the replay of missed room traffic ([05](05-muc-traffic.md#catch-up-after-a-split)). Since
+1.13.0.
+
+```
+request (room-catchup-request, at the destination):
+    origin passes rule 3b                                     → else drop, SECURITY
+    our own domain is exposed to an untrusted sender          → else drop, SECURITY
+    the named room is federation-enabled, with an ACTIVE mapping
+      to origin for the named remote room                     → else drop, SECURITY
+    the token matches, as for lifecycle actions               → else drop, SECURITY
+    answer from no earlier than the window, or than the mapping's activation
+
+replay (muc-forward carrying sent):
+    catchup, when present, names a request of ours from the last
+      60 s, on the mapping with targetRoom and src            → else drop, SECURITY
+    no more items for that request than its max               → else drop, SECURITY
+    sent is valid, within the window, and not before the
+      mapping's activation or this server's journal began    → else drop
+    sent later than now + 5 minutes                           → treat as now
+    duplicate check against a record covering the window
+    replace every <delay/> in the payload with the room's own, stamped sent
+```
+
+Why each condition:
+
+- **Origin, exposure, mapping, token.** These are the four checks a mapping lifecycle action passes. A
+  request reads a day of a room's traffic, so it needs at least the standing it takes to disable the
+  mapping. Without the mapping check, any reachable peer could read the recent history of any
+  federated room whose JID it knows.
+- **Not before activation.** An admin who disables a mapping, or who maps a room for the first time,
+  has not consented to the traffic from before. Both ends enforce it: the responder when choosing where
+  to start, and the receiver on each replay.
+- **Bound to a request.** An item claiming to answer a catch-up must answer a page this server asked
+  for, on that mapping, and no page brings more items than it asked for. A replay sent on fan-out carries no `catchup`
+  and is bounded by the window and the duplicate check instead.
+- **Not before our journal.** A server that lost its journal cannot tell an old message it already has
+  from one it missed. Refusing everything older than its journal turns that loss into a missed
+  catch-up instead of the whole window delivered twice.
+- **Future stamps clamped.** A stamp in the future would pin a message below everything newer in every
+  client's history.
+- **The room's own `<delay/>`.** Any `<delay/>` in a payload was written by whoever sent it. On a replay,
+  the only time clients should see is the one this room vouches for.
+- **Duplicates across the window.** A replay is old by definition. A duplicate record that only
+  remembers recent arrivals, or that a restart emptied, would let a replay deliver a message twice.
+
+None of this makes `sent` trustworthy. It is the responder's word. A mapped peer can backdate what it
+carries by up to the window, much as a trusted peer can already misrepresent the users it relays
+([rule 3](#the-trusteduntrusted-asymmetry)).
+
 ### Presence probes and PEP reads
 
 ```
@@ -566,6 +619,9 @@ minute. This implementation's values:
 | Domains remembered as answering mapping probes | 1024, only ones we route to; pongs for an unprobed domain are ignored |
 | `hubs` on one `muc-forward` | 32 entries; a longer trail is dropped |
 | Message arrivals remembered per mapped room | 2000 (origin room, origin stanza-id) pairs |
+| Catch-up page | `max` clamped to 1–100 items; at most 10 × `max` journal entries examined; one page in flight per mapping; 2,000 items per mapping per hour |
+| Catch-up per mapping | one in progress; 1,000 items; abandoned after 60 s without `room-catchup-done` |
+| Replay age | `sent` within the 24-hour window; more than 5 minutes ahead is treated as now |
 
 The untrusted route bound is what keeps the rest small: most caches are keyed by origin server, and
 an untrusted peer can only claim origins it has a route for.
@@ -593,6 +649,9 @@ an untrusted peer can only claim origins it has a route for.
 | Room identity elements | `muc-forward` message injection | strip; fresh stanza-id |
 | Room accepted it (sender side) | outbound groupchat and join | do not forward |
 | Author's server only | moderation, outbound and `muc-forward` injection | do not forward / drop |
+| Catch-up standing | `room-catchup-request` | drop |
+| Replay binding | `muc-forward` carrying `catchup` | drop |
+| Replay time | `muc-forward` carrying `sent` | drop if outside the window; future treated as now |
 | Lifecycle state | mapping accept/reject/disable/enable | drop |
 | Subscription | presence probe answering | do not answer |
 | PEP access model | `iq-forward` PEP items GET | `forbidden` |

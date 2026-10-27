@@ -46,6 +46,7 @@ The action element's name selects the handler. The complete set:
 | `room-mapping`, `room-mapping-accept`, `room-mapping-reject`, `room-mapping-disable`, `room-mapping-enable`, `room-unmap` | [04](04-rooms.md) | routed |
 | `mapping-ping`, `mapping-pong` | [04](04-rooms.md) | routed |
 | `muc-forward` | [05](05-muc-traffic.md) | routed |
+| `room-catchup-request`, `room-catchup-done` | [05](05-muc-traffic.md#catch-up-after-a-split) | routed |
 | `direct-forward`, `presence-forward`, `iq-forward` | [06](06-direct-traffic.md) | routed |
 | `file-request`, `file-offer`, `file-chunk`, `file-error` | [07](07-file-relay.md) | routed |
 | `contact-list`, `contact-list-request` | [08](08-contact-lists.md) | routed |

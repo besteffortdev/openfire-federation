@@ -235,15 +235,31 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (!filesOn && relay != null && relay.isLocalUploadShare(msg)) {
             Message notice = new Message(msg.getElement().createCopy());
             relay.replaceWithSenderBlockedNotice(notice.getElement());
+            journalLocalMessage(msg, roomJid, notice, null);
             for (RoomMapping mapping : mappings) forwardToMapped(notice, mapping, null);
             return;
         }
 
         Element fileAnn = (filesOn && relay != null)
                 ? relay.annotationForOutbound(msg) : null;
+        journalLocalMessage(msg, roomJid, msg, fileAnn);
         for (RoomMapping mapping : mappings) {
             forwardToMapped(msg, mapping, fileAnn);
         }
+    }
+
+    /**
+     * Records a local user's message in the room journal as it is forwarded, so a mapping that was
+     * cut off can catch up on it. Subject changes and messages without a room stanza-id are left out.
+     */
+    private void journalLocalMessage(Message msg, String roomJid, Message forwarded, Element fileAnn) {
+        MUCRoom room = manager.findLocalMucRoom(roomJid);
+        String sid = StanzaIDUtil.findFirstUniqueAndStableStanzaID(msg, roomJid);
+        if (room == null || sid == null || room.getRoomHistory().isSubjectChangeRequest(msg)) return;
+        Element payload = forwarded.getElement().createCopy();
+        if (fileAnn != null) payload.add(fileAnn.createCopy());
+        manager.getRoomJournal().record(roomJid, RoomJournal.Kind.MESSAGE, roomJid, sid, sid,
+                msg.getFrom().toBareJID(), "", "", 0, payload);
     }
 
     /**
@@ -293,6 +309,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // Each occupant gets a copy of the announcement; only the first is relayed.
         if (!ids.markModerated(roomJid, targetId)) return;
         RoomMessageIds.Origin origin = ids.originOf(roomJid, targetId);
+        if (origin == null) {
+            // Forgotten in memory, as after a restart; the journal still knows the room's own messages.
+            var written = manager.getRoomJournal().find(roomJid, RoomJournal.Kind.MESSAGE, roomJid, targetId);
+            if (written != null) origin = new RoomMessageIds.Origin(roomJid, targetId, written.author());
+        }
         if (origin == null || !roomJid.equals(origin.room())) {
             Log.info("Moderation of {} in {} applies on this server only: {}", targetId, roomJid,
                      origin == null ? "not a message this room forwarded (or too old to be remembered)"
@@ -303,6 +324,8 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         String moderator = moderatorOf(manager.findLocalMucRoom(roomJid), retract);
         Message payload = new Message(RoomModeration.announcement(roomJid, out.getID(), targetId,
                 moderator == null ? null : roomJid + "/" + moderator, null, RoomModeration.reasonOf(retract)));
+        manager.getRoomJournal().record(roomJid, RoomJournal.Kind.MODERATION, roomJid, targetId, targetId,
+                "", "", "", 0, payload.getElement());
         for (RoomMapping mapping : mappings) {
             forwardToMapped(payload, mapping, null);
         }

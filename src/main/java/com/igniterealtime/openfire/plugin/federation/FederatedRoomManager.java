@@ -47,6 +47,7 @@ public class FederatedRoomManager {
     private static final String PROP_MAP_DOMAIN  = "federation.rooms.mapping.%s.%d.domain";
     private static final String PROP_MAP_STATE   = "federation.rooms.mapping.%s.%d.state";
     private static final String PROP_MAP_TOKEN   = "federation.rooms.mapping.%s.%d.token";
+    private static final String PROP_MAP_ACTIVATED = "federation.rooms.mapping.%s.%d.activated";
     private static final String PROP_ROOM_AUTOACCEPT = "federation.room.autoaccept.";
     private static final String PROP_ROOM_FILES = "federation.room.files.";
 
@@ -173,9 +174,10 @@ public class FederatedRoomManager {
             if (remoteJid == null || remoteDomain == null) continue;
             String stateStr = JiveGlobals.getProperty(String.format(PROP_MAP_STATE, localJid, i));
             String token    = JiveGlobals.getProperty(String.format(PROP_MAP_TOKEN, localJid, i), "");
+            long activated  = JiveGlobals.getLongProperty(String.format(PROP_MAP_ACTIVATED, localJid, i), 0L);
             if (stateStr == null) rewrite = true;
             RoomMapping.State state = parseState(stateStr);
-            addLoadedMapping(new RoomMapping(localJid, remoteJid, remoteDomain, state, token));
+            addLoadedMapping(new RoomMapping(localJid, remoteJid, remoteDomain, state, token, activated));
             Log.info("Loaded room mapping: {} ↔ {} ({}) [{}]", localJid, remoteJid, remoteDomain, state);
         }
         if (rewrite) persistMappingsForRoom(localJid);
@@ -771,6 +773,9 @@ public class FederatedRoomManager {
             } else {
                 JiveGlobals.deleteProperty(String.format(PROP_MAP_TOKEN, localJid, i));
             }
+            if (m.activatedAt() > 0) {
+                JiveGlobals.setProperty(String.format(PROP_MAP_ACTIVATED, localJid, i), Long.toString(m.activatedAt()));
+            }
         }
     }
 
@@ -784,6 +789,7 @@ public class FederatedRoomManager {
                     JiveGlobals.deleteProperty(String.format(PROP_MAP_DOMAIN, localJid, i));
                     JiveGlobals.deleteProperty(String.format(PROP_MAP_STATE,  localJid, i));
                     JiveGlobals.deleteProperty(String.format(PROP_MAP_TOKEN,  localJid, i));
+                    JiveGlobals.deleteProperty(String.format(PROP_MAP_ACTIVATED, localJid, i));
                 }
             } catch (NumberFormatException ignored) {
                 // A corrupt count leaves no indexed entries to delete; the count itself goes below.

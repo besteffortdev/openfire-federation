@@ -98,6 +98,16 @@
     chained layout. Presence, typing, and message history forwarding all follow the mappings.
 </div>
 
+<div class="tip">
+    <strong>When a link drops:</strong> each server's copy of a mapped room keeps working for its own users.
+    When the path comes back (the link reconnects, a route is re‑learned, a server restarts), the two sides
+    swap what they missed. The missed messages arrive exactly once, stamped with the time they were written,
+    and travel on through hubs. The archive files them when they arrive, so clients reading it through MAM
+    may show that time instead. Each server keeps the last 24&nbsp;hours of its mapped rooms for this
+    (<code>plugin.federation.catchup.windowHours</code>; turn it off with
+    <code>plugin.federation.catchup.enabled</code>). Both servers need 1.13.0 or later.
+</div>
+
 <h2>Direct (1:1) federation</h2>
 <p>
     Beyond rooms, the overlay relays one‑to‑one traffic to contacts on servers you can only reach through

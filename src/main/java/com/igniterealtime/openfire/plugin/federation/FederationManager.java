@@ -12,6 +12,8 @@ import com.igniterealtime.openfire.plugin.federation.protocol.FederationSender;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
 import com.igniterealtime.openfire.plugin.federation.protocol.MucTrafficHandler;
 import com.igniterealtime.openfire.plugin.federation.protocol.RedundantArrivals;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomCatchup;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomJournal;
 import com.igniterealtime.openfire.plugin.federation.protocol.RoomMessageIds;
 import org.dom4j.Element;
 import org.jivesoftware.openfire.SessionManager;
@@ -68,6 +70,7 @@ public class FederationManager {
     private final ContactListManager     contactLists      = new ContactListManager(this);
     private final FederationFileConfig   fileConfig        = new FederationFileConfig();
     private final RoomMessageIds         roomMessageIds    = new RoomMessageIds();
+    private final RoomJournal            roomJournal       = RoomJournal.inDataDirectory();
     private final RedundantArrivals      redundantArrivals = new RedundantArrivals();
     private final PresenceRelay          presenceRelay     = new PresenceRelay(this);
     private final OccupantSync           occupantSync      = new OccupantSync(this);
@@ -95,6 +98,7 @@ public class FederationManager {
         roomManager.load();
         roomDefaults.load();
         contactLists.load();
+        roomJournal.load();
         refreshDirectory();
         LegacyBookmarkCleanup.runOnceInBackground();
 
@@ -102,6 +106,7 @@ public class FederationManager {
         fileRelay.start();
 
         iqHandler   = FederationIQHandler.create(this);
+        iqHandler.getRoomCatchup().start();
         interceptor = new FederationPacketInterceptor(this);
         XMPPServer.getInstance().getIQRouter().addHandler(iqHandler);
         InterceptorManager.getInstance().addInterceptor(interceptor);
@@ -133,6 +138,7 @@ public class FederationManager {
         stopStep("packet interceptor", () -> {
             if (interceptor != null) InterceptorManager.getInstance().removeInterceptor(interceptor);
         });
+        stopStep("room catch-up", () -> { if (iqHandler != null) iqHandler.getRoomCatchup().stop(); });
         stopStep("federated directory", this::removeDirectory);
         stopStep("contact lists", contactLists::stop);
         stopStep("file relay", () -> { if (fileRelay != null) fileRelay.stop(); });
@@ -1035,6 +1041,7 @@ public class FederationManager {
     public FederationFileConfig   getFileConfig()         { return fileConfig; }
     public FileRelayManager       getFileRelay()          { return fileRelay; }
     public RoomMessageIds         getRoomMessageIds()     { return roomMessageIds; }
+    public RoomJournal            getRoomJournal()        { return roomJournal; }
     public RedundantArrivals      getRedundantArrivals()  { return redundantArrivals; }
     public PresenceRelay          getPresenceRelay()      { return presenceRelay; }
     public OccupantSync           getOccupantSync()       { return occupantSync; }
@@ -1050,5 +1057,10 @@ public class FederationManager {
     /** The 1:1 traffic handler, or null before the plugin has started. */
     public DirectTrafficHandler getDirectTraffic() {
         return iqHandler == null ? null : iqHandler.getDirectTraffic();
+    }
+
+    /** Catch-up after a split, or null before the plugin has started. */
+    public RoomCatchup getRoomCatchup() {
+        return iqHandler == null ? null : iqHandler.getRoomCatchup();
     }
 }

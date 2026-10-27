@@ -72,17 +72,32 @@ public final class MucTrafficHandler {
         /** A second copy of something the room already has, which reached it by another path. */
         DUPLICATE,
         /** One of our own users' packets coming back round. */
-        OWN
+        OWN,
+        /** Refused here, so it goes no further: a replayed subject change. */
+        REFUSED
+    }
+
+    /**
+     * A muc-forward's replay attributes (docs/protocol/05 § Catch-up after a split): when the message
+     * was first sent, and the catch-up request it answers, if any. Null on live traffic.
+     */
+    private record Replay(String sent, String catchup) {
+        static Replay of(Element forward) {
+            String sent = forward.attributeValue(FederationStanzaFactory.ATTR_SENT);
+            return sent == null ? null : new Replay(sent, forward.attributeValue(FederationStanzaFactory.ATTR_CATCHUP));
+        }
     }
 
     private final FederationManager manager;
     private final InboundValidation validation;
+    private final RoomCatchup catchup;
     private final ConcurrentHashMap<String, Deque<PendingDelivery>> pendingRoomDeliveries = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Deque<StoredModeration>> federatedModerations = new ConcurrentHashMap<>();
 
-    MucTrafficHandler(FederationManager manager, InboundValidation validation) {
+    MucTrafficHandler(FederationManager manager, InboundValidation validation, RoomCatchup catchup) {
         this.manager = manager;
         this.validation = validation;
+        this.catchup = catchup;
     }
 
     /**
@@ -118,20 +133,21 @@ public final class MucTrafficHandler {
         if (!validation.exposureOk(fromDomain, finalDest, "muc-forward")) return;
 
         boolean forUs = InboundValidation.isForUs(finalDest);
-        Log.debug("muc-forward: from={} finalDest={} targetRoom={} via=[{}] payload={}[type={},from={}] -> {}",
+        Replay replay = Replay.of(el);
+        Log.debug("muc-forward: from={} finalDest={} targetRoom={} via=[{}] payload={}[type={},from={}]{} -> {}",
                   fromDomain, finalDest, targetRoom, via, payloadEl.getName(),
                   payloadEl.attributeValue("type"), payloadEl.attributeValue("from"),
-                  forUs ? "LOCAL+fanOut" : "RELAY");
+                  replay == null ? "" : " replay", forUs ? "LOCAL+fanOut" : "RELAY");
         if (forUs) {
-            deliverHere(fromDomain, payloadEl, targetRoom, via, src, hubs);
+            deliverHere(fromDomain, payloadEl, targetRoom, via, src, hubs, replay);
         } else {
-            relay(fromDomain, payloadEl, finalDest, targetRoom, via, src, hubs);
+            relay(fromDomain, payloadEl, finalDest, targetRoom, via, src, hubs, replay);
         }
     }
 
     /** Delivers into one of our rooms, if it is federated and mapped to {@code src}, then fans the payload out. */
     private void deliverHere(String fromDomain, Element payloadEl, String targetRoom, String via,
-                             String src, String hubs) {
+                             String src, String hubs, Replay replay) {
         if (!isFederatedLocalRoom(targetRoom)) {
             Log.warn("SECURITY: dropping muc-forward from {} into non-federated local room {} "
                    + "(type={}, from={})", fromDomain, targetRoom,
@@ -150,20 +166,51 @@ public final class MucTrafficHandler {
             manager.getRedundantArrivals().record(targetRoom, src);
             return;
         }
-        Arrival arrival = deliver(payloadEl, targetRoom, fromDomain, src);
+        long sentAt = 0;
+        if (replay != null) {
+            Long accepted = replayTime(replay, payloadEl, targetRoom, src, true);
+            if (accepted == null) return;
+            sentAt = accepted;
+        }
+        Arrival arrival = deliver(payloadEl, targetRoom, fromDomain, src, hubs, sentAt);
         if (arrival == Arrival.NEW) {
-            fanOut(fromDomain, payloadEl, targetRoom, via, hubs);
+            fanOut(fromDomain, payloadEl, targetRoom, via, hubs, sentAt);
         } else if (arrival == Arrival.DUPLICATE) {
             manager.getRedundantArrivals().record(targetRoom, src);
         }
     }
 
+    /**
+     * When a replay into {@code localRoom} was first sent, or null to drop it. One that names a
+     * catch-up request must answer a page we asked for on the mapping with {@code mappedDomain}, when
+     * {@code bindToRequest}; a relay that injects on the way did not ask, and only checks the time.
+     */
+    private Long replayTime(Replay replay, Element payloadEl, String localRoom, String mappedDomain,
+                            boolean bindToRequest) {
+        if (!"message".equals(payloadEl.getName())) {
+            Log.warn("SECURITY: dropping a replayed {} into {} via {} — only messages are replayed",
+                     payloadEl.getName(), localRoom, mappedDomain);
+            return null;
+        }
+        if (bindToRequest && replay.catchup() != null) {
+            String originRoom = bareJidOf(payloadEl.attributeValue("to"));
+            String originId = originStanzaId(payloadEl, originRoom, localRoom);
+            if (!catchup.acceptReplay(replay.catchup(), localRoom, mappedDomain, originRoom, originId)) {
+                Log.warn("SECURITY: dropping a replay into {} via {} — it answers catch-up request {}, which "
+                       + "this server did not send on that mapping in the last minute, or the page is full",
+                         localRoom, mappedDomain, LogSafe.text(replay.catchup()));
+                return null;
+            }
+        }
+        return catchup.replayTime(replay.sent(), localRoom, mappedDomain);
+    }
+
     /** Relays a muc-forward toward its room's server, after delivering it here too if we map that room ourselves. */
     private void relay(String fromDomain, Element payloadEl, String finalDest, String targetRoom,
-                       String via, String src, String hubs) {
+                       String via, String src, String hubs, Replay replay) {
         String newVia = appendToTrail(via, localDomain());
         boolean hubHere = targetRoom != null
-                && deliverAtRelay(fromDomain, payloadEl, finalDest, targetRoom, via, src, hubs);
+                && deliverAtRelay(fromDomain, payloadEl, finalDest, targetRoom, via, src, hubs, replay);
         String relayHubs = hubHere ? appendToTrail(hubs, localDomain()) : hubs;
 
         String nextHop = manager.getRoutingTable().findNextHop(finalDest).orElse(null);
@@ -171,8 +218,11 @@ public final class MucTrafficHandler {
             Log.warn("muc-forward: no route to {}, dropping", finalDest);
             return;
         }
+        // A replay keeps its time and request on every hop, or the destination would take it as live.
+        String sent    = replay == null ? null : replay.sent();
+        String request = replay == null ? null : replay.catchup();
         FederationSender.send("muc-forward", finalDest, () -> FederationStanzaFactory.mucForward(
-                nextHop, finalDest, targetRoom, newVia, src, relayHubs, roomStanza(payloadEl)));
+                nextHop, finalDest, targetRoom, newVia, src, relayHubs, sent, request, roomStanza(payloadEl)));
     }
 
     /**
@@ -180,19 +230,25 @@ public final class MucTrafficHandler {
      * True when the payload was new here, so the relayed copy must name us as a hub.
      */
     private boolean deliverAtRelay(String fromDomain, Element payloadEl, String finalDest, String targetRoom,
-                                   String via, String src, String hubs) {
+                                   String via, String src, String hubs, Replay replay) {
         RoomMapping own = manager.getRoomManager().getMappingForRemote(targetRoom);
         if (own == null || !own.isActive() || !own.remoteDomain().equals(finalDest)
                 || !validation.untrustedAllowsServer(fromDomain, localDomain())
                 || !isFederatedLocalRoom(own.localRoomJid())) {
             return false;
         }
+        long sentAt = 0;
+        if (replay != null) {
+            Long accepted = replayTime(replay, payloadEl, own.localRoomJid(), own.remoteDomain(), false);
+            if (accepted == null) return false;
+            sentAt = accepted;
+        }
         Arrival arrival = viaContains(hubs, localDomain())
                 ? Arrival.DUPLICATE
-                : deliver(payloadEl, own.localRoomJid(), fromDomain, src);
+                : deliver(payloadEl, own.localRoomJid(), fromDomain, src, hubs, sentAt);
         if (arrival == Arrival.NEW) {
             // finalDest gets it from the relay itself, so it is listed as a hub to avoid a second copy.
-            fanOut(fromDomain, payloadEl, own.localRoomJid(), via, appendToTrail(hubs, finalDest));
+            fanOut(fromDomain, payloadEl, own.localRoomJid(), via, appendToTrail(hubs, finalDest), sentAt);
             return true;
         }
         if (arrival == Arrival.DUPLICATE) {
@@ -216,11 +272,14 @@ public final class MucTrafficHandler {
     /**
      * Delivers a forwarded message or presence into a local room. A failure is logged and counts as
      * new, so a fault here never stops the room's other spokes getting the payload.
+     *
+     * @param sentAt when a replayed message was first sent; 0 for live traffic
      */
-    private Arrival deliver(Element payloadEl, String targetRoom, String fromDomain, String src) {
+    private Arrival deliver(Element payloadEl, String targetRoom, String fromDomain, String src,
+                            String hubs, long sentAt) {
         try {
             if ("message".equals(payloadEl.getName())) {
-                return injectMessage(payloadEl, targetRoom, fromDomain, src);
+                return injectMessage(payloadEl, targetRoom, fromDomain, src, hubs, sentAt);
             }
             injectPresence(payloadEl, targetRoom, fromDomain, src);
         } catch (RuntimeException e) {
@@ -231,9 +290,11 @@ public final class MucTrafficHandler {
 
     /**
      * Relays a payload the room took as new to its other mappings, skipping the sender, servers in
-     * the via trail, the payload's home server and servers already in the hub trail.
+     * the via trail, the payload's home server and servers already in the hub trail. A replay keeps
+     * its sent time but not its catch-up request, which the other mappings did not make.
      */
-    private void fanOut(String fromDomain, Element payloadEl, String targetRoom, String viaTrail, String hubs) {
+    private void fanOut(String fromDomain, Element payloadEl, String targetRoom, String viaTrail, String hubs,
+                        long sentAt) {
         List<RoomMapping> mappings = manager.getRoomManager().getMappingsForLocal(targetRoom);
         if (mappings.size() <= 1) {
             Log.debug("fanOut: skip — only {} mapping(s) for {} (from={})", mappings.size(), targetRoom, fromDomain);
@@ -251,6 +312,7 @@ public final class MucTrafficHandler {
                   fromDomain, targetRoom, viaTrail, payloadEl.attributeValue("from"), payloadHome,
                   mappings.stream().map(RoomMapping::remoteDomain).toList());
 
+        String sentStamp = sentAt > 0 ? XMPPDateTimeFormat.format(new Date(sentAt)) : null;
         for (RoomMapping m : mappings) {
             String skip = RoomFanOut.skipReason(m.remoteDomain(), fromDomain, viaServers, hubs, payloadHome);
             if (skip != null) {
@@ -261,16 +323,18 @@ public final class MucTrafficHandler {
             // As the hub, we are the server this spoke's copy enters through.
             boolean sent = FederationSender.send("muc-forward fan-out", m.remoteDomain(),
                     () -> FederationStanzaFactory.mucForward(nextHop, m.remoteDomain(), m.remoteRoomJid(),
-                            localDomain, localDomain, newHubs, roomStanza(payloadEl)));
+                            localDomain, localDomain, newHubs, sentStamp, null, roomStanza(payloadEl)));
             if (sent) Log.debug("fanOut: relayed from {} to {} via {}", fromDomain, m.remoteDomain(), nextHop);
         }
     }
 
     /**
      * Delivers a relayed groupchat message to each occupant of the local room, bypassing MUC's
-     * occupant check, and records it in the room history. Reports whether it was new here.
+     * occupant check, records it in the room history and the journal, and reports whether it was new
+     * here. A replay is stamped with the time it was first sent, and archived at that time.
      */
-    private Arrival injectMessage(Element msgEl, String targetRoom, String fromDomain, String src) {
+    private Arrival injectMessage(Element msgEl, String targetRoom, String fromDomain, String src,
+                                  String hubs, long sentAt) {
         MUCRoom room = manager.findLocalMucRoom(targetRoom);
         if (room == null) {
             Log.warn("injectMessage: room {} not found locally", targetRoom);
@@ -279,7 +343,7 @@ public final class MucTrafficHandler {
 
         Element moderatedRetract = RoomModeration.moderatedRetract(msgEl);
         if (moderatedRetract != null) {
-            return injectModeration(msgEl, moderatedRetract, room);
+            return injectModeration(msgEl, moderatedRetract, room, src, hubs, sentAt);
         }
 
         String senderNick = virtualNick(msgEl.attributeValue("from"));
@@ -287,11 +351,19 @@ public final class MucTrafficHandler {
             Log.debug("injectMessage: dropping self-echo of local user {} into {}", senderNick, targetRoom);
             return Arrival.OWN;
         }
+        boolean subjectChange = room.getRoomHistory().isSubjectChangeRequest(new Message(msgEl, true));
+        if (subjectChange && sentAt > 0) {
+            // A replayed subject could overwrite a newer one; the room's subject is not what catch-up repairs.
+            Log.debug("injectMessage: dropping a replayed subject change for {} from {}", targetRoom, fromDomain);
+            return Arrival.REFUSED;
+        }
 
         String roomJid    = room.getJID().toBareJID();
         String originRoom = bareJidOf(msgEl.attributeValue("to"));
         String originId   = originStanzaId(msgEl, originRoom, roomJid);
-        if (originId != null && !manager.getRoomMessageIds().firstArrival(roomJid, originRoom, originId)) {
+        // The journal outlives a restart and covers the catch-up window; the in-memory check is the atomic one.
+        if (originId != null && (journal().has(roomJid, RoomJournal.Kind.MESSAGE, originRoom, originId)
+                || !manager.getRoomMessageIds().firstArrival(roomJid, originRoom, originId))) {
             Log.debug("injectMessage: {} already has message {} from {}, dropping the copy from {}",
                       roomJid, originId, originRoom, fromDomain);
             return Arrival.DUPLICATE;
@@ -301,14 +373,21 @@ public final class MucTrafficHandler {
         Element deliverEl = deliveryCopy(msgEl, targetRoom, src, fromDomain);
         RoomModeration.stripModeration(deliverEl);
         stampRoomIdentity(deliverEl, room, senderNick);
+        if (sentAt > 0) stampSentTime(deliverEl, roomJid, sentAt);
+        String localId = roomStanzaId(deliverEl, roomJid);
 
         JID targetJID = new JID(targetRoom);
         String virtualFrom = targetJID.getNode() + "@" + targetJID.getDomain() + "/" + senderNick;
         archiveToRoomHistory(room, deliverEl, virtualFrom, senderNick);
+        if (originId != null && !subjectChange) {
+            journal().record(roomJid, RoomJournal.Kind.MESSAGE, originRoom, originId, localId, senderNick,
+                             src, hubs, sentAt, msgEl);
+        }
 
         Collection<MUCOccupant> occupants = room.getOccupants();
         if (occupants.isEmpty()) {
-            bufferPendingDelivery(targetRoom, deliverEl, virtualFrom);
+            // A replay is history already: join history and MAM bring it to whoever joins.
+            if (sentAt == 0) bufferPendingDelivery(targetRoom, deliverEl, virtualFrom);
             return Arrival.NEW;
         }
         deliverToOccupants(deliverEl, virtualFrom, occupants);
@@ -365,6 +444,30 @@ public final class MucTrafficHandler {
         }
     }
 
+    /**
+     * Replaces any delay on a replay with the room's own, stamped with the time it was first sent
+     * (XEP-0203), so clients show it when it was written. The payload's delays were written by its sender.
+     */
+    private static void stampSentTime(Element msgEl, String roomJid, long sentAt) {
+        for (Element d : msgEl.elements(QName.get("delay", RoomModeration.NS_DELAY))) msgEl.remove(d);
+        for (Element d : msgEl.elements(QName.get("x", "jabber:x:delay"))) msgEl.remove(d);
+        msgEl.addElement(QName.get("delay", RoomModeration.NS_DELAY))
+             .addAttribute("from", roomJid)
+             .addAttribute("stamp", XMPPDateTimeFormat.format(new Date(sentAt)));
+    }
+
+    /** The stanza-id {@code roomJid} gave a stamped message, or null. */
+    private static String roomStanzaId(Element msgEl, String roomJid) {
+        for (Element sid : msgEl.elements(QName.get("stanza-id", NS_STANZA_ID))) {
+            if (roomJid.equals(sid.attributeValue("by"))) return sid.attributeValue("id");
+        }
+        return null;
+    }
+
+    private RoomJournal journal() {
+        return manager.getRoomJournal();
+    }
+
     /** The reusable stanza-id the origin room gave {@code msgEl}, or null if none or the origin is this room. */
     private static String originStanzaId(Element msgEl, String originRoom, String roomJid) {
         if (originRoom == null || originRoom.equals(roomJid)) return null;
@@ -381,8 +484,10 @@ public final class MucTrafficHandler {
     /**
      * Applies a XEP-0425 moderation relayed from the room it names, but only to a message that came
      * from that room and was written by a user of that room's server (see {@link RoomModeration}).
+     * The message is looked up in memory, then in the journal, which outlives a restart.
      */
-    private Arrival injectModeration(Element msgEl, Element retract, MUCRoom room) {
+    private Arrival injectModeration(Element msgEl, Element retract, MUCRoom room, String src, String hubs,
+                                     long sentAt) {
         String roomJid    = room.getJID().toBareJID();
         String originRoom = bareJidOf(msgEl.attributeValue("to"));
         String targetId   = retract.attributeValue("id");
@@ -399,21 +504,31 @@ public final class MucTrafficHandler {
         }
         var ids = manager.getRoomMessageIds();
         String localId = ids.localIdOf(roomJid, originRoom, targetId);
+        String author = localId == null ? null : ids.originOf(roomJid, localId).author();
+        if (localId == null) {
+            RoomJournal.Entry target = journal().find(roomJid, RoomJournal.Kind.MESSAGE, originRoom, targetId);
+            if (target != null && !target.localId().isEmpty()) {
+                localId = target.localId();
+                author = target.author();
+            }
+        }
         if (localId == null) {
             Log.info("Not applying a moderation from {} in {}: message {} is not one this room received "
                    + "from there, or is too old to be remembered", originRoom, roomJid, LogSafe.text(targetId));
             return Arrival.NEW;
         }
-        String author = ids.originOf(roomJid, localId).author();
         if (!RoomModeration.belongsToRoomServer(author, originRoom)) {
             Log.warn("SECURITY: refusing a moderation from {} in {}: message {} was written by {}, who is "
                    + "not a user of that room's server", originRoom, roomJid, LogSafe.text(targetId), author);
             return Arrival.NEW;
         }
-        if (!ids.markModerated(roomJid, localId)) {
+        if (journal().has(roomJid, RoomJournal.Kind.MODERATION, originRoom, targetId)
+                || !ids.markModerated(roomJid, localId)) {
             Log.debug("injectModeration: {} in {} already moderated", localId, roomJid);
             return Arrival.DUPLICATE;
         }
+        journal().record(roomJid, RoomJournal.Kind.MODERATION, originRoom, targetId, localId, "", src, hubs,
+                         sentAt, msgEl);
 
         String moderator = moderatorOf(retract, originRoom);
         Element announcement = RoomModeration.announcement(roomJid, msgEl.attributeValue("id"), localId,

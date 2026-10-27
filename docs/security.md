@@ -225,6 +225,42 @@ server's copy of the room only. A client cannot fake a moderation by sending the
 message: it arrives from a room nick, not the room, and is dropped. See
 [09](protocol/09-validation.md#room-moderation--only-the-authors-server).
 
+## Catch-up after a split
+
+Since 1.13.0 a mapping whose path comes back replays the room traffic it missed
+([05](protocol/05-muc-traffic.md#catch-up-after-a-split)). The controls (09 § Room catch-up):
+
+- **A request needs the standing of a lifecycle action.** It is answered only for a federated room with
+  an ACTIVE mapping to the requester's room, with the mapping's token, from an origin that passes the
+  claimed-origin check, and over an untrusted link only when this server is exposed to it. Anything else
+  is dropped as `SECURITY:`. A request reads a day of a room's traffic, so it gets no less scrutiny than
+  disabling the mapping.
+- **Nothing from before consent is replayed.** A mapping records when it last became ACTIVE. Neither end
+  replays or accepts traffic from before then, so a disabled period or the time before the mapping
+  existed never comes back.
+- **Nothing older than the receiver's journal is accepted.** A server whose journal was lost cannot
+  tell what it already has. It refuses replays from before its journal began, so the loss costs one
+  catch-up rather than a day of messages delivered twice.
+- **A replay is checked like live traffic, and more.** It passes the same origin, mapping and exposure
+  checks.
+  - One that claims to answer a request must answer a page this server asked for on that mapping, and
+    no more items than the page asked for.
+  - Its `sent` must fall within the window. A stamp far in the future is taken as now.
+  - Its own `<delay/>` elements are replaced with the room's.
+  - Replayed subject changes are dropped.
+- **Bounded.**
+  - Responder: pages of at most 100 items, one page at a time per mapping, 2,000 items per mapping per
+    hour.
+  - Requester: 1,000 items per catch-up.
+- **The journal holds message text.** It keeps the window's traffic of every mapped room, 24 hours by
+  default, in `federation-journal/journal.tsv` beside Openfire's plugins directory (`/var/lib/openfire` in
+  the Docker image). The file is created `rw-------` in a
+  `rwx------` directory, and expired entries are pruned hourly. Treat it like Openfire's own message
+  archive when backing up or wiping a server.
+
+**Residual risk:** `sent` is the responder's word. A mapped peer can backdate the messages it carries
+by up to the window. That is no more than a trusted peer can already do with the users it relays.
+
 ## Presence and PEP privacy
 
 Two server-side answers given on a user's behalf follow that user's own access rules (since 1.10.8):
