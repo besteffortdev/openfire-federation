@@ -323,4 +323,54 @@ class RoomJournalTest {
         assertFalse(j.has(ROOM, Kind.MESSAGE, OWN, "m0"));
         assertTrue(j.has(ROOM, Kind.MESSAGE, OWN, "m" + (total - 1)));
     }
+
+    private static Element bigMessage(String id, int bodyChars) {
+        return SafeXml.parseElement("<message xmlns='jabber:client' type='groupchat' from='bea@b.example/x' to='"
+                + OWN + "'><body>" + "x".repeat(bodyChars) + "</body><stanza-id xmlns='urn:xmpp:sid:0' by='" + OWN
+                + "' id='" + id + "'/></message>").orElseThrow();
+    }
+
+    @Test
+    @DisplayName("a payload past the size limit is not journaled, so it cannot fill the heap")
+    void oversizedPayloadIsLeftOut() {
+        RoomJournal j = journal();
+
+        assertFalse(j.record(ROOM, Kind.MESSAGE, OWN, "big-0000000000000001", "big-0000000000000001", "bea@b.example",
+                "", "", 0, bigMessage("big-0000000000000001", RoomJournal.MAX_PAYLOAD_CHARS)));
+        assertFalse(j.has(ROOM, Kind.MESSAGE, OWN, "big-0000000000000001"));
+    }
+
+    @Test
+    @DisplayName("a room past its size budget loses its oldest entries and keeps the newest")
+    void roomSizeBudget() {
+        RoomJournal j = journal();
+        int each = RoomJournal.MAX_PAYLOAD_CHARS - 1024;
+        int fits = (int) (RoomJournal.MAX_ROOM_CHARS / each);
+        for (int i = 0; i < fits + 20; i++) {
+            now.addAndGet(1000);
+            String id = String.format("budget-%012d", i);
+            j.record(ROOM, Kind.MESSAGE, OWN, id, id, "bea@b.example", "", "", 0, bigMessage(id, each));
+        }
+
+        assertFalse(j.has(ROOM, Kind.MESSAGE, OWN, String.format("budget-%012d", 0)), "the oldest went");
+        assertTrue(j.has(ROOM, Kind.MESSAGE, OWN, String.format("budget-%012d", fits + 19)), "the newest stays");
+    }
+
+    @Test
+    @DisplayName("what is recorded after a prune lands in the rewritten file")
+    void appendsAfterPruneReachTheNewFile() throws IOException {
+        RoomJournal j = journal();
+        local(j, "old-0000000000000001");
+        now.addAndGet(25 * HOUR);
+        local(j, "new-0000000000000001");
+        assertEquals(1, j.prune());
+        local(j, "new-0000000000000002");
+        j.close();
+
+        RoomJournal reloaded = journal();
+        reloaded.load();
+        assertFalse(reloaded.has(ROOM, Kind.MESSAGE, OWN, "old-0000000000000001"));
+        assertTrue(reloaded.has(ROOM, Kind.MESSAGE, OWN, "new-0000000000000001"));
+        assertTrue(reloaded.has(ROOM, Kind.MESSAGE, OWN, "new-0000000000000002"));
+    }
 }

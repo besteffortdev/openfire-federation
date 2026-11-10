@@ -64,6 +64,8 @@ public final class RoomCatchup {
     static final int MAX_ITEMS_PER_CATCHUP = 1_000;
     /** Items this server sends in answer on one mapping per hour. */
     static final int MAX_ITEMS_PER_HOUR = 2_000;
+    /** Requests answered on one mapping per minute; a full catch-up needs far fewer pages. */
+    static final int MAX_REQUESTS_PER_MINUTE = 60;
     /** Allowance for clock skew: a later stamp is taken as now, and resuming by time starts this much earlier. */
     static final long SKEW_MS = 5 * 60_000L;
 
@@ -127,6 +129,8 @@ public final class RoomCatchup {
     private static final class Answering {
         long sendingUntil;
         final Deque<long[]> sentInHour = new ArrayDeque<>();
+        long minuteStartedAt;
+        int requestsInMinute;
 
         int sentWithinHour(long now) {
             while (!sentInHour.isEmpty() && sentInHour.peekFirst()[0] < now - HOUR_MS) sentInHour.pollFirst();
@@ -412,6 +416,16 @@ public final class RoomCatchup {
         long now = System.currentTimeMillis();
         int allowance;
         synchronized (a) {
+            // Each request scans the journal, and an empty page is not paced by anything else.
+            if (now - a.minuteStartedAt >= 60_000L) {
+                a.minuteStartedAt = now;
+                a.requestsInMinute = 0;
+            }
+            if (++a.requestsInMinute > MAX_REQUESTS_PER_MINUTE) {
+                Log.debug("{} from {} for {} refused: more than {} requests in a minute", REQUEST,
+                          m.remoteDomain(), m.localRoomJid(), MAX_REQUESTS_PER_MINUTE);
+                return;
+            }
             allowance = MAX_ITEMS_PER_HOUR - a.sentWithinHour(now);
             if (a.sendingUntil > now || allowance <= 0) {
                 Log.debug("{} from {} for {} refused: a page is still being sent, or the hourly limit is reached",

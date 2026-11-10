@@ -38,11 +38,14 @@ public final class CertificatePinning {
      * peer until the admin accepts it; a matching legacy pin is upgraded silently.
      */
     public void observe(String domain) {
+        PeerRegistry peers = manager.getPeerRegistry();
         Certificate[] chain = peerCertChain(domain);
-        if (chain == null || chain.length == 0) return;
+        if (chain == null || chain.length == 0) {
+            if (isDowngrade(peers.getPinnedCertFp(domain), outgoingLinkState(domain))) flagDowngrade(domain);
+            return;
+        }
         String fp = leafSpkiFp(chain);
         if (fp == null) return;
-        PeerRegistry peers = manager.getPeerRegistry();
         peers.setLastSeenCertFp(domain, fp);
 
         String pinned = peers.getPinnedCertFp(domain);
@@ -70,6 +73,44 @@ public final class CertificatePinning {
                 peers.setUntrusted(domain, true);
                 manager.applyLocalTrustChange(domain);
             }
+        }
+    }
+
+    /** What is known of our own connection to a peer; an incoming-only link proves nothing either way. */
+    enum OutgoingLink { NONE, ENCRYPTED, PLAINTEXT }
+
+    /**
+     * Whether a peer with a pinned key is now reached over an unencrypted link we opened ourselves.
+     * Such a link presents no certificate, so without this check an impersonator could avoid the pin
+     * simply by not offering TLS.
+     */
+    static boolean isDowngrade(String pinned, OutgoingLink link) {
+        return pinned != null && !pinned.isBlank() && link == OutgoingLink.PLAINTEXT;
+    }
+
+    private static OutgoingLink outgoingLinkState(String domain) {
+        try {
+            OutgoingServerSession out = XMPPServer.getInstance().getSessionManager()
+                    .getOutgoingServerSession(new DomainPair(localDomain(), domain));
+            if (out == null) return OutgoingLink.NONE;
+            return out.isEncrypted() ? OutgoingLink.ENCRYPTED : OutgoingLink.PLAINTEXT;
+        } catch (RuntimeException e) {
+            Log.debug("Could not read the S2S link state of {}", domain, e);
+            return OutgoingLink.NONE;
+        }
+    }
+
+    /** Untrusts a pinned peer whose link lost its encryption, as a changed key does. */
+    private void flagDowngrade(String domain) {
+        PeerRegistry peers = manager.getPeerRegistry();
+        if (peers.isCertMismatch(domain)) return;
+        peers.setCertMismatch(domain, true);
+        Log.warn("SECURITY: the S2S link to {} is no longer encrypted although a key is pinned for it — "
+               + "auto-untrusting. Restore TLS on that link and make the peer trusted again, or remove and "
+               + "re-add the peer to forget the pin", domain);
+        if (!peers.isUntrusted(domain)) {
+            peers.setUntrusted(domain, true);
+            manager.applyLocalTrustChange(domain);
         }
     }
 

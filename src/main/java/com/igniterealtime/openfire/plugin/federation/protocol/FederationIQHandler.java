@@ -47,6 +47,10 @@ public class FederationIQHandler extends IQHandler {
     private static final int MAX_ROOM_DESCRIPTION  = 512;
     private static final int MAX_ROOM_VISIBLE_TO   = 64;
 
+    /** Peers beyond which open-federation mode registers no more strangers; the admin can still add peers. */
+    static final int MAX_PEERS_FOR_AUTO_REGISTRATION = 256;
+    private volatile long autoRegistrationRefusedLoggedAt = 0;
+
     /** Hop count assumed for a routing entry whose hops attribute is missing or not a number. */
     private static final int UNKNOWN_HOPS = 99;
 
@@ -176,6 +180,7 @@ public class FederationIQHandler extends IQHandler {
         Log.debug("peer-announce from {}{}", fromDomain, isReply ? " (reply)" : "");
 
         if (!peers.contains(fromDomain)) {
+            if (!roomForAutoRegistration(fromDomain)) return;
             peers.addPeer(fromDomain);
             peers.setUntrusted(fromDomain, true);
             Log.info("Auto-registered federation peer via incoming connection: {} (untrusted, nothing "
@@ -219,6 +224,22 @@ public class FederationIQHandler extends IQHandler {
         }
     }
 
+    /**
+     * Whether one more server may register itself in open-federation mode. Every peer is persisted
+     * and polled, so strangers announcing from many domains must not add them without limit.
+     */
+    private boolean roomForAutoRegistration(String fromDomain) {
+        if (manager.getPeerRegistry().getPeers().size() < MAX_PEERS_FOR_AUTO_REGISTRATION) return true;
+        long now = System.currentTimeMillis();
+        if (now - autoRegistrationRefusedLoggedAt >= 60_000L) {
+            autoRegistrationRefusedLoggedAt = now;
+            Log.warn("SECURITY: not auto-registering {} — {} peers are configured already. Add it by hand "
+                   + "if it is wanted. Further cases are logged at most once a minute.", fromDomain,
+                     MAX_PEERS_FOR_AUTO_REGISTRATION);
+        }
+        return false;
+    }
+
     /** The peer removed us: drops its mappings, routes and cached state, and marks it WITHDRAWN. */
     private void handlePeerWithdraw(String fromDomain) {
         Log.info("peer-withdraw from {} — marking WITHDRAWN and clearing cached state", fromDomain);
@@ -231,6 +252,7 @@ public class FederationIQHandler extends IQHandler {
         Log.info("peer-disable from {} — tearing down and marking REMOTE_DISABLED (cannot re-enable locally)",
                  fromDomain);
         if (!manager.getPeerRegistry().contains(fromDomain)) {
+            if (!roomForAutoRegistration(fromDomain)) return;
             manager.getPeerRegistry().addPeer(fromDomain);
             manager.getPeerRegistry().setUntrusted(fromDomain, true);
         }

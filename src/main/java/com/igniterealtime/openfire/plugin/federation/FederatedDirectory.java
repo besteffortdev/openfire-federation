@@ -178,12 +178,19 @@ public class FederatedDirectory extends AbstractComponent {
     }
 
     private static boolean containsAll(ContactListManager.Contact c, List<String> words) {
-        String name = c.name().toLowerCase(Locale.ROOT);
-        String jid = c.jid().toLowerCase(Locale.ROOT);
         for (String w : words) {
-            if (!name.contains(w) && !jid.contains(w)) return false;
+            if (!containsIgnoreCase(c.name(), w) && !containsIgnoreCase(c.jid(), w)) return false;
         }
         return true;
+    }
+
+    /** Whether {@code text} contains {@code word} whatever the case, without copying either. */
+    static boolean containsIgnoreCase(String text, String word) {
+        int last = text.length() - word.length();
+        for (int i = 0; i <= last; i++) {
+            if (text.regionMatches(true, i, word, 0, word.length())) return true;
+        }
+        return false;
     }
 
     /** The data-form result; its title says so when there were more matches than it lists. */

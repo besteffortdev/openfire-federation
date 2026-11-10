@@ -169,7 +169,7 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         if (incoming) answerSharedContact(packet);
 
-        rewriteInboundFileShare(packet);
+        if (incoming) rewriteInboundFileShare(packet);
 
         // Computed once: this runs on every stanza, and the lookup scans the MUC services.
         boolean toLocalConference = isLocalConferenceDomain(packet.getTo().getDomain());
@@ -511,18 +511,36 @@ public class FederationPacketInterceptor implements PacketInterceptor {
     }
 
     /**
-     * Rewrites a file share annotated by another server that is about to reach a local user, so its
-     * URL points at our download endpoint. A copy bound for a remote user keeps its annotation.
+     * Handles the file annotation on a message entering the router. One written by a reachable peer
+     * for its own upload is rewritten for a local recipient, so its URL points at our download
+     * endpoint. Any other is removed: a client or an unknown server could otherwise make this server,
+     * and every mapped one, request files and fill their transfer tables.
      */
     private void rewriteInboundFileShare(Packet packet) {
         if (!(packet instanceof Message msg)) return;
-        if (manager.getFileRelay() == null) return;
-        JID to = msg.getTo();
-        if (to == null || to.getNode() == null) return;
-        if (!XMPPServer.getInstance().isLocal(to)) return;
-        if (manager.getFileRelay().annotationOf(msg.getElement()) == null) return;
+        var relay = manager.getFileRelay();
+        if (relay == null) return;
+        Element ann = relay.annotationOf(msg.getElement());
+        if (ann == null) return;
         String fromDomain = msg.getFrom() != null ? msg.getFrom().getDomain() : null;
-        manager.getFileRelay().rewriteInPlace(msg, fromDomain);
+        String origin = ann.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
+        if (!annotationTrusted(fromDomain, origin, manager.getPeerRegistry().isReachable(fromDomain))) {
+            relay.removeAnnotations(msg.getElement());
+            Log.debug("Removed a file annotation from {} (origin {}): not a reachable peer speaking for itself",
+                      msg.getFrom(), LogSafe.text(origin));
+            return;
+        }
+        JID to = msg.getTo();
+        if (to == null || to.getNode() == null || !XMPPServer.getInstance().isLocal(to)) return;
+        relay.rewriteInPlace(msg, fromDomain);
+    }
+
+    /**
+     * Whether a file annotation on a stanza that reached the router from outside the overlay may be
+     * acted on: its sender's server is a reachable peer and names itself as the file's origin.
+     */
+    static boolean annotationTrusted(String senderDomain, String origin, boolean senderIsReachablePeer) {
+        return senderDomain != null && senderIsReachablePeer && senderDomain.equals(origin);
     }
 
     /**

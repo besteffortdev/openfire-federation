@@ -12,6 +12,7 @@ import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,6 +56,12 @@ public final class RoomJournal {
     static final int MAX_PER_ROOM = 10_000;
     /** Entries dropped at once when a room passes its bound, so a busy room does not shift its list per message. */
     private static final int DROP_BATCH = 500;
+    /** Longest payload journaled, in characters; a longer one is delivered live but never replayed. */
+    static final int MAX_PAYLOAD_CHARS = 64 * 1024;
+    /** Payload characters kept per room, and across all rooms; the oldest entries go first. */
+    static final long MAX_ROOM_CHARS = 16L * 1024 * 1024;
+    static final long MAX_TOTAL_CHARS = 128L * 1024 * 1024;
+
     /** How many entries one page may look at, per item it may send, so a page of skipped entries still ends. */
     static final int EXAMINED_PER_ITEM = 10;
     /** The longest window, whatever the property says: a week of traffic. */
@@ -92,6 +99,8 @@ public final class RoomJournal {
     private static final class RoomLog {
         final List<Entry> entries = new ArrayList<>();
         final Map<String, Entry> byKey = new HashMap<>();
+        /** Payload characters held in {@link #entries}. */
+        long chars;
     }
 
     private final Supplier<Path> directory;
@@ -102,6 +111,12 @@ public final class RoomJournal {
     private long nextSeq = 1;
     private long startedAt;
     private long lastFailureLoggedAt;
+    /** Payload characters held across all rooms. */
+    private long totalChars;
+    /** The open journal file, so an append is one write and not an open, a write and a close. */
+    private Writer writer;
+    /** Serializes prunes; the monitor is not held while a prune writes the new file. */
+    private final Object pruneLock = new Object();
 
     RoomJournal(Supplier<Path> directory, LongSupplier windowMs, LongSupplier clock) {
         this.directory = directory;
@@ -162,12 +177,14 @@ public final class RoomJournal {
         RoomLog log = rooms.computeIfAbsent(room, k -> new RoomLog());
         String key = key(kind, originRoom, originId);
         if (log.byKey.containsKey(key)) return false;
+        String xml = payload.asXML();
+        if (xml.length() > MAX_PAYLOAD_CHARS) return false;
         long now = clock.getAsLong();
         Entry e = new Entry(nextSeq++, room, kind, originRoom, originId, orEmpty(localId), orEmpty(author),
-                            orEmpty(src), orEmpty(hubs), now, sent > 0 ? sent : now, payload.asXML());
-        log.entries.add(e);
-        log.byKey.put(key, e);
+                            orEmpty(src), orEmpty(hubs), now, sent > 0 ? sent : now, xml);
+        add(log, e);
         if (log.entries.size() > MAX_PER_ROOM + DROP_BATCH) dropOldest(log, log.entries.size() - MAX_PER_ROOM);
+        enforceSizeBudgets(log);
         append(e);
         return true;
     }
@@ -267,21 +284,61 @@ public final class RoomJournal {
     }
 
     /**
-     * Drops entries older than the window and rewrites the file if any went; returns how many.
+     * Drops entries older than the window and rewrites the file if any went; returns how many. The
+     * new file is written without the monitor, so room traffic is not held up meanwhile; what was
+     * recorded during the write is added before the file is swapped in.
      */
-    public synchronized int prune() {
-        long floor = clock.getAsLong() - windowMs.getAsLong();
-        int dropped = 0;
-        for (Iterator<RoomLog> it = rooms.values().iterator(); it.hasNext(); ) {
-            RoomLog log = it.next();
-            int n = 0;
-            while (n < log.entries.size() && log.entries.get(n).accepted() < floor) n++;
-            dropOldest(log, n);
-            dropped += n;
-            if (log.entries.isEmpty()) it.remove();
+    public int prune() {
+        synchronized (pruneLock) {
+            List<Entry> snapshot;
+            long snapshotSeq;
+            int dropped = 0;
+            Path file;
+            String header;
+            synchronized (this) {
+                long floor = clock.getAsLong() - windowMs.getAsLong();
+                for (Iterator<RoomLog> it = rooms.values().iterator(); it.hasNext(); ) {
+                    RoomLog log = it.next();
+                    int n = 0;
+                    while (n < log.entries.size() && log.entries.get(n).accepted() < floor) n++;
+                    dropOldest(log, n);
+                    dropped += n;
+                    if (log.entries.isEmpty()) it.remove();
+                }
+                if (dropped == 0) return 0;
+                file = file();
+                if (file == null) return dropped;
+                snapshot = allEntries();
+                snapshotSeq = nextSeq - 1;
+                header = header();
+            }
+            Path tmp = file.resolveSibling(FILE_NAME + ".tmp");
+            try {
+                writeTo(tmp, header, snapshot);
+                synchronized (this) {
+                    List<Entry> since = new ArrayList<>();
+                    for (Entry e : allEntries()) if (e.seq() > snapshotSeq) since.add(e);
+                    StringBuilder late = new StringBuilder();
+                    for (Entry e : since) late.append(line(e));
+                    if (late.length() > 0) {
+                        Files.writeString(tmp, late, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+                    }
+                    closeWriter();
+                    Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                }
+            } catch (IOException ex) {
+                synchronized (this) {
+                    failed("rewrite", file, ex);
+                }
+                deleteQuietly(tmp);
+            }
+            return dropped;
         }
-        if (dropped > 0) rewrite();
-        return dropped;
+    }
+
+    /** Closes the journal file; appends reopen it. Called when the plugin stops. */
+    public synchronized void close() {
+        closeWriter();
     }
 
     /**
@@ -289,7 +346,9 @@ public final class RoomJournal {
      * file, the journal starts now.
      */
     public synchronized void load() {
+        closeWriter();
         rooms.clear();
+        totalChars = 0;
         resolvedDirectory = null;
         startedAt = clock.getAsLong();
         Path file = file();
@@ -324,14 +383,17 @@ public final class RoomJournal {
                     continue;
                 }
                 RoomLog log = rooms.computeIfAbsent(e.room(), k -> new RoomLog());
-                if (log.byKey.putIfAbsent(key(e.kind(), e.originRoom(), e.originId()), e) == null) {
-                    log.entries.add(e);
+                if (e.payload().length() > MAX_PAYLOAD_CHARS) {
+                    dropped++;
+                } else if (!log.byKey.containsKey(key(e.kind(), e.originRoom(), e.originId()))) {
+                    add(log, e);
                     kept++;
                 }
             }
         } catch (IOException e) {
             Log.warn("Could not read the room journal {}; catch-up starts from what arrives from now on", file, e);
             rooms.clear();
+            totalChars = 0;
             return;
         }
         // A file from before the header recorded it began no later than its first entry.
@@ -339,16 +401,63 @@ public final class RoomJournal {
         for (RoomLog log : rooms.values()) {
             if (log.entries.size() > MAX_PER_ROOM) dropOldest(log, log.entries.size() - MAX_PER_ROOM);
         }
+        for (RoomLog log : new ArrayList<>(rooms.values())) enforceSizeBudgets(log);
         if (dropped > 0 || !headerStarted) rewrite();
         Log.info("Room journal {} loaded: {} entr(ies) in {} room(s), {} past the window dropped", file,
                  kept, rooms.size(), dropped);
     }
 
-    private static void dropOldest(RoomLog log, int n) {
+    private void add(RoomLog log, Entry e) {
+        log.entries.add(e);
+        log.byKey.put(key(e.kind(), e.originRoom(), e.originId()), e);
+        log.chars += e.payload().length();
+        totalChars += e.payload().length();
+    }
+
+    private void dropOldest(RoomLog log, int n) {
         if (n <= 0) return;
         List<Entry> oldest = log.entries.subList(0, n);
-        for (Entry e : oldest) log.byKey.remove(key(e.kind(), e.originRoom(), e.originId()));
+        for (Entry e : oldest) {
+            log.byKey.remove(key(e.kind(), e.originRoom(), e.originId()));
+            log.chars -= e.payload().length();
+            totalChars -= e.payload().length();
+        }
         oldest.clear();
+    }
+
+    /**
+     * Keeps the payload text in memory bounded: {@code log} within its own budget, then the whole
+     * journal within the total by trimming whichever room holds most. The newest entry always stays.
+     */
+    private void enforceSizeBudgets(RoomLog log) {
+        trimTo(log, MAX_ROOM_CHARS);
+        while (totalChars > MAX_TOTAL_CHARS) {
+            RoomLog largest = null;
+            for (RoomLog l : rooms.values()) {
+                if (l.entries.size() > 1 && (largest == null || l.chars > largest.chars)) largest = l;
+            }
+            if (largest == null) return;
+            trimTo(largest, Math.max(0, largest.chars - (totalChars - MAX_TOTAL_CHARS)));
+        }
+    }
+
+    /** Drops the oldest entries of {@code log} until it holds at most {@code budget} characters or one entry. */
+    private void trimTo(RoomLog log, long budget) {
+        if (log.chars <= budget) return;
+        int n = 0;
+        long freed = 0;
+        while (n < log.entries.size() - 1 && log.chars - freed > budget) {
+            freed += log.entries.get(n).payload().length();
+            n++;
+        }
+        dropOldest(log, n);
+    }
+
+    private List<Entry> allEntries() {
+        List<Entry> all = new ArrayList<>();
+        rooms.values().forEach(log -> all.addAll(log.entries));
+        all.sort(Comparator.comparingLong(Entry::seq));
+        return all;
     }
 
     /** The journal file; its directory is resolved once per load, since resolving it touches the file system. */
@@ -366,14 +475,32 @@ public final class RoomJournal {
         Path file = file();
         if (file == null) return;
         try {
-            if (!Files.exists(file)) {
-                createPrivately(file);
-                Files.writeString(file, header() + "\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+            // One stat per message: a file removed underneath us is started again rather than written unseen.
+            boolean exists = Files.exists(file);
+            if (!exists) closeWriter();
+            if (writer == null) {
+                if (!exists) {
+                    createPrivately(file);
+                    Files.writeString(file, header() + "\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+                }
+                writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
             }
-            Files.writeString(file, line(e), StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+            writer.write(line(e));
+            writer.flush();
         } catch (IOException ex) {
+            closeWriter();
             failed("append to", file, ex);
         }
+    }
+
+    private void closeWriter() {
+        if (writer == null) return;
+        try {
+            writer.close();
+        } catch (IOException e) {
+            Log.debug("Could not close the room journal", e);
+        }
+        writer = null;
     }
 
     /** Writes every entry in memory to a new file and moves it over the old one; a failure leaves the old one. */
@@ -381,25 +508,32 @@ public final class RoomJournal {
         Path file = file();
         if (file == null) return;
         Path tmp = file.resolveSibling(FILE_NAME + ".tmp");
-        List<Entry> all = new ArrayList<>();
-        rooms.values().forEach(log -> all.addAll(log.entries));
-        all.sort(Comparator.comparingLong(Entry::seq));
         try {
-            Files.deleteIfExists(tmp);
-            createPrivately(tmp);
-            try (BufferedWriter w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8, StandardOpenOption.WRITE)) {
-                w.write(header());
-                w.newLine();
-                for (Entry e : all) w.write(line(e));
-            }
+            writeTo(tmp, header(), allEntries());
+            closeWriter();
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException ex) {
             failed("rewrite", file, ex);
-            try {
-                Files.deleteIfExists(tmp);
-            } catch (IOException ignored) {
-                // A leftover temporary file is replaced by the next rewrite.
-            }
+            deleteQuietly(tmp);
+        }
+    }
+
+    /** Writes a private new file holding {@code header} and {@code entries}, replacing any leftover. */
+    private static void writeTo(Path tmp, String header, List<Entry> entries) throws IOException {
+        Files.deleteIfExists(tmp);
+        createPrivately(tmp);
+        try (BufferedWriter w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8, StandardOpenOption.WRITE)) {
+            w.write(header);
+            w.newLine();
+            for (Entry e : entries) w.write(line(e));
+        }
+    }
+
+    private static void deleteQuietly(Path tmp) {
+        try {
+            Files.deleteIfExists(tmp);
+        } catch (IOException ignored) {
+            // A leftover temporary file is replaced by the next rewrite.
         }
     }
 

@@ -302,6 +302,42 @@ The Federation tab's API uses a double-submit token (a `fed-csrf` cookie echoed 
 parameter), so a forged request from another site cannot trigger peer/room changes in a logged-in admin's
 browser. After upgrading, reload an already-open Federation tab once so its scripts pick up the token.
 
+## Markers and annotations are not credentials
+
+Two elements in the plugin's namespace steer its own processing: `fed-origin`, which makes the
+interceptor leave a stanza alone, and `fed-file`, which makes a server pull a file and rewrite a link.
+Anyone can write either into a stanza, so since 1.13.1 neither is believed on sight:
+
+- **`fed-origin`** counts only on a packet this server marked itself. A stanza that arrives carrying
+  the element goes through every check like any other. Before 1.13.1 it skipped the user-search guard,
+  the room-traversal policy and the leak guard.
+- **`fed-file`** on a stanza that reaches the router from a client or over native S2S is acted on only
+  when the sender's server is a reachable peer and names itself as the file's origin. Any other is
+  removed, so a user cannot make this server and every mapped one request files and fill their
+  transfer tables.
+- **A forwarded stanza must name its sender.** A `muc-forward` or 1:1 forward whose payload has no
+  `from`, or one that does not parse, is dropped and logged as `SECURITY:`. Clients read a stanza
+  without a sender as coming from their own account or server.
+
+## Pinned peers and unencrypted links
+
+A link without TLS presents no certificate, so there is nothing to compare with the pin. Since 1.13.1 a
+peer that has a pinned key and is reached over an **unencrypted link this server opened** is treated
+like a changed key: it is auto-marked untrusted and flagged. Restore TLS and make the peer trusted
+again, or remove and re-add it to forget the pin. An incoming-only link proves nothing either way and
+is not judged. Setting Openfire's S2S TLS policy to *required* rules the case out altogether.
+
+## File relay limits
+
+- **Store size.** `plugin.federation.files.maxStoreMB` (4096) bounds the complete and arriving files
+  together. Past it, pulls, offers and local stagings are refused and logged at most once a minute.
+- **Staging reads the upload service only.** The local-upload check accepts a URL without a port, the
+  HTTP-bind ports, the upload plugin's announced port and those in
+  `plugin.federation.files.uploadPorts`. The fetch does not follow redirects. A user can therefore not
+  have the server read another HTTP service on itself and relay the answer.
+- **The storage directory is restricted only when it is the relay's own:** new, empty, or holding relay
+  files only. A directory that already holds something else keeps its permissions, with a warning.
+
 ## File type filtering & scanning
 
 `plugin.federation.files.allowedExtensions` (the *Files* tab) gates what a server will stage for outbound

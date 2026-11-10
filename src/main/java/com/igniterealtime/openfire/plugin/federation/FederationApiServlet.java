@@ -64,7 +64,7 @@ public class FederationApiServlet extends HttpServlet {
 
         try {
             boolean poll = "poll".equals(req.getParameter("action"));
-            out.print(poll ? longPoll(req.getParameter("hash")) : buildStatusJson(plugin));
+            out.print(poll ? longPoll(req.getParameter("hash")) : status(plugin, 0).json());
         } catch (RuntimeException e) {
             Log.error("Admin API: could not build the status document", e);
             resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
@@ -85,8 +85,9 @@ public class FederationApiServlet extends HttpServlet {
      * then answers with the status JSON and its new fingerprint under {@code hash}.
      */
     private String longPoll(String clientHash) {
-        String json = buildStatusJson(FederationPlugin.getInstance());
-        String hash = fingerprint(json);
+        Status status = status(FederationPlugin.getInstance(), STATUS_SHARED_MS);
+        String json = status.json();
+        String hash = status.hash();
         if (clientHash != null && !clientHash.isEmpty() && hash.equals(clientHash)) {
             boolean hold = heldPolls.incrementAndGet() <= POLL_MAX_HELD;
             try {
@@ -101,14 +102,37 @@ public class FederationApiServlet extends HttpServlet {
                     }
                     FederationPlugin plugin = FederationPlugin.getInstance();
                     if (plugin == null) return error("Plugin not loaded");
-                    json = buildStatusJson(plugin);
-                    hash = fingerprint(json);
+                    status = status(plugin, STATUS_SHARED_MS);
+                    json = status.json();
+                    hash = status.hash();
                 }
             } finally {
                 heldPolls.decrementAndGet();
             }
         }
         return "{\"hash\":\"" + hash + "\"," + json.substring(1);
+    }
+
+    /** A built status document and its fingerprint. */
+    private record Status(String json, String hash, long builtAt) { }
+
+    /** How long held polls share one built status document, so several open tabs cost one build a second. */
+    private static final long STATUS_SHARED_MS = 900;
+    private static volatile Status lastStatus;
+    private static final Object STATUS_LOCK = new Object();
+
+    /** The status document, rebuilt unless one no older than {@code maxAgeMs} is at hand. */
+    private Status status(FederationPlugin plugin, long maxAgeMs) {
+        Status s = lastStatus;
+        if (s != null && System.currentTimeMillis() - s.builtAt() < maxAgeMs) return s;
+        synchronized (STATUS_LOCK) {
+            s = lastStatus;
+            if (s != null && System.currentTimeMillis() - s.builtAt() < maxAgeMs) return s;
+            String json = buildStatusJson(plugin);
+            s = new Status(json, fingerprint(json), System.currentTimeMillis());
+            lastStatus = s;
+            return s;
+        }
     }
 
     /**
@@ -597,7 +621,10 @@ public class FederationApiServlet extends HttpServlet {
 
         String action = req.getParameter("action");
         try {
-            out.print(runAction(action == null ? "" : action, req, plugin.getManager()));
+            String reply = runAction(action == null ? "" : action, req, plugin.getManager());
+            // The page reloads the status right after an action and must see its effect.
+            lastStatus = null;
+            out.print(reply);
         } catch (RuntimeException e) {
             Log.error("Admin API: action '{}' failed", LogSafe.text(action), e);
             resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
@@ -1141,10 +1168,13 @@ public class FederationApiServlet extends HttpServlet {
     private void ensureCsrfCookie(HttpServletRequest req, HttpServletResponse resp) {
         Cookie existing = CookieUtils.getCookie(req, CSRF_COOKIE);
         if (existing != null && existing.getValue() != null && !existing.getValue().isEmpty()) return;
-        Cookie c = new Cookie(CSRF_COOKIE, StringUtils.randomString(24));
-        c.setPath("/");
-        c.setMaxAge(-1);
-        resp.addCookie(c);
+        // Written as a header: the servlet API's Cookie has no SameSite. The value is alphanumeric.
+        resp.addHeader("Set-Cookie", csrfCookieHeader(StringUtils.randomString(24), req.isSecure()));
+    }
+
+    /** The Set-Cookie value of a session CSRF cookie that browsers never send on a cross-site request. */
+    static String csrfCookieHeader(String value, boolean secure) {
+        return CSRF_COOKIE + "=" + value + "; Path=/; SameSite=Strict" + (secure ? "; Secure" : "");
     }
 
     /** Double-submit CSRF check: the {@code csrf} parameter must equal the cookie. */

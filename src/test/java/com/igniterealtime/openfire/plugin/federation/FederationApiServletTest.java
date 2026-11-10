@@ -67,4 +67,11 @@ class FederationApiServletTest {
         assertEquals(FederationApiServlet.fingerprint(quiet), FederationApiServlet.fingerprint(busier));
         assertFalse(FederationApiServlet.fingerprint(quiet).equals(FederationApiServlet.fingerprint(cleared)));
     }
+
+    @Test
+    @DisplayName("the CSRF cookie is never sent on a cross-site request, and is Secure over HTTPS")
+    void csrfCookieAttributes() {
+        assertEquals("fed-csrf=abc123; Path=/; SameSite=Strict", FederationApiServlet.csrfCookieHeader("abc123", false));
+        assertTrue(FederationApiServlet.csrfCookieHeader("abc123", true).endsWith("; Secure"));
+    }
 }

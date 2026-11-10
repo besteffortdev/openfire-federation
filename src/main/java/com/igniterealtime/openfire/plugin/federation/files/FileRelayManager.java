@@ -15,6 +15,7 @@ import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.http.HttpBindManager;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
+import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.JID;
@@ -52,6 +53,7 @@ import java.util.Base64;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -526,6 +528,8 @@ public class FileRelayManager {
         String id = sha256Hex(url.getBytes(StandardCharsets.UTF_8));
         String name = fileNameFromUrl(url);
         String token = ensureLocalContent(id, url, name);
+        // Not staged, so not annotated: the share keeps its original URL.
+        if (token == null) return null;
         Element ann = DocumentHelper.createElement(
                 QName.get(ANNOTATION, Namespace.get(FederationStanzaFactory.NS)));
         ann.addAttribute(FederationStanzaFactory.ATTR_ID, id);
@@ -550,6 +554,13 @@ public class FileRelayManager {
     public Element annotationOf(Element messageEl) {
         Element ann = messageEl.element(ANNOTATION);
         return (ann != null && FederationStanzaFactory.NS.equals(ann.getNamespaceURI())) ? ann : null;
+    }
+
+    /** Removes every {@code fed-file} annotation from a message. */
+    public void removeAnnotations(Element messageEl) {
+        for (Element ann : new ArrayList<>(messageEl.elements(ANNOTATION))) {
+            if (FederationStanzaFactory.NS.equals(ann.getNamespaceURI())) messageEl.remove(ann);
+        }
     }
 
     /** Shown to remote occupants when the sender's room has file federation off. */
@@ -621,6 +632,8 @@ public class FileRelayManager {
         if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return false;
         String host = uri.getHost();
         if (host == null) return false;
+        // Any other port is some other service on this host, which the staging fetch must not be made to read.
+        if (!portAllowed(uri.getPort(), uploadPorts())) return false;
         String marker = FederationProperties.FILES_UPLOAD_PATH_MARKER.getValue();
         if (marker != null && !marker.isBlank()
                 && (uri.getPath() == null || !uri.getPath().contains(marker.strip()))) {
@@ -641,13 +654,62 @@ public class FileRelayManager {
         return false;
     }
 
+    /** Whether an upload URL's port is acceptable: the scheme's default, or one of {@code allowed}. */
+    static boolean portAllowed(int port, Set<Integer> allowed) {
+        return port == -1 || allowed.contains(port);
+    }
+
+    /** The ports our upload service may be on: HTTP-bind's, the upload plugin's announced one, and the configured extras. */
+    private static Set<Integer> uploadPorts() {
+        Set<Integer> ports = new HashSet<>();
+        ports.add(HttpBindManager.HTTP_BIND_PORT.getValue());
+        ports.add(HttpBindManager.HTTP_BIND_SECURE_PORT.getValue());
+        int announced = JiveGlobals.getIntProperty("plugin.httpfileupload.announcedWebPort", -1);
+        if (announced > 0) ports.add(announced);
+        String extra = FederationProperties.FILES_UPLOAD_PORTS.getValue();
+        if (extra != null) {
+            for (String p : extra.split(",")) {
+                try {
+                    if (!p.isBlank()) ports.add(Integer.parseInt(p.strip()));
+                } catch (NumberFormatException ignored) {
+                    // Not a port: the admin page of system properties shows the value as typed.
+                }
+            }
+        }
+        return ports;
+    }
+
+    /** Whether the store may take {@code extraBytes} more, counting the transfers now arriving. */
+    private boolean storeHasRoomFor(long extraBytes) {
+        long limit = FederationProperties.FILES_MAX_STORE_MB.getValue() * 1024L * 1024L;
+        if (limit <= 0) return true;
+        long used = store.totalBytes();
+        for (Transfer t : transfers.values()) {
+            if (t.state == State.RECEIVING && t.size > 0) used += t.size;
+        }
+        return used + extraBytes <= limit;
+    }
+
+    /** Warns that the relay refused work for lack of room, at most once a minute. */
+    private void logAtCapacity(String what, String why) {
+        long now = System.currentTimeMillis();
+        if (now - transferCapLoggedAt < 60_000L) return;
+        transferCapLoggedAt = now;
+        Log.warn("File relay: {} — {}. Further cases are logged at most once a minute.", LogSafe.text(what), why);
+    }
+
     /**
-     * Starts staging a local upload unless it is stored already, and returns its share token. The
-     * token is minted once per file and kept across retries, so annotations already sent stay valid.
+     * Starts staging a local upload unless it is stored already, and returns its share token, or
+     * null when the transfer table is full. The token is minted once per file and kept across
+     * retries, so annotations already sent stay valid.
      */
     private String ensureLocalContent(String id, String url, String name) {
         FileRelayStore.StoredFile stored = store.get(id);
         if (stored != null) return stored.token();
+        if (!transfers.containsKey(id) && transfers.size() >= MAX_TRANSFERS) {
+            logAtCapacity("not staging local upload " + id, MAX_TRANSFERS + " transfers already tracked");
+            return null;
+        }
         Transfer t = transfers.compute(id, (k, cur) -> {
             if (cur != null && cur.state != State.FAILED) return cur;
             Transfer nt = new Transfer(k, State.FETCHING);
@@ -686,6 +748,15 @@ public class FileRelayManager {
             failParked(t.id, "stage-failed");
             return;
         }
+        if (!storeHasRoomFor(staged.size())) {
+            logAtCapacity("not staging local upload " + t.id, "the store is at its limit of "
+                    + FederationProperties.FILES_MAX_STORE_MB.getValue() + " MB");
+            store.deletePart(t.id);
+            t.state = State.FAILED;
+            t.touch();
+            failParked(t.id, "stage-failed");
+            return;
+        }
         if (FederationProperties.FILES_AV_ENABLED.getValue() && !passesEgressScan(t, staged.size())) return;
         try {
             store.finalizePart(t.id, t.name, staged.mime(), staged.size(), staged.sha256(), t.token);
@@ -715,6 +786,8 @@ public class FileRelayManager {
                 https.setSSLSocketFactory(trustAllFactory());
                 https.setHostnameVerifier(trustAllHostnames());
             }
+            // The URL was checked to point at our upload service; a redirect could point anywhere.
+            conn.setInstanceFollowRedirects(false);
             conn.setConnectTimeout(10_000);
             conn.setReadTimeout(30_000);
             conn.setRequestProperty("User-Agent", "openfire-federation-file-relay");
@@ -847,12 +920,12 @@ public class FileRelayManager {
                                   LocalDest dest, String... hints) {
         if (store.has(id)) return;
         if (!transfers.containsKey(id) && transfers.size() >= MAX_TRANSFERS) {
-            long now = System.currentTimeMillis();
-            if (now - transferCapLoggedAt >= 60_000L) {
-                transferCapLoggedAt = now;
-                Log.warn("File relay: not pulling {} from {} — {} transfers already tracked. Further cases are "
-                       + "logged at most once a minute.", id, LogSafe.text(origin), MAX_TRANSFERS);
-            }
+            logAtCapacity("not pulling " + id + " from " + origin, MAX_TRANSFERS + " transfers already tracked");
+            return;
+        }
+        if (!transfers.containsKey(id) && !storeHasRoomFor(0)) {
+            logAtCapacity("not pulling " + id + " from " + origin, "the store is at its limit of "
+                    + FederationProperties.FILES_MAX_STORE_MB.getValue() + " MB");
             return;
         }
         List<String> hintList = new ArrayList<>();
@@ -1054,6 +1127,12 @@ public class FileRelayManager {
             Log.warn("File relay: rejecting file-offer for {} from {} — implausible geometry "
                    + "(size={}, chunkSize={}, totalChunks={}, cap={})",
                      id, fromDomain, size, chunkSize, totalChunks, cap);
+            synchronized (t) { failTransfer(t); }
+            return;
+        }
+        if (!storeHasRoomFor(size)) {
+            logAtCapacity("refusing file-offer for " + id + " from " + fromDomain + " (" + size + " bytes)",
+                    "the store is at its limit of " + FederationProperties.FILES_MAX_STORE_MB.getValue() + " MB");
             synchronized (t) { failTransfer(t); }
             return;
         }

@@ -245,6 +245,8 @@ Set under **Admin Console → Server → System Properties** (or via the Connect
 | `plugin.federation.files.maxSizeMB` | `25` | Largest file the relay will stage, transfer, or accept. Also in the *Files* tab. |
 | `plugin.federation.files.chunkBytes` | `131072` | Raw bytes per `file-chunk` IQ (base64 adds ~33%; keep well under the S2S stanza‑size limit). |
 | `plugin.federation.files.chunkDelayMs` | `20` | Pause between chunk sends so a big file can't starve chat traffic on the link. |
+| `plugin.federation.files.maxStoreMB` | `4096` | Most disk space the relay's store may hold. A file that would pass it is not pulled or staged, and its share keeps the original link. `0` removes the limit. |
+| `plugin.federation.files.uploadPorts` | *(empty)* | Extra comma‑separated ports an upload URL may name. The HTTP‑bind ports, the upload plugin's announced port and URLs without a port are always accepted; any other port is not treated as this server's upload service. |
 | `plugin.federation.files.retentionDays` | `90` | Days a relayed file is kept in the storage directory before purge. Also in the *Files* tab. |
 | `plugin.federation.files.storageDir` | `/var/lib/openfire/federation-files` | Full path of the directory where relayed file content is stored. Changing it live moves existing files. Also in the *Files* tab. |
 | `plugin.federation.files.publicUrlBase` | *(auto)* | Base URL for rewritten links to this server's download endpoint. Blank derives `https://<domain>:<http-bind-secure-port>/federation-files`; set explicitly behind a proxy. |

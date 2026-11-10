@@ -175,4 +175,15 @@ class FederatedDirectoryTest {
         assertEquals("Ann Archer", items.get(0).elementText("nick"));
         assertFalse(query.asXML().contains("xmlns=\"\""));
     }
+
+    @Test
+    @DisplayName("matching ignores case without copying the contact's text")
+    void containsIgnoreCase() {
+        assertTrue(FederatedDirectory.containsIgnoreCase("Alice Martin", "martin"));
+        assertTrue(FederatedDirectory.containsIgnoreCase("ÉQUIPE", "équipe"));
+        assertTrue(FederatedDirectory.containsIgnoreCase("anything", ""));
+
+        assertFalse(FederatedDirectory.containsIgnoreCase("Al", "alice"));
+        assertFalse(FederatedDirectory.containsIgnoreCase("", "a"));
+    }
 }

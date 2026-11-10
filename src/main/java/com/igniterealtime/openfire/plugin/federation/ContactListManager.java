@@ -119,7 +119,17 @@ public class ContactListManager {
     }
 
     /** A list another server shared with us; {@code crossedUntrusted} if it came across an untrusted link. */
-    public record ReceivedList(List<Contact> contacts, long receivedAt, boolean crossedUntrusted) {}
+    public record ReceivedList(List<Contact> contacts, long receivedAt, boolean crossedUntrusted,
+                               Map<String, String> names) {
+        /** A received list with its display names indexed by JID, which roster building looks up per contact. */
+        static ReceivedList of(List<Contact> contacts, long receivedAt, boolean crossedUntrusted) {
+            Map<String, String> names = new HashMap<>();
+            for (Contact c : contacts) {
+                if (!c.name().isEmpty()) names.put(c.jid(), c.name());
+            }
+            return new ReceivedList(List.copyOf(contacts), receivedAt, crossedUntrusted, Map.copyOf(names));
+        }
+    }
 
     private final FederationManager manager;
 
@@ -135,6 +145,12 @@ public class ContactListManager {
     private volatile Map<String, Set<String>> authorized = Map.of();
     /** Local bare JID to the remote bare JIDs that probed or subscribed to it through a shared list. */
     private final Map<String, Set<String>> subscribers = new ConcurrentHashMap<>();
+
+    /** A change in a shared group's members reaches its targets within this long. */
+    private static final long SNAPSHOT_EVERY_MS = 60_000L;
+    /** Target domain to the contacts it should have, as last read from the groups; guarded by this object's lock. */
+    private Map<String, List<Contact>> snapshots = Map.of();
+    private long snapshotsAt;
 
     private Set<String> targetsUpLastTick = Set.of();
     private Set<String> originsUpLastTick = Set.of();
@@ -306,6 +322,18 @@ public class ContactListManager {
      * origins that just came into reach for theirs, and refreshes which users each server may see.
      */
     public synchronized void tick() {
+        reconcile(true);
+    }
+
+    /**
+     * {@link #tick} for the S2S poll, which runs every few seconds: it follows links coming up at once,
+     * but reads the shared groups' members again only every {@link #SNAPSHOT_EVERY_MS}.
+     */
+    public synchronized void pollTick() {
+        reconcile(false);
+    }
+
+    private void reconcile(boolean freshSnapshots) {
         long now = System.currentTimeMillis();
         boolean refresh = now - lastFullResend > RESEND_EVERY_MS;
         if (refresh) lastFullResend = now;
@@ -314,11 +342,17 @@ public class ContactListManager {
         for (ShareRule r : getShareRules()) configured.addAll(r.targets());
         Set<String> tracked = new HashSet<>(configured);
         tracked.addAll(sent.keySet());
+        if (freshSnapshots || now - snapshotsAt >= SNAPSHOT_EVERY_MS || !snapshots.keySet().equals(configured)) {
+            Map<String, List<Contact>> fresh = new HashMap<>();
+            for (String target : configured) fresh.put(target, computeSnapshot(target));
+            snapshots = fresh;
+            snapshotsAt = now;
+        }
 
         Map<String, Set<String>> auth = new HashMap<>();
         Set<String> up = new HashSet<>();
         for (String target : tracked) {
-            List<Contact> snap = configured.contains(target) ? computeSnapshot(target) : List.of();
+            List<Contact> snap = snapshots.getOrDefault(target, List.of());
             if (!snap.isEmpty()) auth.put(target, jidsOf(snap));
             if (!canExchangeWith(target)) continue;
             up.add(target);
@@ -518,7 +552,7 @@ public class ContactListManager {
                     return;
                 }
             }
-            received.put(origin, new ReceivedList(List.copyOf(sorted), System.currentTimeMillis(), crossedUntrusted));
+            received.put(origin, ReceivedList.of(sorted, System.currentTimeMillis(), crossedUntrusted));
         }
         boolean changed = prev == null || !prev.contacts().equals(sorted);
         if (changed) {
@@ -874,12 +908,7 @@ public class ContactListManager {
         UserNameManager.addUserNameProvider(origin, jid -> {
             ReceivedList list = received.get(origin);
             String bare = jid.toBareJID();
-            if (list != null) {
-                for (Contact c : list.contacts()) {
-                    if (c.jid().equals(bare) && !c.name().isEmpty()) return c.name();
-                }
-            }
-            return bare;
+            return list == null ? bare : list.names().getOrDefault(bare, bare);
         });
     }
 

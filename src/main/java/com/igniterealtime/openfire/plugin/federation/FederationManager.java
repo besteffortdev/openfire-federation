@@ -139,6 +139,7 @@ public class FederationManager {
             if (interceptor != null) InterceptorManager.getInstance().removeInterceptor(interceptor);
         });
         stopStep("room catch-up", () -> { if (iqHandler != null) iqHandler.getRoomCatchup().stop(); });
+        stopStep("room journal", roomJournal::close);
         stopStep("federated directory", this::removeDirectory);
         stopStep("contact lists", contactLists::stop);
         stopStep("file relay", () -> { if (fileRelay != null) fileRelay.stop(); });

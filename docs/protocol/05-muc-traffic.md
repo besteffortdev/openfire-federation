@@ -480,6 +480,9 @@ The sync presences are **marked with `<fed-origin/>`** ([01](01-transport.md#the
 > A receiver MUST NOT respond to a presence carrying `<fed-origin/>` by syncing its own occupants
 > back. Two servers that both reciprocate will sync at each other indefinitely.
 
+A sender SHOULD also mark the presence it forwards when an occupant only changes status. Such a
+presence is not a join, and the list it would be answered with is one the sender already has.
+
 ### Choosing where to send it
 
 The join does not necessarily arrive from the joiner's home server — on a multi-hop path it arrives

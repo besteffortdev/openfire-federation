@@ -50,8 +50,9 @@ final class FileRelayStore {
     /** Opens the configured directory, restricts it to the owner and indexes the stored files. */
     synchronized void init() throws IOException {
         Path dir = resolveConfiguredDir();
+        boolean existed = Files.isDirectory(dir);
         Files.createDirectories(dir);
-        restrictToOwner(dir);
+        restrictIfOurs(dir, existed);
         baseDir = dir;
         int loaded = reindex();
         Log.info("File relay store initialised at {} — {} file(s)", baseDir, loaded);
@@ -66,6 +67,38 @@ final class FileRelayStore {
             Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"));
         } catch (UnsupportedOperationException | IOException e) {
             Log.debug("Could not restrict permissions on file relay store {}", dir, e);
+        }
+    }
+
+    /**
+     * Restricts {@code dir} unless it existed already and holds something other than relay files. An
+     * admin who names a shared directory by mistake must not have its permissions changed under it.
+     */
+    private static void restrictIfOurs(Path dir, boolean existed) {
+        if (!existed || holdsOnlyRelayFiles(dir)) {
+            restrictToOwner(dir);
+        } else {
+            Log.warn("File relay store {} already held other files, so its permissions were left as they "
+                   + "are. It keeps other people's files and share tokens: give the relay a directory of "
+                   + "its own, readable by the Openfire user only", dir);
+        }
+    }
+
+    /** Whether every entry of {@code dir} is a relay file: a 64-hex id, alone or with .meta or .part. */
+    static boolean holdsOnlyRelayFiles(Path dir) {
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir)) {
+            for (Path p : ds) {
+                String name = p.getFileName().toString();
+                int dot = name.indexOf('.');
+                String id = dot < 0 ? name : name.substring(0, dot);
+                String ext = dot < 0 ? "" : name.substring(dot);
+                if (!FileRelayManager.isHexId(id) || !(ext.isEmpty() || ext.equals(".meta") || ext.equals(".part"))) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (IOException e) {
+            return false;
         }
     }
 
@@ -89,8 +122,9 @@ final class FileRelayStore {
         List<Path> copied = new ArrayList<>();
         List<Path> originals = new ArrayList<>();
         try {
+            boolean existed = Files.isDirectory(newDir);
             Files.createDirectories(newDir);
-            restrictToOwner(newDir);
+            restrictIfOurs(newDir, existed);
             int migrated = 0;
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(oldDir, "*.meta")) {
                 for (Path meta : ds) {
@@ -153,6 +187,13 @@ final class FileRelayStore {
             }
         }
         return loaded;
+    }
+
+    /** Bytes of complete files held. */
+    long totalBytes() {
+        long total = 0;
+        for (StoredFile sf : index.values()) total += sf.size();
+        return total;
     }
 
     /** Whether a directory has been opened; the relay is unusable until then. */

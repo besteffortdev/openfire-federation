@@ -375,7 +375,7 @@ public class S2SMonitor {
         rescheduleKeepalive();
 
         try {
-            federationManager.getContactLists().tick();
+            federationManager.getContactLists().pollTick();
         } catch (RuntimeException e) {
             Log.warn("Contact-list reconciliation failed", e);
         }

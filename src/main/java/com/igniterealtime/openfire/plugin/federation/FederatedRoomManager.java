@@ -75,6 +75,12 @@ public class FederatedRoomManager {
      */
     private final ConcurrentHashMap<String, List<RoomMapping>> localMappings = new ConcurrentHashMap<>();
 
+    /**
+     * Local room JID to its ACTIVE mappings, rebuilt whenever {@link #localMappings} changes. The
+     * interceptor asks for these on every room stanza, so they are not filtered out each time.
+     */
+    private final ConcurrentHashMap<String, List<RoomMapping>> activeMappings = new ConcurrentHashMap<>();
+
     /** Remote room JID to its mapping. */
     private final ConcurrentHashMap<String, RoomMapping> remoteMappings = new ConcurrentHashMap<>();
 
@@ -208,6 +214,21 @@ public class FederatedRoomManager {
     private void addLoadedMapping(RoomMapping m) {
         localMappings.computeIfAbsent(m.localRoomJid(), k -> new CopyOnWriteArrayList<>()).add(m);
         remoteMappings.put(m.remoteRoomJid(), m);
+        refreshActive(m.localRoomJid());
+    }
+
+    /** Rebuilds the cached ACTIVE mappings of one room; called after every change to its mappings. */
+    private void refreshActive(String localJid) {
+        List<RoomMapping> list = localMappings.get(localJid);
+        List<RoomMapping> active = list == null ? List.of()
+                : list.stream().filter(RoomMapping::isActive).collect(Collectors.toUnmodifiableList());
+        if (active.isEmpty()) activeMappings.remove(localJid);
+        else activeMappings.put(localJid, active);
+    }
+
+    /** The local rooms that have at least one ACTIVE mapping. */
+    public Set<String> getRoomsWithActiveMappings() {
+        return Collections.unmodifiableSet(activeMappings.keySet());
     }
 
     private void loadVirtualOccupants() {
@@ -456,6 +477,7 @@ public class FederatedRoomManager {
         RoomMapping m = new RoomMapping(localJid, remoteJid, remoteDomain, state, token);
         list.add(m);
         remoteMappings.put(remoteJid, m);
+        refreshActive(localJid);
 
         persistMappingsForRoom(localJid);
         persistMappingsIndex();
@@ -473,6 +495,7 @@ public class FederatedRoomManager {
                 RoomMapping updated = m.with(state, token != null ? token : m.token());
                 list.set(i, updated);
                 remoteMappings.put(updated.remoteRoomJid(), updated);
+                refreshActive(localJid);
                 persistMappingsForRoom(localJid);
                 Log.info("Room mapping {} ({}) → {}", localJid, remoteDomain, state);
                 return updated;
@@ -485,6 +508,7 @@ public class FederatedRoomManager {
     public void removeMapping(String localJid) {
         List<RoomMapping> removed = localMappings.remove(localJid);
         if (removed != null) {
+            activeMappings.remove(localJid);
             removed.forEach(m -> remoteMappings.remove(m.remoteRoomJid()));
             clearPersistedMappings(localJid);
             persistMappingsIndex();
@@ -504,6 +528,7 @@ public class FederatedRoomManager {
 
         list.remove(toRemove.get());
         remoteMappings.remove(toRemove.get().remoteRoomJid());
+        refreshActive(localJid);
 
         if (list.isEmpty()) {
             localMappings.remove(localJid);
@@ -521,9 +546,7 @@ public class FederatedRoomManager {
      * {@link #getAllMappingsForLocal} for every state.
      */
     public List<RoomMapping> getMappingsForLocal(String localJid) {
-        List<RoomMapping> list = localMappings.get(localJid);
-        if (list == null) return Collections.emptyList();
-        return list.stream().filter(RoomMapping::isActive).collect(Collectors.toList());
+        return activeMappings.getOrDefault(localJid, Collections.emptyList());
     }
 
     /** Every mapping of a local room, in any state; never null. */
@@ -562,9 +585,23 @@ public class FederatedRoomManager {
             .anyMatch(list -> list.stream().anyMatch(m -> m.remoteDomain().equals(remoteDomain)));
     }
 
+    /** Most virtual occupants tracked in one room, so a peer inventing users cannot grow it without bound. */
+    static final int MAX_VIRTUAL_OCCUPANTS_PER_ROOM = 1000;
+
+    /**
+     * Whether {@code virtualNick} may be shown in {@code localRoomJid}: it is there already, or the
+     * room has space and the nick survives the comma-separated list it is persisted in.
+     */
+    public boolean canTrackVirtualOccupant(String localRoomJid, String virtualNick) {
+        if (virtualNick == null || virtualNick.isEmpty() || virtualNick.indexOf(',') >= 0) return false;
+        ConcurrentHashMap<String, VirtualOccupant> byNick = virtualOccupants.get(localRoomJid);
+        return byNick == null || byNick.containsKey(virtualNick) || byNick.size() < MAX_VIRTUAL_OCCUPANTS_PER_ROOM;
+    }
+
     /**
      * Records a remote user injected into a local room, or one more path for one already there.
      * Persists only when something changed, since presence updates call this on every status change.
+     * Callers check {@link #canTrackVirtualOccupant} first.
      */
     public void trackVirtualOccupant(String localRoomJid, String origin, String arrivedVia, String virtualNick) {
         boolean newRoom = !virtualOccupants.containsKey(localRoomJid);

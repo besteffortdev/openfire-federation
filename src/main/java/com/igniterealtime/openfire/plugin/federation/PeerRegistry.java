@@ -268,6 +268,13 @@ public class PeerRegistry {
         return Optional.ofNullable(peers.get(domain));
     }
 
+    /** Whether {@code domain} is a configured peer whose link is up and confirmed by both ends. */
+    public boolean isReachable(String domain) {
+        if (domain == null) return false;
+        PeerServer peer = peers.get(domain);
+        return peer != null && peer.getStatus() == PeerServer.Status.REACHABLE;
+    }
+
     public boolean contains(String domain) {
         return peers.containsKey(domain);
     }

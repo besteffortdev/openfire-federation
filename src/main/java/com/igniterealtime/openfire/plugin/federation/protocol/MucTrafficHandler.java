@@ -93,6 +93,7 @@ public final class MucTrafficHandler {
     private final RoomCatchup catchup;
     private final ConcurrentHashMap<String, Deque<PendingDelivery>> pendingRoomDeliveries = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Deque<StoredModeration>> federatedModerations = new ConcurrentHashMap<>();
+    private volatile long occupantCapLoggedAt = 0;
 
     MucTrafficHandler(FederationManager manager, InboundValidation validation, RoomCatchup catchup) {
         this.manager = manager;
@@ -695,6 +696,16 @@ public final class MucTrafficHandler {
             return;
         }
 
+        if (!leaving && !manager.getRoomManager().canTrackVirtualOccupant(targetRoom, senderNick)) {
+            long now = System.currentTimeMillis();
+            if (now - occupantCapLoggedAt >= 60_000L) {
+                occupantCapLoggedAt = now;
+                Log.warn("Not showing {} in {} (via {}): the room already tracks the most remote occupants "
+                       + "allowed, or the address has a comma in it. Further cases are logged at most once "
+                       + "a minute.", LogSafe.text(senderNick), targetRoom, fromDomain);
+            }
+            return;
+        }
         recordPresenceForConsole(targetRoom, senderNick, presEl, leaving);
 
         JID targetJID      = new JID(targetRoom);
@@ -802,7 +813,7 @@ public final class MucTrafficHandler {
                 Presence sync = new Presence();
                 sync.setFrom(occupant.getUserAddress());
                 copyAvailability(occupant.getPresence().getElement(), sync.getElement());
-                FederationStanzaFactory.markAsForwarded(sync);
+                FederationStanzaFactory.addSyncMarker(sync);
                 FederationSender.send("occupant sync", remoteDomain, () -> FederationStanzaFactory.mucForward(
                         nextHop, remoteDomain, remoteRoomJid, localDomain, localDomain, sync));
             }

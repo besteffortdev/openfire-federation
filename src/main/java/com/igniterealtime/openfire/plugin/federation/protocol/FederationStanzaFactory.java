@@ -10,8 +10,11 @@ import org.xmpp.packet.JID;
 import org.xmpp.packet.Packet;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
 
 /**
  * Builds the IQ stanzas of the federation protocol ({@value #NS}) and holds its element and
@@ -424,16 +427,34 @@ public final class FederationStanzaFactory {
         return iq;
     }
 
+    /**
+     * The packets this server marked as its own deliveries. The element alone proves nothing, since
+     * any client or server can write one; only a packet in this set is skipped by the interceptor.
+     */
+    private static final Set<Packet> OWN_DELIVERIES =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+
     /** Marks a packet as delivered by federation, so the interceptor does not forward it again. */
     public static void markAsForwarded(Packet packet) {
+        addSyncMarker(packet);
+        OWN_DELIVERIES.add(packet);
+    }
+
+    /**
+     * Adds the {@code fed-origin} element to a room presence sent to a peer, which tells it not to
+     * answer with its own occupants (docs/protocol/05). It gives the packet no standing here.
+     */
+    public static void addSyncMarker(Packet packet) {
         Element el = packet.getElement();
         if (el.element(NS_ORIGIN_ELEMENT) == null) {
             el.addElement(NS_ORIGIN_ELEMENT, NS);
         }
     }
 
+    /** Whether this server itself marked {@code packet}; a marker written by anyone else does not count. */
     public static boolean isMarkedAsForwarded(Packet packet) {
-        return packet.getElement().element(NS_ORIGIN_ELEMENT) != null;
+        // The element is checked first: it is lock-free, and almost no stanza carries one.
+        return packet.getElement().element(NS_ORIGIN_ELEMENT) != null && OWN_DELIVERIES.contains(packet);
     }
 
     /** Whether {@code domain} is one of the entries of the comma-separated trail {@code via}. */

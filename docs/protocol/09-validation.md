@@ -118,7 +118,8 @@ deliver a stanza claiming to be from anybody.
 
 ```
 payloadFrom := embedded stanza's from attribute
-if absent or empty                        → allow (no identity claimed)
+if absent, empty or unparseable           → DROP (since 1.13.1; a client reads a stanza without a
+                                            sender as coming from its own account or server)
 untrusted := is the sending link untrusted?
 
 domain := JID-parse payloadFrom → domain part
@@ -615,7 +616,12 @@ minute. This implementation's values:
 | Contact lists from servers not mapped here | 32 servers, 50 000 contacts in all; forgotten when the origin loses its route |
 | Remote contacts tracked per shared local user | 1000 |
 | `contact-list-request` answers | one per 30 s per requesting server |
-| File transfers tracked at once | 512 |
+| File transfers tracked at once | 512, pulls and local stagings together |
+| File store | `plugin.federation.files.maxStoreMB` (4096) of complete and arriving files; a pull, offer or staging past it is refused |
+| Virtual occupants per room | 1000; a further one is not shown. An address with a comma in it is never shown |
+| Peers registered by open-federation mode | none once 256 peers are configured |
+| Room journal | payloads up to 64 KiB; 16 MiB of payload text per room and 128 MiB in all, oldest dropped first |
+| `room-catchup-request` answers | 60 per mapping per minute |
 | Domains remembered as answering mapping probes | 1024, only ones we route to; pongs for an unprobed domain are ignored |
 | `hubs` on one `muc-forward` | 32 entries; a longer trail is dropped |
 | Message arrivals remembered per mapped room | 2000 (origin room, origin stanza-id) pairs |
