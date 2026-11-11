@@ -253,7 +253,7 @@ An empty marker element this implementation attaches to a stanza before deliveri
 own outbound interceptor does not pick the stanza up and relay it back out.
 
 > The element is a label, never a credential. A receiver MUST NOT exempt a stanza from any check
-> because it carries `<fed-origin/>`: any client or server can write one. Since 1.13.1 this
+> because it carries `<fed-origin/>`: any client or server can write one. Since 1.14.0 this
 > implementation skips only the packets it marked itself, which it tracks in memory; before that, a
 > stanza arriving with the element bypassed the search guard, the room-traversal policy and the leak guard.
 
@@ -264,7 +264,7 @@ It **does cross the wire in one case**, and there it is protocol-significant:
 > Without that check, two servers sync occupant lists at each other forever.
 
 See [05-muc-traffic.md](05-muc-traffic.md#occupant-list-synchronisation). If you emit roster-sync
-presences, mark them. If you receive one, do not reciprocate. Since 1.13.1 a local occupant's status
+presences, mark them. If you receive one, do not reciprocate. Since 1.14.0 a local occupant's status
 change (away, back, a new status text) is marked too: it is not a join, and answering each one with a
 whole occupant list cost one stanza per occupant pair.
 

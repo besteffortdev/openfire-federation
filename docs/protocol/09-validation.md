@@ -118,7 +118,7 @@ deliver a stanza claiming to be from anybody.
 
 ```
 payloadFrom := embedded stanza's from attribute
-if absent, empty or unparseable           → DROP (since 1.13.1; a client reads a stanza without a
+if absent, empty or unparseable           → DROP (since 1.14.0; a client reads a stanza without a
                                             sender as coming from its own account or server)
 untrusted := is the sending link untrusted?
 

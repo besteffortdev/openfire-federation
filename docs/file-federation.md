@@ -181,7 +181,7 @@ Before received content becomes servable to a local recipient, the destination a
 - **Optional ClamAV** (`avEnabled`, off by default) — a scan that can't complete **fails closed**.
 
 Every block is recorded as a `RejectionEntry` (and AV outcomes as a `ScanLogEntry`) surfaced by the *Files*
-tab → *Activity Log*. A definitive rejection also notifies the waiting local room/user in-chat via the
+tab (*Activity log* for rejections, *Virus scanning* for scans). A definitive rejection also notifies the waiting local room/user in-chat via the
 `localDestinations` map.
 
 Both logs are disk-backed by

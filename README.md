@@ -140,7 +140,7 @@ Install the plugin on **every** server you want to participate in the federation
 ## Quick start
 
 1. **Install** the plugin on each server and open **Admin Console → Federation**.
-2. **Add a peer** (Peer Servers tab → *Add peer server*): enter the other server's XMPP domain. The peer
+2. **Add a peer** (Peers tab → *+ Add peer*): enter the other server's XMPP domain. The peer
    shows **Pending** while it waits for the other side to add you back; the dot turns green (*Reachable*)
    only once the remote's federation plugin confirms the mutual add. Repeat so every server knows its
    neighbours — they don't all need to be directly connected; routes propagate. A non‑federated server
@@ -159,18 +159,23 @@ The in‑console **documentation/readme** link has a fuller, screenshot‑level 
 
 ## Admin console reference
 
-The **Federation** tab has three sub‑views:
+The **Federation** page has six tabs. The one you are on is kept in the address, so a reload or a bookmark returns to it.
 
 | Tab | What it shows |
 |-----|----------------|
-| **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
-| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
-| **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers, one collapsed card per server showing how many federated rooms it offers. |
+| **Overview** | Opens first. Five tiles with the numbers at a glance; *Needs attention*, a list of everything that wants the admin (an unreachable peer, a changed certificate, a room link that stopped answering, a pending mapping request, a room loop, an unmapped contact list, a full file store…), worst first, each with the button that fixes it or leads to it; and *Network*, a map with one lane per peer and the servers reached through it by hop count. Every other tab shows a red or amber count when something behind it needs attention. |
+| **Peers** | *Peers*: add (**+ Add peer**), remove or disable peers, and see their status & last‑seen (*Pending* = waiting for the remote to add us back); each row opens a panel with its trust, exposure and deny settings. *S2S sessions*: live sessions, with one‑click **Add peer** for non‑federated servers. *Routing table*: learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
+| **Rooms** | *Room sharing*: local rooms with a per‑room *Federated* toggle; a federated room opens a panel with its sharing options, visibility, current mappings and a picker to link it to a remote room. Below, the remote rooms advertised by peers, one collapsed card per server, where a room can be mapped from the other side. *Rules for new rooms*: default settings by name pattern. |
 | **Users** | *Contact Sharing*: local groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups, made searchable in the federated directory, or both. Each card's header has *Deny* (keep the entry, drop every list that server sends and stop using its contacts; *Allow* undoes it) and *Delete* (remove the entry of a server that stopped sharing or is gone; a later list shows up as new). *Sent lists*: what each server currently receives. *Directory search*: the federated directory's state, and which servers may search this server's users (refused attempts are counted per server). |
+| **Files** | *File sharing*: the relay switch, size limit, allowed extensions and extra upload ports, then storage: the store size limit with a usage bar, retention and the storage directory. *Virus scanning*: the ClamAV switch and endpoint, and the recently scanned files. *Activity log*: rejected files and the log retention. |
+| **Settings** | Security switches (peer allowlist, remote room traversal), message and presence relays, the connection timers (keepalive, reconnect, mapping probe), and the reload of the `openfire.xml` block. |
 
 Every table sorts by any column: click its header for ascending, again for descending, a third time for
 the original order (numbers sort as numbers, anything else alphabetically; the choice is remembered per
-browser). Each list has a filter box. The page updates live as things change.
+browser). Each list has a filter box. The page updates live as things change, and its header says so when
+the connection to the server is lost. A setting's *Save* button lights up once its value is edited (Enter
+saves, Escape puts the saved value back), and an unsaved edit survives a refresh. Destructive actions ask
+first in a dialog on the page.
 
 ---
 
@@ -230,7 +235,7 @@ Notes:
 
 ## Configuration properties
 
-Set under **Admin Console → Server → System Properties** (or via the Connection settings UI for the first two).
+Set under **Admin Console → Server → System Properties**. The timers and switches are also on the *Settings* tab, and the file relay's properties on the *Files* tab.
 
 | Property | Default | Meaning |
 |----------|---------|---------|
@@ -285,7 +290,7 @@ those definitions — bring the container up once while online to seed the initi
 of signatures), after that it keeps working with no network access at all. Use the *Files* tab →
 *Test connection* to confirm the plugin can reach it before turning `avEnabled` on.
 
-the *Files* tab → *Activity Log* also lists *Recently scanned files (ClamAV)* — the last 200 received files
+the *Files* tab → *Virus scanning* also lists *Recently scanned files* — the last 200 received files
 this server has scanned (time, name, size, sending peer, verdict, and AV detail), newest first — plus
 *Rejected files*, every file blocked by any gate (extension allowlist, content sniff, SHA‑256 mismatch, AV).
 Transit hops are never scanned or listed. A quick way to confirm scanning is actually happening and see

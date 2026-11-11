@@ -35,7 +35,7 @@ tag. This stops a peer from siphoning the roster of, or injecting into, a room i
 `plugin.federation.peerAllowlist` defaults to `true`: only configured peers (those you **Add** in the admin
 console) may drive federation; every action from any other server is rejected. A peer is "configured" if you
 added it, so **both ends must add each other** — with the allowlist on, auto-registration of unknown peers is
-suppressed. Set it to `false` (or use the **Security** toggle on the Peer Servers tab) for open federation,
+suppressed. Set it to `false` (or use the **Security** toggle on the Settings tab) for open federation,
 where any server that can connect is accepted and auto-registered — **as an untrusted peer with nothing
 exposed** (since 1.10.8). A stranger therefore links only if it also declares itself untrusted, and sees
 nothing until you expose servers to it or promote it to trusted. Before 1.10.8 auto-registered peers were
@@ -89,12 +89,12 @@ only a curated set of servers.
 ## Deniable route advertisements (per-link inbound filter)
 
 The exposure controls above govern what you *send*; each side can also refuse what it *receives*. If a peer
-advertises a route (and rooms) for a destination you don't want, click **Deny** — on the Routing Table row,
+advertises a route (and rooms) for a destination you don't want, click **Deny** — on the row of the Peers tab's *Routing table*,
 or next to that server in the peer's settings panel (right column). The destination is refused whenever
 **that** peer advertises it: any installed route via that peer is torn down immediately (with room/ghost
 clean-up) and future advertisements are dropped on receive. A route to the same destination via a *different*
 peer is unaffected, and the deny is one-sided — nothing is negotiated with the peer. The denied entry stays
-listed in the Routing Table as a disabled (struck-through) row, and the deny is remembered even if the peer
+listed in the routing table as a disabled (struck-through) row, and the deny is remembered even if the peer
 withdraws the route and advertises it again later. **Allow** (on the disabled row, or in the peer's settings
 panel) lifts it and re-solicits the peer so the route re-appears. Denies are persisted per peer
 (`federation.peer.deniedroutes.<domain>`).
@@ -306,10 +306,10 @@ browser. After upgrading, reload an already-open Federation tab once so its scri
 
 Two elements in the plugin's namespace steer its own processing: `fed-origin`, which makes the
 interceptor leave a stanza alone, and `fed-file`, which makes a server pull a file and rewrite a link.
-Anyone can write either into a stanza, so since 1.13.1 neither is believed on sight:
+Anyone can write either into a stanza, so since 1.14.0 neither is believed on sight:
 
 - **`fed-origin`** counts only on a packet this server marked itself. A stanza that arrives carrying
-  the element goes through every check like any other. Before 1.13.1 it skipped the user-search guard,
+  the element goes through every check like any other. Before 1.14.0 it skipped the user-search guard,
   the room-traversal policy and the leak guard.
 - **`fed-file`** on a stanza that reaches the router from a client or over native S2S is acted on only
   when the sender's server is a reachable peer and names itself as the file's origin. Any other is
@@ -321,7 +321,7 @@ Anyone can write either into a stanza, so since 1.13.1 neither is believed on si
 
 ## Pinned peers and unencrypted links
 
-A link without TLS presents no certificate, so there is nothing to compare with the pin. Since 1.13.1 a
+A link without TLS presents no certificate, so there is nothing to compare with the pin. Since 1.14.0 a
 peer that has a pinned key and is reached over an **unencrypted link this server opened** is treated
 like a changed key: it is auto-marked untrusted and flagged. Restore TLS and make the peer trusted
 again, or remove and re-add it to forget the pin. An incoming-only link proves nothing either way and

@@ -679,6 +679,11 @@ public class FileRelayManager {
         return ports;
     }
 
+    /** Bytes of complete files the store holds, for the admin page. */
+    public long storeBytes() {
+        return store.totalBytes();
+    }
+
     /** Whether the store may take {@code extraBytes} more, counting the transfers now arriving. */
     private boolean storeHasRoomFor(long extraBytes) {
         long limit = FederationProperties.FILES_MAX_STORE_MB.getValue() * 1024L * 1024L;

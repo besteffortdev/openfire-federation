@@ -43,6 +43,7 @@
         .fed-header h2 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
         .fed-meta { color: var(--muted); font-size: 12px; margin-left: auto; text-align: right; }
         .fed-meta strong { color: var(--fg); }
+        .fed-live.down { background: var(--red); animation: none; }
         .fed-live {
             display: inline-block; width: 7px; height: 7px; border-radius: 50%;
             background: var(--green); margin-right: 4px; vertical-align: middle;
@@ -69,6 +70,15 @@
             transition: color .12s ease;
         }
         .fed-tab:hover  { color: var(--fg); }
+        .fed-tab:focus-visible, .fed-subtab:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; border-radius: 4px; }
+        .tab-badge {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-width: 18px; height: 18px; padding: 0 5px; margin-left: 6px; border-radius: 999px;
+            font-size: 11px; font-weight: 700; line-height: 1; vertical-align: 1px;
+        }
+        .tab-badge:empty { display: none; }
+        .tab-badge.bad  { background: var(--red);   color: #fff; }
+        .tab-badge.warn { background: var(--amber); color: #fff; }
         .fed-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
 
         .fed-panel { display: none; animation: fedfade .18s ease; }
@@ -104,6 +114,7 @@
             border-bottom: 1px solid var(--line);
         }
         .section-box-body { padding: 18px; }
+        .section-box-body, .peer-section-header { font-size: 13px; }
 
         .count-chip {
             display: inline-flex; align-items: center; justify-content: center;
@@ -125,12 +136,15 @@
             outline: none; border-color: var(--primary);
             box-shadow: 0 0 0 3px var(--primary-soft);
         }
-        #room-search { margin: 0 0 14px; width: 320px; }
-        #group-search { margin: 0 0 14px; width: 320px; }
         .list-search.in-col { width: 100%; max-width: none; box-sizing: border-box; margin: 0 0 6px; }
 
         /* Tables */
-        .table-scroll { max-height: 480px; overflow: auto; }
+        .table-scroll { max-height: max(480px, 72vh); overflow: auto; }
+        .exposed-col input[type=text]:not(.list-search) {
+            padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+            font: inherit; font-size: 12.5px; color: var(--fg); background: #fff;
+        }
+        .exposed-col input[type=text]:not(.list-search):focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
         .fed-table { width: 100%; border-collapse: collapse; font-size: 13px; }
         .fed-table thead th {
             position: sticky; top: 0; z-index: 2;
@@ -166,7 +180,7 @@
         .status-dot.orange { background: var(--amber); }
 
         /* Buttons */
-        .btn {
+        .btn, .btn-small {
             padding: 7px 15px; border: 1px solid transparent; border-radius: var(--radius-sm);
             cursor: pointer; font: inherit; font-size: 13px; font-weight: 600;
             transition: background .12s ease, border-color .12s ease, transform .04s ease;
@@ -182,6 +196,8 @@
         .btn-warn:hover { background: #fdecb8; }
         .btn-ghost  { background: var(--surface-2); color: #475467; }
         .btn-ghost:hover { background: #e6e9ee; }
+        .btn-plain  { background: #fff; color: #344054; border-color: var(--line); }
+        .btn-plain:hover { background: var(--surface); }
 
         /* Add-peer form */
         .add-peer-form { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
@@ -335,6 +351,130 @@
         .retry-countdown { color: var(--muted); font-size: 11px; font-style: italic; margin-left: 6px; }
         .panel-foot { font-size: 12px; color: var(--muted); margin: 4px 2px 0; line-height: 1.6; }
 
+        /* Overview */
+        .ov-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 20px; }
+        .ov-stat {
+            display: block; text-align: left; font: inherit; color: inherit; cursor: pointer;
+            border: 1px solid var(--line); border-radius: var(--radius); background: #fff;
+            box-shadow: var(--shadow); padding: 14px 16px;
+            transition: border-color .12s ease, transform .08s ease, box-shadow .12s ease;
+        }
+        .ov-stat:hover { border-color: var(--primary); transform: translateY(-1px); box-shadow: var(--shadow-pop); }
+        .ov-stat-label { font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+        .ov-stat-value { font-size: 26px; font-weight: 700; letter-spacing: -.02em; margin: 4px 0 2px; line-height: 1.15; }
+        .ov-stat-value small { font-size: 14px; font-weight: 600; color: var(--muted); }
+        .ov-stat-sub { font-size: 12px; color: var(--muted); }
+        .ov-stat.bad  .ov-stat-value { color: var(--red-ink); }
+        .ov-stat.off  .ov-stat-value { color: var(--faint); }
+
+        .ov-allgood { display: flex; align-items: center; gap: 12px; color: var(--green-ink); font-weight: 600; font-size: 14px; }
+        .ov-allgood-mark {
+            display: inline-flex; align-items: center; justify-content: center; flex: none;
+            width: 34px; height: 34px; border-radius: 50%; background: var(--green-soft); font-size: 17px;
+        }
+        .ov-allgood small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 2px; }
+        .ov-item {
+            display: flex; align-items: flex-start; gap: 12px; padding: 12px 0;
+            border-top: 1px solid var(--line-soft);
+        }
+        .ov-item:first-child { border-top: none; padding-top: 0; }
+        .ov-item:last-child { padding-bottom: 0; }
+        .ov-item-mark {
+            flex: none; width: 24px; height: 24px; border-radius: 50%; margin-top: 1px;
+            display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+        }
+        .ov-item.bad  .ov-item-mark { background: var(--red-soft);     color: var(--red-ink); }
+        .ov-item.warn .ov-item-mark { background: var(--amber-soft);   color: var(--amber-ink); }
+        .ov-item.info .ov-item-mark { background: var(--primary-soft); color: var(--primary-ink); }
+        .ov-item-main { flex: 1; min-width: 0; }
+        .ov-item-title { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+        .ov-item-detail { color: var(--muted); font-size: 12px; margin-top: 3px; line-height: 1.5; }
+        .ov-item-actions { flex: none; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
+        /* Network map: this server, then one lane per peer with what it leads to, by hop count */
+        .net { display: flex; align-items: center; overflow-x: auto; padding: 4px 2px 6px; }
+        .net-lanes { border-left: 2px solid var(--line); margin-left: 14px; padding: 2px 0; }
+        .net-lane { display: flex; align-items: center; padding: 7px 0; }
+        .net-link { flex: none; width: 22px; height: 2px; background: var(--line); }
+        .net-link.down { background: repeating-linear-gradient(90deg, var(--red) 0 4px, transparent 4px 8px); }
+        .net-node {
+            flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 250px;
+            padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: #fff;
+            font: inherit; font-size: 12.5px; font-weight: 600; color: var(--fg); white-space: nowrap;
+        }
+        .net-node > span.net-name { overflow: hidden; text-overflow: ellipsis; }
+        button.net-node { cursor: pointer; transition: border-color .12s ease, box-shadow .12s ease; }
+        button.net-node:hover { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+        .net-node.self { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .net-node.far  { background: var(--surface); font-weight: 500; }
+        .net-node .status-dot { margin-right: 0; }
+        .net-group { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+        .net-hops { font-size: 10.5px; color: var(--faint); margin: 0 0 0 12px; }
+        .net-tag { font-size: 10px; font-weight: 700; color: var(--red-ink); }
+
+        /* Help text that stays out of the way */
+        details.help { margin: 0 0 14px; }
+        details.help > summary, details.more > summary {
+            cursor: pointer; color: var(--primary); font-size: 12px; font-weight: 600;
+            list-style: none; display: inline-flex; align-items: center; gap: 5px; user-select: none;
+        }
+        details.help > summary::-webkit-details-marker, details.more > summary::-webkit-details-marker { display: none; }
+        details.help > summary::before, details.more > summary::before { content: '▸'; font-size: 10px; transition: transform .12s ease; }
+        details[open].help > summary::before, details[open].more > summary::before { transform: rotate(90deg); }
+        details.help > .hint { margin: 8px 0 0; max-width: 820px; }
+        details.more { margin-top: 5px; }
+        details.more > div { margin-top: 5px; }
+        .lead { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin: 0 0 10px; max-width: 820px; }
+
+        /* Text inputs outside the settings rows */
+        .text-input {
+            padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+            font: inherit; font-size: 13px; color: var(--fg); background: #fff;
+        }
+        .text-input:focus, .fed-select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+        .fed-select {
+            padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px;
+            font: inherit; font-size: 12px; max-width: 240px; background: #fff; color: var(--fg);
+        }
+        .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+        .check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+        .check input { width: 15px; height: 15px; cursor: pointer; }
+        .header-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+        .header-actions .filter-input { margin-left: 0; max-width: none; }
+        #add-peer-box { display: none; border-bottom: 1px solid var(--line); background: var(--surface); }
+        #add-peer-box.open { display: block; }
+
+        /* Store usage meter */
+        .meter { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; max-width: 420px; margin-top: 8px; }
+        .meter > i { display: block; height: 100%; border-radius: 999px; background: var(--primary); transition: width .3s ease; }
+        .meter.warn > i { background: var(--amber); }
+        .meter.bad  > i { background: var(--red); }
+        .meter-text { font-size: 12px; color: var(--muted); margin-top: 5px; }
+
+        /* A setting whose value was edited but not saved yet */
+        .num-input.dirty { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+
+        /* Confirmation dialog */
+        #fed-dialog {
+            border: none; border-radius: 12px; padding: 0; width: min(460px, calc(100vw - 32px));
+            box-shadow: 0 20px 60px rgba(16,24,40,.28); color: #1f2933; font-family: inherit;
+        }
+        #fed-dialog::backdrop { background: rgba(16,24,40,.45); }
+        .dlg-body { padding: 22px 24px 6px; }
+        .dlg-title { font-size: 16px; font-weight: 700; margin: 0 0 8px; overflow-wrap: anywhere; }
+        .dlg-text { font-size: 13px; line-height: 1.6; color: #475467; margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
+        .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 24px 20px; }
+        .dlg-actions .btn-danger-solid { background: #d92d20; color: #fff; }
+        .dlg-actions .btn-danger-solid:hover { background: #b42318; }
+
+        @media (max-width: 900px) {
+            .exposed-cols { flex-direction: column; gap: 16px; }
+            .exposed-col { flex: 1 1 auto !important; }
+            .exposed-col + .exposed-col { border-left: none; padding-left: 0; border-top: 1px solid var(--line); padding-top: 14px; }
+            .setting { flex-direction: column; gap: 10px; }
+            .setting-ctl { flex-wrap: wrap; white-space: normal; }
+        }
+
         /* Saved toast */
         #fed-toast {
             position: fixed; top: 18px; right: 18px; z-index: 9999;
@@ -345,64 +485,117 @@
             transition: opacity .16s ease, transform .16s ease;
         }
         #fed-toast.show { opacity: 1; transform: translateY(0); }
+        #fed-toast.error { background: #b42318; pointer-events: auto; cursor: pointer; max-width: 420px; line-height: 1.5; }
     </style>
 </head>
 <body>
-<div id="fed-toast"></div>
+<div id="fed-toast" role="status" aria-live="polite"></div>
+<dialog id="fed-dialog">
+    <div class="dlg-body">
+        <p class="dlg-title" id="fed-dialog-title"></p>
+        <p class="dlg-text" id="fed-dialog-text"></p>
+    </div>
+    <div class="dlg-actions">
+        <button type="button" class="btn btn-plain" id="fed-dialog-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="fed-dialog-ok">OK</button>
+    </div>
+</dialog>
 <div id="fed-root">
 
     <div class="fed-header">
         <h2>Federation</h2>
         <span id="fed-status-badge" class="fed-badge neutral">Loading…</span>
         <span class="fed-meta">
-            <span class="fed-live"></span>This server: <strong id="local-domain">…</strong><br>
-            Live — updates as things change
+            <span id="fed-live-dot" class="fed-live"></span>This server: <strong id="local-domain">…</strong><br>
+            <span id="fed-live-text">Live — updates as things change</span>
         </span>
     </div>
 
     <!-- Tabs -->
-    <div class="fed-tabs">
-        <button class="fed-tab active" data-tab="peers">Peer Servers</button>
-        <button class="fed-tab"        data-tab="routing">Routing Table</button>
-        <button class="fed-tab"        data-tab="rooms">Rooms <span id="rooms-tab-badge" class="badge badge-untrusted" style="display:none"></span></button>
-        <button class="fed-tab"        data-tab="users">Users</button>
-        <button class="fed-tab"        data-tab="files">Files</button>
-        <button class="fed-tab"        data-tab="settings">Settings</button>
+    <div class="fed-tabs" role="tablist">
+        <button class="fed-tab active" data-tab="overview">Overview</button>
+        <button class="fed-tab" data-tab="peers">Peers<span class="tab-badge" data-badge-for="peers"></span></button>
+        <button class="fed-tab" data-tab="rooms">Rooms<span class="tab-badge" data-badge-for="rooms"></span></button>
+        <button class="fed-tab" data-tab="users">Users<span class="tab-badge" data-badge-for="users"></span></button>
+        <button class="fed-tab" data-tab="files">Files<span class="tab-badge" data-badge-for="files"></span></button>
+        <button class="fed-tab" data-tab="settings">Settings<span class="tab-badge" data-badge-for="settings"></span></button>
+    </div>
+
+    <!-- Overview panel -->
+    <div id="panel-overview" class="fed-panel active">
+        <div class="ov-stats" id="ov-stats"></div>
+        <div>
+            <div class="section-box">
+                <div class="section-box-header">
+                    Needs attention
+                    <span class="count-chip" id="ov-attention-count"></span>
+                </div>
+                <div class="section-box-body" id="ov-attention">
+                    <p class="empty" style="margin:0">Loading…</p>
+                </div>
+            </div>
+            <div class="section-box">
+                <div class="section-box-header">
+                    Network
+                    <span class="hint" style="margin-left:auto;font-weight:400">who this server reaches, and through which peer</span>
+                </div>
+                <div class="section-box-body" id="ov-network">
+                    <p class="empty" style="margin:0">Loading…</p>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Peers panel -->
-    <div id="panel-peers" class="fed-panel active">
+    <div id="panel-peers" class="fed-panel">
 
-        <div class="section-box">
-            <div class="section-box-header">Add peer server</div>
-            <div class="section-box-body">
-                <form id="form-add-peer" class="add-peer-form">
-                    <input type="text" id="input-peer-domain"
-                           placeholder="xmpp.example.com"
-                           required autocomplete="off">
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#475467;white-space:nowrap">
-                        <input type="checkbox" id="input-peer-untrusted"
-                               style="width:15px;height:15px;cursor:pointer">
-                        Untrusted
-                    </label>
-                    <button type="submit" class="btn btn-primary">Add peer</button>
-                </form>
-                <p class="hint">
-                    Enter the XMPP domain of the other Openfire server.
-                    An S2S connection will be established automatically.
-                    Tick <strong>Untrusted</strong> for a peer that should see nothing until you
-                    explicitly expose specific servers to it (e.g. a partner reached via an edge server).
-                    Peers under a different parent domain are ticked automatically. The S2S certificate
-                    is pinned on first contact; if it later changes, the peer is auto-untrusted and flagged.
-                </p>
-            </div>
+        <div class="fed-subtabs">
+            <button class="fed-subtab active" data-subtab="peers-list">Peers</button>
+            <button class="fed-subtab"        data-subtab="peers-routing">Routing table</button>
+            <button class="fed-subtab"        data-subtab="peers-sessions">S2S sessions</button>
         </div>
+
+        <!-- Peers -->
+        <div id="subpanel-peers-list" class="fed-subpanel active">
 
         <div class="section-box">
             <div class="section-box-header">
                 Configured peers
                 <span class="count-chip" data-count-for="peers-tbody"></span>
-                <input class="filter-input" data-target="peers-tbody" placeholder="Filter peers…">
+                <span class="header-actions">
+                    <input class="filter-input" data-target="peers-tbody" placeholder="Filter peers…">
+                    <button type="button" class="btn btn-primary btn-small" id="add-peer-toggle"
+                            onclick="toggleAddPeer()">+ Add peer</button>
+                </span>
+            </div>
+            <div id="add-peer-box">
+                <div class="section-box-body">
+                    <form id="form-add-peer" class="add-peer-form">
+                        <input type="text" id="input-peer-domain"
+                               placeholder="xmpp.example.com"
+                               required autocomplete="off">
+                        <label class="check" style="font-size:12px;color:#475467;white-space:nowrap"
+                               title="An untrusted peer sees nothing until you expose servers to it">
+                            <input type="checkbox" id="input-peer-untrusted">
+                            Untrusted
+                        </label>
+                        <button type="submit" class="btn btn-primary">Add peer</button>
+                        <button type="button" class="btn btn-ghost" onclick="toggleAddPeer(false)">Cancel</button>
+                    </form>
+                    <p class="hint" style="margin:0">
+                        The XMPP domain of the other Openfire server. The S2S connection is set up for you;
+                        the other server's admin adds this server the same way.
+                    </p>
+                    <details class="more">
+                        <summary>Trusted or untrusted?</summary>
+                        <div class="hint">
+                            Tick <strong>Untrusted</strong> for a peer that should see nothing until you
+                            explicitly expose specific servers to it (e.g. a partner reached via an edge server).
+                            Peers under a different parent domain are ticked automatically. The S2S certificate
+                            is pinned on first contact; if it later changes, the peer is auto-untrusted and flagged.
+                        </div>
+                    </details>
+                </div>
             </div>
             <div class="table-scroll">
                 <table class="fed-table">
@@ -421,204 +614,11 @@
             </div>
         </div>
 
-        <div class="section-box">
-            <div class="section-box-header">
-                Active S2S sessions
-                <span class="count-chip" data-count-for="s2s-tbody"></span>
-                <input class="filter-input" data-target="s2s-tbody" placeholder="Filter sessions…">
-            </div>
-            <div class="table-scroll">
-                <table class="fed-table">
-                    <thead>
-                        <tr>
-                            <th>Remote domain</th>
-                            <th>Direction</th>
-                            <th>Connected since</th>
-                            <th>TLS</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody id="s2s-tbody">
-                        <tr><td colspan="5" class="empty">Loading…</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
+        </div><!-- /subpanel-peers-list -->
 
-    <!-- Settings panel -->
-    <div id="panel-settings" class="fed-panel">
+        <!-- Routing table -->
+        <div id="subpanel-peers-routing" class="fed-subpanel">
 
-        <div class="section-box">
-            <div class="section-box-header">Config file (openfire.xml)</div>
-            <div class="section-box-body">
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Declarative peers &amp; rooms</div>
-                        <div class="setting-desc">
-                            On every plugin start (and on demand here), a <code>&lt;federation&gt;</code>
-                            block is read — if present — from this server's own
-                            <span id="fedconfig-path" class="mono"></span> and safe-upserted into the
-                            database: configured peers, and per-room federation / sharing (auto-accept) /
-                            visibility / mappings. It only adds what's missing and updates fields the file
-                            declares — it never removes a peer, room tag, or mapping that isn't mentioned.
-                            Edit the file on disk, then reload here to apply without restarting.
-                        </div>
-                        <div class="setting-desc">
-                            Last loaded: <span id="fedconfig-loaded">never</span><br>
-                            <span id="fedconfig-summary"></span>
-                        </div>
-                        <div id="fedconfig-warnings"></div>
-                    </div>
-                    <div class="setting-ctl">
-                        <button class="btn btn-primary btn-small" onclick="reloadFedConfig()">Reload now</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="section-box">
-            <div class="section-box-header">Connection settings</div>
-            <div class="section-box-body">
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">S2S keepalive interval</div>
-                        <div class="setting-desc">
-                            Sends a lightweight ping to each reachable peer at this interval to
-                            prevent Openfire from closing idle S2S sessions. Must be less than
-                            Openfire's <code>xmpp.server.idle</code> setting
-                            (milliseconds ÷ 1000 × 0.8). Minimum: 30 s. Default: 240 s — safe
-                            for Openfire's built-in 6-minute idle timeout.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <input type="number" id="keepalive-input" class="num-input"
-                               min="30" max="3600" step="10">
-                        <span class="setting-state">s</span>
-                        <button class="btn btn-primary btn-small" onclick="saveSetting('keepalive-input')">Save</button>
-                    </div>
-                </div>
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Max reconnect interval (back-off cap)</div>
-                        <div class="setting-desc">
-                            Maximum interval between reconnection attempts for UNREACHABLE peers.
-                            Retries use exponential back-off starting at 5 s: 5 s → 10 s → 20 s → …
-                            capped at this value. On reconnect the back-off resets automatically.
-                            Minimum: 5 s. Default: 30 s.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <input type="number" id="reconnect-input" class="num-input"
-                               min="5" max="300" step="5">
-                        <span class="setting-state">s</span>
-                        <button class="btn btn-primary btn-small" onclick="saveSetting('reconnect-input')">Save</button>
-                    </div>
-                </div>
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Mapping probe interval (mapping-ping)</div>
-                        <div class="setting-desc">
-                            Probes every active room mapping end-to-end at this interval; the mapped
-                            domain answers with a pong routed back across the overlay. Three unanswered
-                            probes in a row flag the mapping as <em>⚠ not responding</em> and evict its
-                            remote occupants (≈2 minutes at the default cadence). Applies immediately —
-                            no restart needed. 0 disables the probe. Minimum: 15 s. Default: 30 s.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <input type="number" id="mapping-ping-input" class="num-input"
-                               min="0" max="3600" step="5">
-                        <span class="setting-state">s</span>
-                        <button class="btn btn-primary btn-small" onclick="saveSetting('mapping-ping-input')">Save</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="section-box">
-            <div class="section-box-header">Security &amp; presence</div>
-            <div class="section-box-body">
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Restrict federation to approved peers</div>
-                        <div class="setting-desc">
-                            When enabled, only peers you have explicitly added here may federate;
-                            federation actions from any other server are rejected. Disable for open
-                            federation (accept any server that can connect). Existing peers stay
-                            approved when this is turned on.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <label class="toggle">
-                            <input type="checkbox" id="allowlist-toggle" onchange="saveSetting('allowlist-toggle')">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="allowlist-state" class="setting-state">…</span>
-                    </div>
-                </div>
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Allow users to reach remote rooms across federation</div>
-                        <div class="setting-desc">
-                            When enabled (default), a user on another server may traverse the
-                            federation network to join or post to a local MUC room directly over S2S,
-                            even when no federation mapping exists — so ad-hoc and private rooms that
-                            are never advertised stay reachable. Federation's own traffic is
-                            unaffected. Disable to lock rooms down so they are only reachable through
-                            an explicit federation mapping.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <label class="toggle">
-                            <input type="checkbox" id="traversal-toggle" onchange="saveSetting('traversal-toggle')">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="traversal-state" class="setting-state">…</span>
-                    </div>
-                </div>
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Relay 1:1 messages over federation</div>
-                        <div class="setting-desc">
-                            When enabled, a private message a local user sends to a user on an
-                            overlay-reachable peer is relayed hop-by-hop through federation (so it
-                            works even across untrusted edges with no direct S2S). Replies route
-                            back the same way. Disable to use Openfire's native S2S for 1:1 chat.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <label class="toggle">
-                            <input type="checkbox" id="directrelay-toggle" onchange="saveSetting('directrelay-toggle')">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="directrelay-state" class="setting-state">…</span>
-                    </div>
-                </div>
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Probe federated contacts on subscription</div>
-                        <div class="setting-desc">
-                            When a local user adds a contact on a multi-hop peer, Openfire's own
-                            presence probe leaks to native S2S and fails (no direct link), so the
-                            contact never shows online. With this on, the probe is re-issued over the
-                            federation overlay so the contact's presence is pulled. Recommended on.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <label class="toggle">
-                            <input type="checkbox" id="probesub-toggle" onchange="saveSetting('probesub-toggle')">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="probesub-state" class="setting-state">…</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Routing table panel -->
-    <div id="panel-routing" class="fed-panel">
         <div class="section-box">
             <div class="section-box-header">
                 Federation routing table
@@ -643,22 +643,61 @@
             </div>
         </div>
         <p class="panel-foot">
-            A hop count of 1 means directly connected via S2S.
-            Routes are learned automatically through gossip when peers connect.
-            Stale routes are removed when a peer goes offline.
-            <strong>Deny</strong> refuses a destination whenever its next-hop peer advertises it
-            (per-link). The entry stays listed here as disabled — the deny survives route
-            withdrawals and re-advertisements — until you click <strong>Allow</strong>
-            (also available in that peer's settings panel — the expand arrow on the Peers tab).
+            One hop means directly connected. Routes are learned from peers as they connect and
+            dropped when a peer goes offline.
         </p>
+        <details class="more" style="margin-left:2px">
+            <summary>What Deny does</summary>
+            <div class="hint" style="max-width:820px">
+                <strong>Deny</strong> refuses a destination whenever its next-hop peer advertises it
+                (per-link). The entry stays listed here as disabled — the deny survives route
+                withdrawals and re-advertisements — until you click <strong>Allow</strong>
+                (also available in that peer's settings panel — the expand arrow on the Peers tab).
+            </div>
+        </details>
+
+        </div><!-- /subpanel-peers-routing -->
+
+        <!-- S2S sessions -->
+        <div id="subpanel-peers-sessions" class="fed-subpanel">
+
+        <div class="section-box">
+            <div class="section-box-header">
+                Active S2S sessions
+                <span class="count-chip" data-count-for="s2s-tbody"></span>
+                <input class="filter-input" data-target="s2s-tbody" placeholder="Filter sessions…">
+            </div>
+            <div class="table-scroll">
+                <table class="fed-table">
+                    <thead>
+                        <tr>
+                            <th>Remote domain</th>
+                            <th>Direction</th>
+                            <th>Connected since</th>
+                            <th>TLS</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="s2s-tbody">
+                        <tr><td colspan="5" class="empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <p class="panel-foot">
+            Every server-to-server session on this server, federated or not. A session that is not
+            part of the federation can be turned into a peer with <strong>Add peer</strong>.
+        </p>
+
+        </div><!-- /subpanel-peers-sessions -->
     </div>
 
     <!-- Rooms panel -->
     <div id="panel-rooms" class="fed-panel">
 
         <div class="fed-subtabs">
-            <button class="fed-subtab active" data-subtab="room-sharing">Room Sharing</button>
-            <button class="fed-subtab"        data-subtab="rooms-config">Rooms config</button>
+            <button class="fed-subtab active" data-subtab="room-sharing">Room sharing</button>
+            <button class="fed-subtab"        data-subtab="rooms-config">Rules for new rooms</button>
         </div>
 
         <!-- Room Sharing -->
@@ -672,11 +711,15 @@
 
         <div class="section-box">
             <div class="section-box-header">
-                Local rooms — enable federation per room
+                Local rooms
                 <span class="count-chip" data-count-for="local-rooms-tbody"></span>
+                <input type="text" class="filter-input" data-target="local-rooms-tbody" placeholder="Filter rooms…">
             </div>
-            <div class="section-box-body" style="padding-bottom:0">
-                <input type="text" id="room-search" class="filter-input" data-target="local-rooms-tbody" placeholder="Filter rooms…">
+            <div class="section-box-body" style="padding-bottom:4px">
+                <p class="lead" style="margin:0">
+                    Switch <strong>Federated</strong> on to offer a room to other servers, then open it (▸)
+                    to choose who sees it and which remote room it is linked to.
+                </p>
             </div>
             <div class="table-scroll">
                 <table class="fed-table">
@@ -698,7 +741,8 @@
 
         <div class="section-box">
             <div class="section-box-header">
-                Remote rooms (advertised by peers)
+                Remote rooms
+                <span class="hint" style="font-weight:400">offered by other servers</span>
                 <input class="filter-input" data-target="remote-rooms-container" placeholder="Filter servers…">
             </div>
             <div class="section-box-body" id="remote-rooms-container">
@@ -717,16 +761,21 @@
                 <span class="count-chip" data-count-for="room-defaults-tbody"></span>
             </div>
             <div class="section-box-body">
-                <p class="hint" style="margin-top:0">
-                    When a room is created, the matching rule below is applied automatically.
-                    Patterns use shell-style globs — <code>*</code> matches any text, <code>?</code>
-                    one character (e.g. <code>*_ext</code> matches <code>mychat_ext</code>;
-                    <code>*</code> matches every room). When several rules match a name the
-                    <strong>most specific</strong> one wins (most literal characters), so <code>*</code>
-                    acts as a catch-all. A non-federated rule excludes a name pattern from a broader rule.
-                    <em>Auto-map</em> requests a same-named room link on each visible peer; combined with
-                    the peer's auto-accept, two servers using the same naming rule auto-link with no clicks.
+                <p class="lead">
+                    When a room is created, the rule matching its name is applied automatically.
+                    <code>*</code> matches any text and <code>?</code> one character; the most specific rule wins.
                 </p>
+                <details class="help">
+                    <summary>How rules work</summary>
+                    <p class="hint">
+                        Patterns use shell-style globs (e.g. <code>*_ext</code> matches <code>mychat_ext</code>;
+                        <code>*</code> matches every room). When several rules match a name the
+                        <strong>most specific</strong> one wins (most literal characters), so <code>*</code>
+                        acts as a catch-all. A non-federated rule excludes a name pattern from a broader rule.
+                        <em>Auto-map</em> requests a same-named room link on each visible peer; combined with
+                        the peer's auto-accept, two servers using the same naming rule auto-link with no clicks.
+                    </p>
+                </details>
                 <table class="fed-table">
                     <thead>
                         <tr>
@@ -744,32 +793,26 @@
                     </tbody>
                 </table>
             </div>
-            <div class="section-box-body" style="border-top:1px solid #e5e7eb">
-                <form id="form-room-default" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
-                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
+            <div class="section-box-body" style="border-top:1px solid var(--line);background:var(--surface)">
+                <div class="setting-title" id="rd-form-title" style="margin-bottom:10px">Add a rule</div>
+                <form id="form-room-default" style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end">
+                    <label class="field">
                         Name pattern
-                        <input type="text" id="rd-pattern" placeholder="*_ext" style="margin-top:3px">
+                        <input type="text" id="rd-pattern" class="text-input" placeholder="*_ext" required>
                     </label>
-                    <label style="display:flex;align-items:center;gap:5px;font-size:13px">
-                        <input type="checkbox" id="rd-federated" checked> Federated
+                    <label class="field">
+                        Visible to (<code>*</code> or servers, comma-separated)
+                        <input type="text" id="rd-visible" class="text-input" placeholder="*" style="min-width:220px">
                     </label>
-                    <label style="display:flex;align-items:center;gap:5px;font-size:13px">
-                        <input type="checkbox" id="rd-autoaccept"> Auto-accept
-                    </label>
-                    <label style="display:flex;align-items:center;gap:5px;font-size:13px">
-                        <input type="checkbox" id="rd-automap"> Auto-map
-                    </label>
-                    <label style="display:flex;align-items:center;gap:5px;font-size:13px">
-                        <input type="checkbox" id="rd-files" checked> File sharing
-                    </label>
-                    <label style="display:flex;flex-direction:column;font-size:12px;color:#555">
-                        Visible to (<code>*</code> or csv of servers)
-                        <input type="text" id="rd-visible" placeholder="*" style="margin-top:3px;min-width:180px">
-                    </label>
+                    <label class="check"><input type="checkbox" id="rd-federated" checked> Federated</label>
+                    <label class="check"><input type="checkbox" id="rd-autoaccept"> Auto-accept</label>
+                    <label class="check"><input type="checkbox" id="rd-automap"> Auto-map</label>
+                    <label class="check"><input type="checkbox" id="rd-files" checked> File sharing</label>
                     <button type="submit" class="btn btn-primary btn-small">Save rule</button>
+                    <button type="reset" class="btn btn-ghost btn-small" onclick="resetRoomDefaultForm()">Clear</button>
                 </form>
-                <div style="margin-top:12px">
-                    <button class="btn btn-small" onclick="applyRoomDefaultsNow()">Apply to existing rooms now</button>
+                <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <button class="btn btn-plain btn-small" onclick="applyRoomDefaultsNow()">Apply to existing rooms now</button>
                     <span class="hint">Re-runs the rules against every room that already exists.</span>
                 </div>
             </div>
@@ -782,7 +825,7 @@
     <div id="panel-users" class="fed-panel">
 
         <div class="fed-subtabs">
-            <button class="fed-subtab active" data-subtab="contact-sharing">Contact Sharing</button>
+            <button class="fed-subtab active" data-subtab="contact-sharing">Contact sharing</button>
             <button class="fed-subtab"        data-subtab="contact-delivery">Sent lists</button>
             <button class="fed-subtab"        data-subtab="contact-directory">Directory search</button>
         </div>
@@ -794,18 +837,23 @@
             <div class="section-box-header">
                 Local groups — share with other servers
                 <span class="count-chip" data-count-for="local-groups-tbody"></span>
+                <input type="text" class="filter-input" data-target="local-groups-tbody" placeholder="Filter groups…">
             </div>
-            <div class="section-box-body" style="padding-bottom:0">
-                <p class="hint" style="margin-top:0">
-                    Like Openfire's Contact List Sharing, across servers. Expand a group (▸) and tick the
-                    servers to share it with. Each server receives one contact list: the members of every
-                    group shared with it, kept in step with group membership. The receiving server's admin
-                    chooses which of their users see the list. Their users see the presence and avatar
-                    of the contacts you share. Your users don't see theirs unless that server shares
-                    back. A server behind an untrusted link is listed only when that link allows contact lists
-                    (the untrusted peer's settings panel on the Peer Servers tab).
+            <div class="section-box-body" style="padding-bottom:4px">
+                <p class="lead">
+                    Open a group (▸) and tick the servers that should get its members as contacts.
+                    The other server's admin decides which of their users see them.
                 </p>
-                <input type="text" id="group-search" class="filter-input" data-target="local-groups-tbody" placeholder="Filter groups…">
+                <details class="help">
+                    <summary>How sharing works</summary>
+                    <p class="hint">
+                        Like Openfire's Contact List Sharing, across servers. Each server receives one contact
+                        list: the members of every group shared with it, kept in step with group membership.
+                        Their users see the presence and avatar of the contacts you share. Your users don't see
+                        theirs unless that server shares back. A server behind an untrusted link is listed only
+                        when that link allows contact lists (the untrusted peer's settings panel on the Peers tab).
+                    </p>
+                </details>
             </div>
             <div class="table-scroll">
                 <table class="fed-table">
@@ -824,23 +872,30 @@
 
         <div class="section-box">
             <div class="section-box-header">
-                Contact lists shared with this server (by peers)
+                Contact lists received from other servers
                 <input class="filter-input" data-target="contact-received-container" placeholder="Filter servers…">
             </div>
             <div class="section-box-body">
-                <p class="hint" style="margin-top:0">
-                    Map a server's list to one or more local groups (or all users). The plugin keeps an
-                    Openfire shared group, <code>federation-contacts-&lt;server&gt;</code>, holding those
-                    contacts, which puts them in each chosen user's contact list under the roster group
-                    name you pick. If the server stops sharing someone, they're removed. Removing the
-                    mapping deletes the group, which takes the contacts out of every contact list.
-                    Instead of or as well as that, tick <em>Searchable in the federated directory</em>:
-                    your users can then look the contacts up and add the ones they want, and nothing is
-                    put in anyone's contact list. <em>Deny</em> keeps a server's entry but drops every list it
-                    sends and stops using its contacts until you allow it again. <em>Delete</em> removes the
-                    entry, for a server that stopped sharing or no longer exists; if it shares again, its list
-                    shows up as a new one.
+                <p class="lead">
+                    Open a server's list to put its contacts in your users' contact lists, make them
+                    searchable in the federated directory, or both.
                 </p>
+                <details class="help">
+                    <summary>Mapping, Deny and Delete</summary>
+                    <p class="hint">
+                        Map a server's list to one or more local groups (or all users). The plugin keeps an
+                        Openfire shared group, <code>federation-contacts-&lt;server&gt;</code>, holding those
+                        contacts, which puts them in each chosen user's contact list under the roster group
+                        name you pick. If the server stops sharing someone, they're removed. Removing the
+                        mapping deletes the group, which takes the contacts out of every contact list.
+                        Instead of or as well as that, tick <em>Searchable in the federated directory</em>:
+                        your users can then look the contacts up and add the ones they want, and nothing is
+                        put in anyone's contact list. <em>Deny</em> keeps a server's entry but drops every list it
+                        sends and stops using its contacts until you allow it again. <em>Delete</em> removes the
+                        entry, for a server that stopped sharing or no longer exists; if it shares again, its list
+                        shows up as a new one.
+                    </p>
+                </details>
                 <p id="contact-readonly-note" class="hint" style="display:none;color:var(--red-ink)">
                     The Openfire group provider is read-only (for example LDAP), so the plugin cannot
                     create groups for received lists.
@@ -857,8 +912,10 @@
         <div class="section-box">
             <div class="section-box-header">
                 What each server receives
-                <input class="filter-input" data-target="contact-sent-container" placeholder="Filter servers…">
-                <button class="btn btn-small" onclick="resendContactLists()">Re-send now</button>
+                <span class="header-actions">
+                    <input class="filter-input" data-target="contact-sent-container" placeholder="Filter servers…">
+                    <button class="btn btn-plain btn-small" onclick="resendContactLists()">Re-send now</button>
+                </span>
             </div>
             <div class="section-box-body" id="contact-sent-container">
                 <p class="empty">Loading…</p>
@@ -873,26 +930,35 @@
         <div class="section-box">
             <div class="section-box-header">Federated directory</div>
             <div class="section-box-body">
-                <p class="hint" style="margin-top:0">
-                    A user search service (XEP-0055) over the received lists you make searchable on
-                    <em>Contact Sharing</em>. Your users find it in their client's user search or service
-                    discovery, look people up on other servers, and add or message the ones they want.
-                    Only this server's users can search it. It runs while at least one list is searchable.
-                </p>
-                <p id="directory-status" style="margin-bottom:0;font-size:13px">Loading…</p>
+                <p id="directory-status" style="margin:0 0 10px;font-size:13px">Loading…</p>
+                <details class="help" style="margin-bottom:0">
+                    <summary>What the directory is</summary>
+                    <p class="hint">
+                        A user search service (XEP-0055) over the received lists you make searchable on
+                        <em>Contact sharing</em>. Your users find it in their client's user search or service
+                        discovery, look people up on other servers, and add or message the ones they want.
+                        Only this server's users can search it. It runs while at least one list is searchable.
+                    </p>
+                </details>
             </div>
         </div>
 
         <div class="section-box">
             <div class="section-box-header">Searches from other servers</div>
             <div class="section-box-body">
-                <p class="hint" style="margin-top:0">
-                    Openfire's Search plugin answers anyone with every user on this server, whatever you
-                    share, and other search services may do the same. So the federation plugin refuses
-                    user searches from other servers' users, over native S2S or the overlay, unless their
-                    server is ticked here. A server that tried is listed with how many searches were refused.
+                <p class="lead">
+                    User searches from other servers are refused unless their server is ticked here.
                     Your own users' searches are not affected.
                 </p>
+                <details class="help">
+                    <summary>Why they are refused</summary>
+                    <p class="hint">
+                        Openfire's Search plugin answers anyone with every user on this server, whatever you
+                        share, and other search services may do the same. So the federation plugin refuses
+                        user searches from other servers' users, over native S2S or the overlay, unless their
+                        server is ticked here. A server that tried is listed with how many searches were refused.
+                    </p>
+                </details>
                 <div id="search-allowed-container"><p class="empty">Loading…</p></div>
             </div>
         </div>
@@ -904,25 +970,33 @@
     <div id="panel-files" class="fed-panel">
 
         <div class="fed-subtabs">
-            <button class="fed-subtab active" data-subtab="files-sharing">File Sharing</button>
-            <button class="fed-subtab"        data-subtab="files-activity">Activity Log</button>
+            <button class="fed-subtab active" data-subtab="files-sharing">File sharing</button>
+            <button class="fed-subtab"        data-subtab="files-scanning">Virus scanning</button>
+            <button class="fed-subtab"        data-subtab="files-activity">Activity log</button>
         </div>
 
         <!-- File Sharing -->
         <div id="subpanel-files-sharing" class="fed-subpanel active">
 
         <div class="section-box">
-            <div class="section-box-header">File sharing</div>
+            <div class="section-box-header">Relay</div>
             <div class="section-box-body">
                 <div class="setting">
                     <div class="setting-main">
                         <div class="setting-title">Federate file shares (HTTP File Upload)</div>
                         <div class="setting-desc">
-                            When enabled (default), a file shared via HTTP File Upload is relayed over
-                            the federation to exactly the servers whose users receive the message
-                            (mapped-room peers, a 1:1 recipient's home — never broadcast), re-hosted
-                            there, and the link is rewritten so every client downloads from its own
-                            server. Local-only traffic never leaves; transit hops never store a copy.
+                            A shared file is copied to the servers whose users receive the message, and
+                            each client downloads it from its own server.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    When enabled (default), a file shared via HTTP File Upload is relayed over
+                                    the federation to exactly the servers whose users receive the message
+                                    (mapped-room peers, a 1:1 recipient's home — never broadcast), re-hosted
+                                    there, and the link is rewritten so every client downloads from its own
+                                    server. Local-only traffic never leaves; transit hops never store a copy.
+                                </div>
+                            </details>
                         </div>
                     </div>
                     <div class="setting-ctl">
@@ -951,6 +1025,76 @@
                 </div>
                 <div class="setting">
                     <div class="setting-main">
+                        <div class="setting-title">Allowed file extensions</div>
+                        <div class="setting-desc">
+                            Comma-separated. Blank allows nothing; <code>*</code> allows everything.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    The extensions the relay will stage (egress, from a
+                                    local upload) or accept (ingress, from a peer). Applies only at the
+                                    origin and destination — a transit hop relays without ever decoding
+                                    content, so this never affects traffic just passing through.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="text" id="files-extensions-input" class="num-input"
+                               style="width:360px;max-width:100%;text-align:left"
+                               placeholder="jpg,jpeg,png,gif,pdf,txt,...">
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-extensions-input')">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Extra upload ports</div>
+                        <div class="setting-desc">
+                            Only needed when your upload service is not on Openfire's HTTP-bind ports or
+                            the HTTP File Upload plugin's announced port. Comma-separated; usually blank.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    Before relaying a share, this server fetches the file from its own upload
+                                    service. It only does so on those ports, so a crafted link cannot make it
+                                    read from another local service. A share on any other port keeps its
+                                    original link.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="text" id="files-uploadports-input" class="num-input"
+                               style="width:160px;text-align:left" placeholder="none">
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-uploadports-input')">Save</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Storage</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Store size limit</div>
+                        <div class="setting-desc">
+                            Most disk space relayed files may take on this server. When it is full, new
+                            files keep their original link until older ones are purged. 0 means no limit.
+                            Default: 4096 MB.
+                        </div>
+                        <div class="meter" id="files-store-meter"><i style="width:0"></i></div>
+                        <div class="meter-text" id="files-store-text"></div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="files-maxstore-input" class="num-input"
+                               min="0" step="64">
+                        <span class="setting-state">MB</span>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-maxstore-input')">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
                         <div class="setting-title">File retention</div>
                         <div class="setting-desc">
                             How long a relayed file stays in this server's
@@ -967,23 +1111,6 @@
                 </div>
                 <div class="setting">
                     <div class="setting-main">
-                        <div class="setting-title">Activity log retention</div>
-                        <div class="setting-desc">
-                            How long an entry stays in the on-disk activity logs (the ClamAV scan
-                            and rejected-file tables under <em>Activity Log</em>). Older entries are
-                            pruned at startup and every six hours. Minimum: 1 day. Default: 180 days.
-                            <span id="files-log-paths" class="setting-desc"></span>
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <input type="number" id="files-log-retention-input" class="num-input"
-                               min="1" max="3650" step="1">
-                        <span class="setting-state">days</span>
-                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-log-retention-input')">Save</button>
-                    </div>
-                </div>
-                <div class="setting">
-                    <div class="setting-main">
                         <div class="setting-title">Storage directory</div>
                         <div class="setting-desc">
                             Full path of the folder where relayed file content is kept on disk.
@@ -993,40 +1120,40 @@
                     </div>
                     <div class="setting-ctl">
                         <input type="text" id="files-storagedir-input" class="num-input"
-                               style="width:240px;text-align:left"
+                               style="width:300px;max-width:100%;text-align:left"
                                placeholder="/var/lib/openfire/federation-files">
                         <button class="btn btn-primary btn-small" onclick="saveSetting('files-storagedir-input')">Save</button>
                     </div>
                 </div>
-                <div class="setting">
-                    <div class="setting-main">
-                        <div class="setting-title">Allowed file extensions</div>
-                        <div class="setting-desc">
-                            Comma-separated list of extensions the relay will stage (egress, from a
-                            local upload) or accept (ingress, from a peer). Applies only at the
-                            origin and destination — a transit hop relays without ever decoding
-                            content, so this never affects traffic just passing through. Blank
-                            allows nothing; <code>*</code> allows everything.
-                        </div>
-                    </div>
-                    <div class="setting-ctl">
-                        <input type="text" id="files-extensions-input" class="num-input"
-                               style="width:360px;text-align:left"
-                               placeholder="jpg,jpeg,png,gif,pdf,txt,...">
-                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-extensions-input')">Save</button>
-                    </div>
-                </div>
+            </div>
+        </div>
+
+        </div><!-- /subpanel-files-sharing -->
+
+        <!-- Virus scanning -->
+        <div id="subpanel-files-scanning" class="fed-subpanel">
+
+        <div class="section-box">
+            <div class="section-box-header">ClamAV</div>
+            <div class="section-box-body">
                 <div class="setting">
                     <div class="setting-main">
                         <div class="setting-title">Virus scan federated files (ClamAV)</div>
                         <div class="setting-desc">
-                            When enabled, a file's content is scanned by a <code>clamd</code>
-                            daemon at both ends of a relay: here on upload, before the file is
-                            offered to any peer, and again on the receiving server before it
-                            becomes servable to a local recipient. A pure transit hop never
-                            scans, because it never decodes content. A scan that cannot complete
-                            (clamd unreachable) is treated as a failure at either end: the relay
-                            fails closed rather than moving unscanned content while this is on.
+                            Files are scanned before they leave this server and again before a local user
+                            can download one. If the scanner cannot be reached, the file is not relayed.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    When enabled, a file's content is scanned by a <code>clamd</code>
+                                    daemon at both ends of a relay: here on upload, before the file is
+                                    offered to any peer, and again on the receiving server before it
+                                    becomes servable to a local recipient. A pure transit hop never
+                                    scans, because it never decodes content. A scan that cannot complete
+                                    (clamd unreachable) is treated as a failure at either end: the relay
+                                    fails closed rather than moving unscanned content while this is on.
+                                </div>
+                            </details>
                         </div>
                     </div>
                     <div class="setting-ctl">
@@ -1051,22 +1178,18 @@
                                style="width:140px;text-align:left" placeholder="clamav">
                         <input type="number" id="files-av-port-input" class="num-input"
                                style="width:90px" min="1" max="65535" step="1" placeholder="3310">
-                        <button class="btn btn-primary btn-small" onclick="saveFilesAvEndpoint()">Save</button>
-                        <button class="btn btn-small" onclick="testFilesAvConnection()">Test connection</button>
+                        <button class="btn btn-primary btn-small" data-save-for="files-av-host-input files-av-port-input"
+                                onclick="saveFilesAvEndpoint()">Save</button>
+                        <button class="btn btn-plain btn-small" onclick="testFilesAvConnection()">Test connection</button>
                         <span id="files-av-test-result" class="setting-state"></span>
                     </div>
                 </div>
             </div>
         </div>
 
-        </div><!-- /subpanel-files-sharing -->
-
-        <!-- Activity Log -->
-        <div id="subpanel-files-activity" class="fed-subpanel">
-
         <div class="section-box">
             <div class="section-box-header">
-                Recently scanned files (ClamAV)
+                Recently scanned files
                 <span class="count-chip" data-count-for="av-scan-tbody"></span>
                 <input class="filter-input" data-target="av-scan-tbody" placeholder="Filter files…">
             </div>
@@ -1092,12 +1215,16 @@
         <p class="panel-foot">
             A file is scanned twice: once here as <em>egress</em>, before it is offered to any
             peer, and again as <em>ingress</em> on the server that receives it. A pure transit hop
-            never scans, because it never decodes content. Populates once virus scanning is turned
-            on above. The 200 most recent entries are shown
+            never scans, because it never decodes content. The 200 most recent entries are shown
             here; the full history is written to
             <code id="scan-log-path">the server's log directory</code> and survives a plugin reload
             or server restart, kept for as long as <em>Activity log retention</em> allows.
         </p>
+
+        </div><!-- /subpanel-files-scanning -->
+
+        <!-- Activity Log -->
+        <div id="subpanel-files-activity" class="fed-subpanel">
 
         <div class="section-box">
             <div class="section-box-header">
@@ -1125,18 +1252,275 @@
             </div>
         </div>
         <p class="panel-foot">
-            Every file this server has blocked, from any gate: the allowed-extensions list (egress,
-            before it's ever offered to a peer, or ingress as defense in depth), the content-vs-
-            extension sniff check, a SHA-256 mismatch, or the virus scanner. A file rejected here
-            never reaches the AV scan above (extension/content checks run first), so this is the
-            place to look when a peer reports a download that never arrives. The 200 most recent
-            entries are shown here; the full history is written to
-            <code id="rejection-log-path">the server's log directory</code> and survives a plugin
-            reload or server restart, kept for as long as <em>Activity log retention</em> allows.
+            Every file this server has blocked. This is the place to look when someone reports a
+            download that never arrives.
         </p>
+        <details class="more" style="margin:0 2px 18px">
+            <summary>What gets a file rejected</summary>
+            <div class="hint" style="max-width:820px">
+                Any gate can block a file: the allowed-extensions list (egress,
+                before it's ever offered to a peer, or ingress as defense in depth), the content-vs-
+                extension sniff check, a SHA-256 mismatch, or the virus scanner. A file rejected here
+                never reaches the virus scan (extension/content checks run first). The 200 most recent
+                entries are shown here; the full history is written to
+                <code id="rejection-log-path">the server's log directory</code> and survives a plugin
+                reload or server restart, kept for as long as <em>Activity log retention</em> allows.
+            </div>
+        </details>
+
+        <div class="section-box">
+            <div class="section-box-header">Log retention</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Activity log retention</div>
+                        <div class="setting-desc">
+                            How long an entry stays in the on-disk activity logs (the scanned and
+                            rejected file tables). Older entries are pruned at startup and every six
+                            hours. Minimum: 1 day. Default: 180 days.
+                            <span id="files-log-paths"></span>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="files-log-retention-input" class="num-input"
+                               min="1" max="3650" step="1">
+                        <span class="setting-state">days</span>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('files-log-retention-input')">Save</button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         </div><!-- /subpanel-files-activity -->
 
+    </div>
+
+    <!-- Settings panel -->
+    <div id="panel-settings" class="fed-panel">
+
+        <div class="section-box">
+            <div class="section-box-header">Security</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Restrict federation to approved peers</div>
+                        <div class="setting-desc">
+                            Only the peers you added may federate; any other server is rejected.
+                            Turn off for open federation.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    When enabled, only peers you have explicitly added here may federate;
+                                    federation actions from any other server are rejected. Disable for open
+                                    federation (accept any server that can connect). Existing peers stay
+                                    approved when this is turned on.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="allowlist-toggle" onchange="saveSetting('allowlist-toggle')">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="allowlist-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Allow users to reach remote rooms across federation</div>
+                        <div class="setting-desc">
+                            Users on other servers can join local rooms directly, even rooms that are
+                            not mapped. Turn off to make rooms reachable only through a mapping.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    When enabled (default), a user on another server may traverse the
+                                    federation network to join or post to a local MUC room directly over S2S,
+                                    even when no federation mapping exists — so ad-hoc and private rooms that
+                                    are never advertised stay reachable. Federation's own traffic is
+                                    unaffected. Disable to lock rooms down so they are only reachable through
+                                    an explicit federation mapping.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="traversal-toggle" onchange="saveSetting('traversal-toggle')">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="traversal-state" class="setting-state">…</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Messages &amp; presence</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Relay 1:1 messages over federation</div>
+                        <div class="setting-desc">
+                            Private messages to users on reachable servers travel hop by hop through the
+                            federation, so they work where there is no direct S2S link.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    When enabled, a private message a local user sends to a user on an
+                                    overlay-reachable peer is relayed hop-by-hop through federation (so it
+                                    works even across untrusted edges with no direct S2S). Replies route
+                                    back the same way. Disable to use Openfire's native S2S for 1:1 chat.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="directrelay-toggle" onchange="saveSetting('directrelay-toggle')">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="directrelay-state" class="setting-state">…</span>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Probe federated contacts on subscription</div>
+                        <div class="setting-desc">
+                            Makes a newly added contact on a multi-hop server show as online. Recommended on.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    When a local user adds a contact on a multi-hop peer, Openfire's own
+                                    presence probe leaks to native S2S and fails (no direct link), so the
+                                    contact never shows online. With this on, the probe is re-issued over the
+                                    federation overlay so the contact's presence is pulled.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <label class="toggle">
+                            <input type="checkbox" id="probesub-toggle" onchange="saveSetting('probesub-toggle')">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="probesub-state" class="setting-state">…</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Connection timers</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">S2S keepalive interval</div>
+                        <div class="setting-desc">
+                            How often each reachable peer is pinged so Openfire does not close an idle link.
+                            Minimum: 30 s. Default: 240 s.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    Sends a lightweight ping to each reachable peer at this interval to
+                                    prevent Openfire from closing idle S2S sessions. Must be less than
+                                    Openfire's <code>xmpp.server.idle</code> setting
+                                    (milliseconds ÷ 1000 × 0.8). The default is safe
+                                    for Openfire's built-in 6-minute idle timeout.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="keepalive-input" class="num-input"
+                               min="30" max="3600" step="10">
+                        <span class="setting-state">s</span>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('keepalive-input')">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Max reconnect interval (back-off cap)</div>
+                        <div class="setting-desc">
+                            Longest wait between attempts to reconnect an unreachable peer.
+                            Minimum: 5 s. Default: 30 s.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    Retries use exponential back-off starting at 5 s: 5 s → 10 s → 20 s → …
+                                    capped at this value. On reconnect the back-off resets automatically.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="reconnect-input" class="num-input"
+                               min="5" max="300" step="5">
+                        <span class="setting-state">s</span>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('reconnect-input')">Save</button>
+                    </div>
+                </div>
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Mapping probe interval (mapping-ping)</div>
+                        <div class="setting-desc">
+                            How often each room mapping is tested end to end. 0 turns the probe off.
+                            Minimum: 15 s. Default: 30 s.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    Probes every active room mapping end-to-end at this interval; the mapped
+                                    domain answers with a pong routed back across the overlay. Three unanswered
+                                    probes in a row flag the mapping as <em>⚠ not responding</em> and evict its
+                                    remote occupants (≈2 minutes at the default cadence). Applies immediately —
+                                    no restart needed.
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="setting-ctl">
+                        <input type="number" id="mapping-ping-input" class="num-input"
+                               min="0" max="3600" step="5">
+                        <span class="setting-state">s</span>
+                        <button class="btn btn-primary btn-small" onclick="saveSetting('mapping-ping-input')">Save</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-box-header">Config file (openfire.xml)</div>
+            <div class="section-box-body">
+                <div class="setting">
+                    <div class="setting-main">
+                        <div class="setting-title">Declarative peers &amp; rooms</div>
+                        <div class="setting-desc">
+                            A <code>&lt;federation&gt;</code> block in
+                            <span id="fedconfig-path" class="mono"></span> is applied at every plugin
+                            start. Edit the file, then reload here to apply it without restarting.
+                            <details class="more">
+                                <summary>Details</summary>
+                                <div>
+                                    The block is safe-upserted into the database: configured peers, and
+                                    per-room federation / sharing (auto-accept) / visibility / mappings.
+                                    It only adds what's missing and updates fields the file
+                                    declares — it never removes a peer, room tag, or mapping that isn't mentioned.
+                                </div>
+                            </details>
+                        </div>
+                        <div class="setting-desc">
+                            Last loaded: <span id="fedconfig-loaded">never</span><br>
+                            <span id="fedconfig-summary"></span>
+                        </div>
+                        <div id="fedconfig-warnings"></div>
+                    </div>
+                    <div class="setting-ctl">
+                        <button class="btn btn-primary btn-small" onclick="reloadFedConfig()">Reload now</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
 </div>

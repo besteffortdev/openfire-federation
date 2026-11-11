@@ -357,6 +357,10 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"filesRelayAvailable\":").append(relay != null && relay.isAvailable()).append(",");
         sb.append("\"filesMaxSizeMB\":").append(FederationProperties.FILES_MAX_MB.getValue()).append(",");
         sb.append("\"filesRetentionDays\":").append(FederationProperties.FILES_RETENTION_DAYS.getValue()).append(",");
+        sb.append("\"filesMaxStoreMB\":").append(FederationProperties.FILES_MAX_STORE_MB.getValue()).append(",");
+        sb.append("\"filesStoreBytes\":").append(relay == null ? 0 : relay.storeBytes()).append(",");
+        sb.append("\"filesUploadPorts\":\"")
+          .append(esc(FederationProperties.FILES_UPLOAD_PORTS.getValue())).append("\",");
         sb.append("\"filesStorageDir\":\"")
           .append(esc(FederationProperties.FILES_STORAGE_DIR.getValue())).append("\",");
         sb.append("\"filesAllowedExtensions\":\"")
@@ -871,6 +875,17 @@ public class FederationApiServlet extends HttpServlet {
             case "set-files-retention":
                 return applyBoundedInt(req, "days", FederationProperties.FILES_RETENTION_DAYS,
                                        "filesRetentionDays", 1, Integer.MAX_VALUE, "days must be at least 1");
+            case "set-files-max-store":
+                return applyBoundedInt(req, "mb", FederationProperties.FILES_MAX_STORE_MB,
+                                       "filesMaxStoreMB", 0, Integer.MAX_VALUE, "mb must be 0 (no limit) or more");
+            case "set-files-upload-ports": {
+                String ports = req.getParameter("ports");
+                if (ports == null) return required("ports");
+                String cleaned = cleanPortList(ports);
+                if (cleaned == null) return error("ports must be a comma-separated list of numbers from 1 to 65535");
+                FederationProperties.FILES_UPLOAD_PORTS.setValue(cleaned);
+                return okText("filesUploadPorts", FederationProperties.FILES_UPLOAD_PORTS.getValue());
+            }
             case "set-files-av-port":
                 return applyBoundedInt(req, "port", FederationProperties.FILES_AV_PORT,
                                        "filesAvPort", 1, 65535, "port must be between 1 and 65535");
@@ -1157,6 +1172,22 @@ public class FederationApiServlet extends HttpServlet {
         if (value < min || value > max) return error(rangeMessage);
         prop.setValue(value);
         return ok(jsonKey, prop.getValue());
+    }
+
+    /** A comma-separated port list with blanks dropped, or null when an entry is not a port. Empty is allowed. */
+    static String cleanPortList(String raw) {
+        List<String> ports = new ArrayList<>();
+        for (String part : raw.split(",")) {
+            if (part.isBlank()) continue;
+            try {
+                int port = Integer.parseInt(part.strip());
+                if (port < 1 || port > 65535) return null;
+                ports.add(String.valueOf(port));
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return String.join(",", ports);
     }
 
     /** Smallest AV scan timeout that leaves clamd time to answer. */

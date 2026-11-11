@@ -184,7 +184,7 @@ public class FederationIQHandler extends IQHandler {
             peers.addPeer(fromDomain);
             peers.setUntrusted(fromDomain, true);
             Log.info("Auto-registered federation peer via incoming connection: {} (untrusted, nothing "
-                   + "exposed — review it on the Peer Servers tab)", fromDomain);
+                   + "exposed — review it on the Peers tab)", fromDomain);
         }
 
         boolean remoteUntrusted = "true".equals(el.attributeValue("untrusted"));
