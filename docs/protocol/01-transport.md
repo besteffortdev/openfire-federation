@@ -46,6 +46,7 @@ The action element's name selects the handler. The complete set:
 | `room-mapping`, `room-mapping-accept`, `room-mapping-reject`, `room-mapping-disable`, `room-mapping-enable`, `room-unmap` | [04](04-rooms.md) | routed |
 | `mapping-ping`, `mapping-pong` | [04](04-rooms.md) | routed |
 | `muc-forward` | [05](05-muc-traffic.md) | routed |
+| `room-catchup-request`, `room-catchup-done` | [05](05-muc-traffic.md#catch-up-after-a-split) | routed |
 | `direct-forward`, `presence-forward`, `iq-forward` | [06](06-direct-traffic.md) | routed |
 | `file-request`, `file-offer`, `file-chunk`, `file-error` | [07](07-file-relay.md) | routed |
 | `contact-list`, `contact-list-request` | [08](08-contact-lists.md) | routed |
@@ -249,15 +250,23 @@ Rules:
 ```
 
 An empty marker element this implementation attaches to a stanza before delivering it locally, so its
-own outbound interceptor does not pick the stanza up and relay it back out. It is mostly an internal
-loop guard — but it **does cross the wire in one case**, and there it is protocol-significant:
+own outbound interceptor does not pick the stanza up and relay it back out.
+
+> The element is a label, never a credential. A receiver MUST NOT exempt a stanza from any check
+> because it carries `<fed-origin/>`: any client or server can write one. Since 1.14.0 this
+> implementation skips only the packets it marked itself, which it tracks in memory; before that, a
+> stanza arriving with the element bypassed the search guard, the room-traversal policy and the leak guard.
+
+It **does cross the wire in one case**, and there it is protocol-significant:
 
 > A `muc-forward` carrying a `<presence/>` that contains `<fed-origin/>` is a **roster-sync presence**,
 > not a fresh join. A receiver MUST NOT respond to it by syncing its own occupant list back.
 > Without that check, two servers sync occupant lists at each other forever.
 
 See [05-muc-traffic.md](05-muc-traffic.md#occupant-list-synchronisation). If you emit roster-sync
-presences, mark them. If you receive one, do not reciprocate.
+presences, mark them. If you receive one, do not reciprocate. Since 1.14.0 a local occupant's status
+change (away, back, a new status text) is marked too: it is not a join, and answering each one with a
+whole occupant list cost one stanza per occupant pair.
 
 ## A minimal receiver
 

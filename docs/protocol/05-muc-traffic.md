@@ -2,6 +2,8 @@
 
 Once two rooms have an ACTIVE mapping ([04](04-rooms.md)), their traffic crosses the overlay as
 `muc-forward`. One action carries everything: messages, joins, leaves, presence changes, roster syncs.
+A second pair, `room-catchup-request` and `room-catchup-done`, replays what a broken path lost
+([Catch-up after a split](#catch-up-after-a-split), since 1.13.0).
 
 ## The model: virtual occupants
 
@@ -60,6 +62,8 @@ Consequences you must design around:
 | `via` | yes | Loop trail. Sent as `via=''` on first emission. |
 | `src` | no | The **mapped server this traffic enters the destination through** — see below. Absent falls back to the sending domain. |
 | `hubs` | no | Servers whose copy of the room already has the payload and sent it on to their own mappings: the originating server, then each hub. **Appended, never reset.** See [Rings and meshes](#rings-and-meshes). Absent = empty. At most 32 entries. (Since 1.11.2.) |
+| `sent` | no | Marks a **replay**: when the message was first sent, as an XEP-0082 timestamp. Absent on live traffic. (Since 1.13.0; see [Catch-up after a split](#catch-up-after-a-split).) |
+| `catchup` | no | On a replay that answers a `room-catchup-request`: that request's id. (Since 1.13.0; same section.) |
 
 The payload is the first child element and MUST be a `<message/>` or a `<presence/>`.
 
@@ -138,6 +142,8 @@ if destination is absent or ours:
     if targetRoom has NO ACTIVE mapping                        → drop, log SECURITY
     if targetRoom has no ACTIVE mapping whose remote domain == src → drop, log SECURITY
     if hubs contains our own domain                            → drop (been round)
+    if sent is present                                         → the replay checks
+                                                                 (Catch-up after a split)
     inject into targetRoom
     if the room took it as new (not a duplicate, not a self-echo):
         fan out to every other ACTIVE mapping on that room
@@ -474,6 +480,9 @@ The sync presences are **marked with `<fed-origin/>`** ([01](01-transport.md#the
 > A receiver MUST NOT respond to a presence carrying `<fed-origin/>` by syncing its own occupants
 > back. Two servers that both reciprocate will sync at each other indefinitely.
 
+A sender SHOULD also mark the presence it forwards when an occupant only changes status. Such a
+presence is not a join, and the list it would be answered with is one the sender already has.
+
 ### Choosing where to send it
 
 The join does not necessarily arrive from the joiner's home server — on a multi-hop path it arrives
@@ -513,6 +522,341 @@ occupant — clients then see a normal leave rather than a name that stays in th
 A leave is also propagated onward to other mappings, but **only on the first removal**. A duplicate
 leave — one arriving via fan-out and one via state-driven forwarding — removes nothing and must not
 re-forward, or leaves multiply at every hop.
+
+## Catch-up after a split
+
+> **Since 1.13.0.** Earlier versions neither send nor answer these actions, and ignore the new
+> `muc-forward` attributes ([10](10-conformance.md#version-compatibility)).
+
+`muc-forward` is best effort ([01](01-transport.md#ordering-and-reliability)). While a mapping's path
+is down, each copy of the room keeps working for its own server's users. Everything sent across the
+mapping in that time is lost, though: a relay with no route drops it, and nothing sends it again. When
+the path comes back, [occupant sync](#occupant-list-synchronisation) rebuilds who is present. The
+messages stay lost.
+
+Catch-up closes that gap. When a mapping's path comes back, each side asks the other for the room
+traffic it missed. The answer arrives as ordinary `muc-forward`s, marked as replays and stamped with
+the time they were first sent. Two existing rules make this work:
+
+- A message keeps its origin room's stanza-id in every copy of the room
+  ([Room identity](#room-identity-stanza-id-and-occupant-id)). "Everything after message X" therefore
+  names the same point on both servers.
+- Each copy of the room delivers a message once ([Rings and meshes](#rings-and-meshes)). A replay that
+  overlaps what arrived live costs nothing.
+
+```
+   alpha                                beta
+     │        ── path lost ──             │   both copies keep chatting locally
+     │        ── path back ──             │   route re-learned, S2S reconnected, probe recovered
+     │  room-catchup-request ───────────▶ │   "after message X"
+     │  ◀────────────── muc-forward × n   │   sent=…, catchup=…
+     │  ◀───────────  room-catchup-done   │   complete='true'
+     │  ◀─────────  room-catchup-request  │   beta asks too
+     │  muc-forward × m ────────────────▶ │
+     │  room-catchup-done ──────────────▶ │
+```
+
+### The room journal
+
+A server answers catch-up requests from a **journal**: the groupchat payloads its copy of a mapped
+room accepted, in the order the room accepted them. Each entry holds:
+
+| Field | Meaning |
+|-------|---------|
+| payload | The message as it is forwarded. A local user's message is kept exactly as it went out live ([Payload addressing](#payload-addressing)); an injected one is kept as it arrived, unchanged. |
+| origin room, origin id | The payload's `to`, and the stanza-id that room gave the message: the pair the duplicate check uses. |
+| author | The bare JID of the payload's `from`. |
+| src | The mapping the message arrived over. None for a local user's message. |
+| hubs | The `hubs` trail it arrived with. Empty for a local user's message. |
+| accepted | When this room accepted it, on this server's clock. |
+| sent | When it was first sent: the `sent` it arrived with if it was itself a replay, otherwise `accepted`. |
+
+Journal the groupchat payloads a live `muc-forward` carries: messages, reactions, retractions and
+[moderations](#moderation-xep-0425). Leave out three kinds:
+
+- **Subject changes.** A replayed one could overwrite a newer subject, and the room's subject is not
+  what catch-up repairs.
+- **Messages without an origin stanza-id.** Nothing could tell a replay of one from a new message.
+- **Presence.** Occupant sync already rebuilds it.
+
+Keep entries for at least the **catch-up window**. Older traffic is never replayed. This
+implementation:
+
+- **Window:** 24 hours, from `plugin.federation.catchup.windowHours` (at most 168), with at most 10,000
+  entries per room.
+- **Storage:** in memory and in one append-only file, `federation-journal/journal.tsv`, readable by the
+  Openfire user only because it holds message text. The file sits beside Openfire's plugins directory,
+  followed through symlinks. That is `/var/lib/openfire` in the Docker image and the Debian package,
+  whose home directory does not survive a reinstall or a new container. It is reloaded at
+  start and rewritten when an hourly prune drops expired entries.
+- **Duplicate check:** the journal backs it as well, so the check survives a restart.
+
+### The watermark
+
+For each mapping, the requester keeps a **watermark**: the origin room and origin id of the newest
+message that arrived over that mapping, and when it arrived, on the requester's clock. Persist it. A
+restart is the most common split of all, and a watermark held only in memory would forget where to
+resume.
+
+- Every message that arrives over the mapping moves the watermark forward, except during a catch-up on
+  that mapping ([Requesting](#requesting)).
+- When the mapping becomes ACTIVE ([04](04-rooms.md#the-mapping-lifecycle)), by accept or by enable,
+  the watermark is reset to no message and the time of activation. Traffic from before the mapping
+  existed, or from while an admin had it disabled, is never replayed.
+
+**Nothing from before the requester's journal began.** A server asks for no replay older than its own
+journal, and accepts none, because it cannot tell whether it already has the message. Losing the
+journal then costs the catch-up for the outage it was in, not a flood of duplicates: the alternative is
+a server that asks for the whole window again and delivers every message a second time. This
+implementation records when its journal began in the file's header.
+
+This implementation reads the watermark from its journal: the newest message that arrived over the
+mapping since it became ACTIVE. That makes it as durable as the journal. It stores the activation time
+with the mapping. A mapping that was ACTIVE before 1.13.0 has no recorded activation time, so its floor
+is the window alone.
+
+### `room-catchup-request`
+
+```xml
+<iq type='set' from='alpha.example' to='beta.example' id='f40'>
+  <federation xmlns='urn:xmpp:federation:1'>
+    <room-catchup-request destination='beta.example' origin='alpha.example'
+                          token='7f3aa1c9e04b8d62f5a0…'
+                          request='cu-0c4e7d1a9b2f'
+                          afterRoom='chat@conference.delta.example'
+                          after='9b3e61c0-58aa-4f0e-b1d2-7e4c0a9f2d65'
+                          since='2026-10-25T14:02:11Z'
+                          max='50'>
+      <map local='chat@conference.alpha.example' remote='chat@conference.beta.example'/>
+    </room-catchup-request>
+  </federation>
+</iq>
+```
+
+| Attribute | Required | Meaning |
+|-----------|----------|---------|
+| `destination` | yes | The far end of the mapping, which answers. Routed action. |
+| `origin` | yes | The requester. Answers are routed back to it. |
+| `token` | yes | The mapping's consent token ([04](04-rooms.md#token-validation)). |
+| `request` | yes | Chosen by the requester, unique per page, matching `[A-Za-z0-9._:-]{8,64}`. Echoed on everything sent in answer to this page. |
+| `cursor` | no | On every page after the first: the `next` of the previous page's `room-catchup-done`, copied as is. Digits only, at most 18. |
+| `afterRoom`, `after` | together | On the first page: the watermark, resume after this message. Absent when the watermark names none. |
+| `since` | yes | XEP-0082 timestamp where the responder starts when neither `cursor` nor `after` places it. It is the watermark's arrival time less a margin for clock skew (5 minutes here), or the activation time. |
+| `max` | no | The most items to send in this page. Default 50; the responder clamps it to 1–100. |
+
+The single `<map/>` names the mapping from the sender's point of view, and the receiver inverts it as
+for every mapping action ([04](04-rooms.md#the-localremote-inversion)). `local` is the requester's
+room, `remote` the responder's. Like the mapping actions, it carries no `via` trail.
+
+### Answering
+
+```
+on room-catchup-request, destination == us:
+    R := origin;  room := map/@remote;  theirRoom := map/@local
+    if R fails the claimed-origin check (09 rule 3b)               → drop, SECURITY
+    if the sending link is untrusted and our domain is not exposed
+       to it                                                       → drop, SECURITY
+    if room is not federation-enabled, or has no ACTIVE mapping
+       with R whose remote room is theirRoom                       → drop, SECURITY
+    if the token check fails (04)                                  → drop, SECURITY
+    if request, cursor, since or max is malformed                  → drop
+    if we are still sending a page on this mapping, or sent 2,000
+       items on it in the last hour                                → drop
+
+    start := the entry after cursor, if there is one,
+             else the entry after (afterRoom, after) if the journal holds it,
+             else the first entry accepted at or after since
+    never start before the window, or before the mapping last became ACTIVE here
+
+    from start, oldest first, examining at most 10 × max entries:
+        skip if its src is R                    (R sent it to us)
+        skip if its author's home is R          (R has the original)
+        skip if its hubs names R                (R's copy already had it)
+        skip a message moderated since, and that moderation,
+             when the message is itself in range   (R should see neither)
+        send it to R as a replay (below); stop once max are sent
+
+    send room-catchup-done
+    if no catch-up of ours is in progress on this mapping
+       and none finished in the last 60 s                          → send our own request
+```
+
+The last step makes a heal work both ways even when only one side noticed it.
+
+On moderations: a moderation of a message R already had, older than the range, is sent, because R must
+apply it. A message both posted and moderated during the split is sent as neither.
+
+Each item is a `muc-forward` built from the journal entry:
+
+```xml
+<iq type='set' from='beta.example' to='alpha.example' id='g41'>
+  <federation xmlns='urn:xmpp:federation:1'>
+    <muc-forward destination='alpha.example'
+                 targetRoom='chat@conference.alpha.example'
+                 via=''
+                 src='beta.example'
+                 hubs='gamma.example,beta.example'
+                 sent='2026-10-25T14:07:52Z'
+                 catchup='cu-0c4e7d1a9b2f'>
+      <message type='groupchat'
+               from='zed@gamma.example/desktop'
+               to='chat@conference.gamma.example'>
+        <body>deploy is green</body>
+        <stanza-id xmlns='urn:xmpp:sid:0'
+                   by='chat@conference.gamma.example'
+                   id='5f1c9a2e-0b7d-4c1e-9f3a-6d2b8e4a7c10'/>
+      </message>
+    </muc-forward>
+  </federation>
+</iq>
+```
+
+- `targetRoom` is the requester's room. `src` is the responder, the mapped server for this mapping.
+  `via` is empty.
+- `hubs` is the entry's recorded trail with the responder appended. The requester's own fan-out then
+  skips the servers that already have the message.
+- `sent` is the entry's `sent`. `catchup` is the request's id.
+- The payload is the journaled one, unchanged. Its origin `from`, `to` and stanza-id are what make the
+  receiver's checks and its duplicate test work exactly as they do on live traffic.
+
+Items pass every outbound check a live `muc-forward` does, including the untrusted exposure gate. Send
+them oldest first along the route, paced so that a long replay does not starve live traffic on the
+link. This implementation paces them at the file relay's chunk delay, `plugin.federation.files.chunkDelayMs`
+(20 ms by default).
+
+**A relay passes `sent` and `catchup` on unchanged**, like every other attribute of a routed action. A
+relay that dropped them would hand the destination a replay that looks like live traffic. It would be
+delivered as new, at the time it arrived, and the page would never count it.
+
+### `room-catchup-done`
+
+```xml
+<room-catchup-done destination='alpha.example' origin='beta.example'
+                   token='7f3aa1c9e04b8d62f5a0…'
+                   request='cu-0c4e7d1a9b2f'
+                   count='50' complete='false'
+                   next='18342'>
+  <map local='chat@conference.beta.example' remote='chat@conference.alpha.example'/>
+</room-catchup-done>
+```
+
+| Attribute | Meaning |
+|-----------|---------|
+| `destination` | The requester. |
+| `origin` | The responder. |
+| `token` | The mapping's token. |
+| `request` | The request this page answers. |
+| `count` | How many items this page sent. |
+| `complete` | `true` when the journal holds nothing after the page, `false` when there is more. |
+| `next` | A cursor for the next page, opaque to the requester: the responder's position just after the last entry **examined**, sent or skipped. Digits only. |
+
+The cursor marks the last entry examined, not the last one sent, so a page whose entries were all
+skipped still moves forward. It is a position rather than a message id because a moderation has no id
+of its own to resume after. This implementation uses the journal entry's sequence number, which
+survives a restart.
+
+A refused request gets no answer at all, like every other failed check
+([09](09-validation.md#rule-ordering)). The requester learns of it by timing out.
+
+### Requesting
+
+A requester sends `room-catchup-request` on an ACTIVE mapping when:
+
+- the mapping's far server becomes reachable again, because its route was re-learned or its S2S link
+  reconnected, or when the mapping's probe recovers from *not responding*
+  ([04](04-rooms.md#interpreting-results)). These are the events that re-sync occupants.
+- its own server starts: for each mapping with a persisted watermark, once routes have converged. In
+  this implementation the links coming up after a start are those same events.
+- the responder's own request arrives and the last step of [Answering](#answering) calls for one.
+
+At most one catch-up per mapping is in progress at a time. A trigger during one is ignored. This
+implementation waits 5 s after a trigger before it asks. A reconnect raises several triggers at
+once, and the wait lets the routes back settle.
+
+```
+send room-catchup-request, with after and since from the watermark
+on room-catchup-done for it, once count items carrying its id have arrived
+   (or after a 5 s grace):
+    complete is false and fewer than the cap received   → request the next page, with a new
+                                                          request id, cursor := next, and
+                                                          since unchanged
+    otherwise                                           → finished
+no room-catchup-done within 60 s                        → abandon; the next trigger retries
+```
+
+The cap bounds one catch-up; this implementation's is 1,000 items per mapping. It also counts its own
+retry as a trigger: an abandoned catch-up is tried again 30 s later, three attempts in all. A peer
+older than 1.13.0 never answers, so that costs three requests per outage.
+
+During a catch-up, live arrivals do not move the watermark; replayed ones do.
+
+- **Finished:** the watermark becomes the newest message that arrived over the mapping, live or
+  replayed.
+- **Abandoned:** the watermark stays at the last replayed message, so the next trigger resumes there.
+  Live messages from the meantime come back once more and are dropped as duplicates.
+
+### Receiving a replay
+
+A `muc-forward` with `sent` is a replay. It takes the receiver algorithm above, with these checks
+added at the destination before injection:
+
+```
+if catchup is present:
+    if we sent no request with that id in the last 60 s, on a mapping whose
+       local room is targetRoom and whose remote domain is src                   → drop, SECURITY
+    if that request has already received max items                              → drop, SECURITY
+if sent is not a valid XEP-0082 timestamp                                        → drop
+if sent is older than the window, older than this server's journal, or earlier
+   than when targetRoom's mapping with src last became ACTIVE                    → drop
+if sent is later than now + 5 minutes                                            → sent := now
+```
+
+Injection then differs from live traffic in five ways:
+
+- **Duplicates are checked against a record covering the whole window.** A replay is old by
+  definition, and may arrive after a restart has emptied an in-memory record. The check MUST cover the
+  window and SHOULD survive a restart. This implementation checks the journal, for live traffic too.
+- **Time.** Remove every `<delay xmlns='urn:xmpp:delay'/>` (and legacy `jabber:x:delay`) from the copy
+  and add the room's own: `<delay xmlns='urn:xmpp:delay' from='<this room>' stamp='<sent>'/>`. Clients
+  then show the message at the time it was written (XEP-0203). Archive the stamped copy when it
+  arrives, like any other message, and do **not** move the archive row back to `sent`.
+  - Openfire's join history keeps a delay the message already carries.
+  - A MAM archive is read in the order it was written and paged by archive id (XEP-0313). A row moved
+    back in time sits out of order. Openfire's Monitoring plugin orders a page by time but asks for the
+    next one by id, so a client paging through the room skips the moved rows, or the rows they jumped
+    over, depending on direction. The stamped `<delay/>` stays inside the archived message.
+- **Subject changes** are not replayed. A replay carrying one is dropped.
+- **Moderations** look their target up in the journal, so a moderation replayed after a restart still
+  finds its message. Live moderations use the same fallback, on both the sending and the receiving
+  side.
+- **Fan-out** happens as it does for a live message that is new here. It keeps `sent` and drops
+  `catchup`, since the other mappings did not ask. Their duplicate checks drop whatever they already
+  had. This is what heals the spokes behind a hub: when the link between alpha and hub beta comes back,
+  beta catches up from alpha and fans the replays out to gamma and delta.
+
+### What catch-up does not do
+
+- **Room traffic only.** 1:1 messages lost on a broken path are not replayed. Presence, affiliations,
+  bans and room configuration changed on either side during a split are not merged. Occupant sync
+  rebuilds who is present, nothing more.
+- **No gap detection.** Catch-up resumes after the newest message that arrived. A message lost while
+  the path otherwise worked sits before the watermark and is not repaired: one stanza dropped while
+  later ones got through.
+- **Nothing for a stall TCP recovers from.** When a link stalls without breaking, the stanzas queued
+  on it arrive once it recovers, as live traffic: shown and archived at the time they arrive. Catch-up
+  only replays what was lost, and these were not.
+- **No backfill for new mappings.** The watermark resets on activation, so a newly mapped room starts
+  without the other side's history.
+- **MAM shows when a replay arrived.** The archive files a replay when it arrives, after the messages
+  written while it was missing. A client that shows a MAM result at the archive's own time (the
+  `<delay/>` on `<forwarded/>`, as Conversations does) shows it there, and the original time is only in
+  the message's inner `<delay/>`. In exchange, a client resuming MAM by time or by archive id finds the
+  replay either way. Occupants online when it arrives, and join history, see the original time.
+- **No new trust.** A replay passes the same checks as live traffic: the payload's `from` behind the
+  sending path ([09](09-validation.md#3-payload-origin--the-from-spoofing-gate)), an ACTIVE mapping
+  with `src`, the exposure gate. But `sent` is the responder's word. A mapped peer can backdate the
+  messages it carries by up to the window, much as a trusted peer can already misrepresent the users it
+  relays ([09](09-validation.md#the-trusteduntrusted-asymmetry)).
 
 ## Direct room access, without a mapping
 

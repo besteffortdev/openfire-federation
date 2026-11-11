@@ -162,9 +162,14 @@ public class FederationPacketInterceptor implements PacketInterceptor {
 
         handleOverlayBounce(packet);
 
+        // IQRouter runs interceptors on overlay deliveries too, so this covers both ways a search arrives.
+        if (incoming && manager.getSearchGuard().refuse(packet)) {
+            throw new PacketRejectedException("Refused a user search from " + packet.getFrom());
+        }
+
         if (incoming) answerSharedContact(packet);
 
-        rewriteInboundFileShare(packet);
+        if (incoming) rewriteInboundFileShare(packet);
 
         // Computed once: this runs on every stanza, and the lookup scans the MUC services.
         boolean toLocalConference = isLocalConferenceDomain(packet.getTo().getDomain());
@@ -230,15 +235,31 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         if (!filesOn && relay != null && relay.isLocalUploadShare(msg)) {
             Message notice = new Message(msg.getElement().createCopy());
             relay.replaceWithSenderBlockedNotice(notice.getElement());
+            journalLocalMessage(msg, roomJid, notice, null);
             for (RoomMapping mapping : mappings) forwardToMapped(notice, mapping, null);
             return;
         }
 
         Element fileAnn = (filesOn && relay != null)
                 ? relay.annotationForOutbound(msg) : null;
+        journalLocalMessage(msg, roomJid, msg, fileAnn);
         for (RoomMapping mapping : mappings) {
             forwardToMapped(msg, mapping, fileAnn);
         }
+    }
+
+    /**
+     * Records a local user's message in the room journal as it is forwarded, so a mapping that was
+     * cut off can catch up on it. Subject changes and messages without a room stanza-id are left out.
+     */
+    private void journalLocalMessage(Message msg, String roomJid, Message forwarded, Element fileAnn) {
+        MUCRoom room = manager.findLocalMucRoom(roomJid);
+        String sid = StanzaIDUtil.findFirstUniqueAndStableStanzaID(msg, roomJid);
+        if (room == null || sid == null || room.getRoomHistory().isSubjectChangeRequest(msg)) return;
+        Element payload = forwarded.getElement().createCopy();
+        if (fileAnn != null) payload.add(fileAnn.createCopy());
+        manager.getRoomJournal().record(roomJid, RoomJournal.Kind.MESSAGE, roomJid, sid, sid,
+                msg.getFrom().toBareJID(), "", "", 0, payload);
     }
 
     /**
@@ -288,6 +309,11 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         // Each occupant gets a copy of the announcement; only the first is relayed.
         if (!ids.markModerated(roomJid, targetId)) return;
         RoomMessageIds.Origin origin = ids.originOf(roomJid, targetId);
+        if (origin == null) {
+            // Forgotten in memory, as after a restart; the journal still knows the room's own messages.
+            var written = manager.getRoomJournal().find(roomJid, RoomJournal.Kind.MESSAGE, roomJid, targetId);
+            if (written != null) origin = new RoomMessageIds.Origin(roomJid, targetId, written.author());
+        }
         if (origin == null || !roomJid.equals(origin.room())) {
             Log.info("Moderation of {} in {} applies on this server only: {}", targetId, roomJid,
                      origin == null ? "not a message this room forwarded (or too old to be remembered)"
@@ -298,6 +324,8 @@ public class FederationPacketInterceptor implements PacketInterceptor {
         String moderator = moderatorOf(manager.findLocalMucRoom(roomJid), retract);
         Message payload = new Message(RoomModeration.announcement(roomJid, out.getID(), targetId,
                 moderator == null ? null : roomJid + "/" + moderator, null, RoomModeration.reasonOf(retract)));
+        manager.getRoomJournal().record(roomJid, RoomJournal.Kind.MODERATION, roomJid, targetId, targetId,
+                "", "", "", 0, payload.getElement());
         for (RoomMapping mapping : mappings) {
             forwardToMapped(payload, mapping, null);
         }
@@ -483,18 +511,36 @@ public class FederationPacketInterceptor implements PacketInterceptor {
     }
 
     /**
-     * Rewrites a file share annotated by another server that is about to reach a local user, so its
-     * URL points at our download endpoint. A copy bound for a remote user keeps its annotation.
+     * Handles the file annotation on a message entering the router. One written by a reachable peer
+     * for its own upload is rewritten for a local recipient, so its URL points at our download
+     * endpoint. Any other is removed: a client or an unknown server could otherwise make this server,
+     * and every mapped one, request files and fill their transfer tables.
      */
     private void rewriteInboundFileShare(Packet packet) {
         if (!(packet instanceof Message msg)) return;
-        if (manager.getFileRelay() == null) return;
-        JID to = msg.getTo();
-        if (to == null || to.getNode() == null) return;
-        if (!XMPPServer.getInstance().isLocal(to)) return;
-        if (manager.getFileRelay().annotationOf(msg.getElement()) == null) return;
+        var relay = manager.getFileRelay();
+        if (relay == null) return;
+        Element ann = relay.annotationOf(msg.getElement());
+        if (ann == null) return;
         String fromDomain = msg.getFrom() != null ? msg.getFrom().getDomain() : null;
-        manager.getFileRelay().rewriteInPlace(msg, fromDomain);
+        String origin = ann.attributeValue(FederationStanzaFactory.ATTR_ORIGIN);
+        if (!annotationTrusted(fromDomain, origin, manager.getPeerRegistry().isReachable(fromDomain))) {
+            relay.removeAnnotations(msg.getElement());
+            Log.debug("Removed a file annotation from {} (origin {}): not a reachable peer speaking for itself",
+                      msg.getFrom(), LogSafe.text(origin));
+            return;
+        }
+        JID to = msg.getTo();
+        if (to == null || to.getNode() == null || !XMPPServer.getInstance().isLocal(to)) return;
+        relay.rewriteInPlace(msg, fromDomain);
+    }
+
+    /**
+     * Whether a file annotation on a stanza that reached the router from outside the overlay may be
+     * acted on: its sender's server is a reachable peer and names itself as the file's origin.
+     */
+    static boolean annotationTrusted(String senderDomain, String origin, boolean senderIsReachablePeer) {
+        return senderDomain != null && senderIsReachablePeer && senderDomain.equals(origin);
     }
 
     /**

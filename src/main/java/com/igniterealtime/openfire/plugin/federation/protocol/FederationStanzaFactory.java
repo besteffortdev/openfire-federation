@@ -10,7 +10,11 @@ import org.xmpp.packet.JID;
 import org.xmpp.packet.Packet;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
 
 /**
  * Builds the IQ stanzas of the federation protocol ({@value #NS}) and holds its element and
@@ -59,6 +63,15 @@ public final class FederationStanzaFactory {
 
     /** muc-forward: the room on the destination to deliver into. */
     public static final String ATTR_TARGET_ROOM = "targetRoom";
+
+    /** muc-forward: when a replayed message was first sent (XEP-0082); its presence marks a replay. */
+    public static final String ATTR_SENT = "sent";
+
+    /** muc-forward: the catch-up request a replay answers. */
+    public static final String ATTR_CATCHUP = "catchup";
+
+    /** Catch-up: the requester's id for one page, echoed on everything sent in answer. */
+    public static final String ATTR_REQUEST = "request";
 
     private static final String NS_ORIGIN_ELEMENT = "fed-origin";
 
@@ -269,6 +282,23 @@ public final class FederationStanzaFactory {
                                 String srcMapped,
                                 String hubs,
                                 Packet payload) {
+        return mucForward(nextHop, finalDestination, targetRoom, viaTrail, srcMapped, hubs, null, null, payload);
+    }
+
+    /**
+     * As {@link #mucForward(String, String, String, String, String, String, Packet)}; a non-null
+     * {@code sent} marks the payload as a replay first sent then, and {@code catchup} names the
+     * catch-up request it answers (docs/protocol/05 § Catch-up after a split).
+     */
+    public static IQ mucForward(String nextHop,
+                                String finalDestination,
+                                String targetRoom,
+                                String viaTrail,
+                                String srcMapped,
+                                String hubs,
+                                String sent,
+                                String catchup,
+                                Packet payload) {
         IQ iq = base(nextHop);
         Element fwd = payload(iq, "muc-forward");
         fwd.addAttribute(ATTR_DESTINATION, finalDestination);
@@ -276,7 +306,26 @@ public final class FederationStanzaFactory {
         fwd.addAttribute(ATTR_VIA, viaTrail);
         if (srcMapped != null) fwd.addAttribute(ATTR_SRC, srcMapped);
         addIfPresent(fwd, ATTR_HUBS, hubs);
+        addIfPresent(fwd, ATTR_SENT, sent);
+        addIfPresent(fwd, ATTR_CATCHUP, catchup);
         fwd.add(payload.getElement().createCopy());
+        return iq;
+    }
+
+    /**
+     * A {@code room-catchup-request} or {@code room-catchup-done} for the mapping of our room
+     * {@code localJid} with {@code remoteJid}, routed to {@code destination}. {@code attrs} are the
+     * action's own attributes in order; empty values are left out.
+     */
+    public static IQ roomCatchup(String element, String nextHop, String destination, String token,
+                                 String localJid, String remoteJid, Map<String, String> attrs) {
+        IQ iq = base(nextHop);
+        Element action = routedPayload(iq, element, destination, localJID().getDomain());
+        addIfPresent(action, ATTR_TOKEN, token);
+        attrs.forEach((name, value) -> addIfPresent(action, name, value));
+        Element map = action.addElement("map");
+        map.addAttribute(ATTR_LOCAL, localJid);
+        map.addAttribute(ATTR_REMOTE, remoteJid);
         return iq;
     }
 
@@ -366,24 +415,46 @@ public final class FederationStanzaFactory {
 
     /** Passes a destination-routed element on to the next hop unchanged apart from its via trail. */
     public static IQ relay(String nextHop, Element element, String newVia) {
-        IQ iq = base(nextHop);
-        Element fed = iq.setChildElement(ELEMENT, NS);
-        Element copy = element.createCopy();
-        copy.addAttribute(ATTR_VIA, newVia);
-        fed.add(copy);
+        IQ iq = relayUnchanged(nextHop, element);
+        iq.getChildElement().elements().get(0).addAttribute(ATTR_VIA, newVia);
         return iq;
     }
 
+    /** Passes a destination-routed element on to the next hop unchanged; for actions that carry no via trail. */
+    public static IQ relayUnchanged(String nextHop, Element element) {
+        IQ iq = base(nextHop);
+        iq.setChildElement(ELEMENT, NS).add(element.createCopy());
+        return iq;
+    }
+
+    /**
+     * The packets this server marked as its own deliveries. The element alone proves nothing, since
+     * any client or server can write one; only a packet in this set is skipped by the interceptor.
+     */
+    private static final Set<Packet> OWN_DELIVERIES =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+
     /** Marks a packet as delivered by federation, so the interceptor does not forward it again. */
     public static void markAsForwarded(Packet packet) {
+        addSyncMarker(packet);
+        OWN_DELIVERIES.add(packet);
+    }
+
+    /**
+     * Adds the {@code fed-origin} element to a room presence sent to a peer, which tells it not to
+     * answer with its own occupants (docs/protocol/05). It gives the packet no standing here.
+     */
+    public static void addSyncMarker(Packet packet) {
         Element el = packet.getElement();
         if (el.element(NS_ORIGIN_ELEMENT) == null) {
             el.addElement(NS_ORIGIN_ELEMENT, NS);
         }
     }
 
+    /** Whether this server itself marked {@code packet}; a marker written by anyone else does not count. */
     public static boolean isMarkedAsForwarded(Packet packet) {
-        return packet.getElement().element(NS_ORIGIN_ELEMENT) != null;
+        // The element is checked first: it is lock-free, and almost no stanza carries one.
+        return packet.getElement().element(NS_ORIGIN_ELEMENT) != null && OWN_DELIVERIES.contains(packet);
     }
 
     /** Whether {@code domain} is one of the entries of the comma-separated trail {@code via}. */

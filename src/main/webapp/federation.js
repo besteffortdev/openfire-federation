@@ -15,6 +15,8 @@ const editedRoomVis = {};
 
 document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
+    bindDialog();
+    bindSettingInputs();
     bindPeerForm();
     bindRoomDefaultForm();
     bindFilters();
@@ -26,25 +28,66 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function setupTabs() {
     document.querySelectorAll('.fed-tab').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('.fed-tab').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.fed-panel').forEach(p => p.classList.remove('active'));
-            btn.classList.add('active');
-            document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
-        });
+        btn.addEventListener('click', () => goTo(btn.dataset.tab));
     });
-
-    // In-panel sub-tab bars (e.g. Rooms → Room Sharing / Rooms config)
+    // In-panel sub-tab bars (e.g. Rooms → Room sharing / Rules for new rooms)
     document.querySelectorAll('.fed-subtab').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const bar = btn.closest('.fed-subtabs');
-            const scope = bar.parentElement;
-            bar.querySelectorAll('.fed-subtab').forEach(b => b.classList.remove('active'));
-            scope.querySelectorAll('.fed-subpanel').forEach(p => p.classList.remove('active'));
-            btn.classList.add('active');
-            document.getElementById('subpanel-' + btn.dataset.subtab).classList.add('active');
-        });
+        btn.addEventListener('click', () => goTo(btn.closest('.fed-panel').id.replace(/^panel-/, ''), btn.dataset.subtab));
     });
+    window.addEventListener('hashchange', openFromHash);
+    openFromHash();
+}
+
+/** Shows a tab, and a sub-tab of it when one is named; the address keeps the place across a reload. */
+function goTo(tab, subtab) {
+    const panel = document.getElementById('panel-' + tab);
+    if (!panel) return;
+    document.querySelectorAll('.fed-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('.fed-panel').forEach(p => p.classList.toggle('active', p === panel));
+    if (subtab && document.getElementById('subpanel-' + subtab)) {
+        panel.querySelectorAll('.fed-subtab').forEach(b => b.classList.toggle('active', b.dataset.subtab === subtab));
+        panel.querySelectorAll('.fed-subpanel').forEach(p => p.classList.toggle('active', p.id === 'subpanel-' + subtab));
+    }
+    const active = panel.querySelector('.fed-subtab.active');
+    const hash = '#' + tab + (active ? '/' + active.dataset.subtab : '');
+    try { if (location.hash !== hash) history.replaceState(null, '', hash); } catch (e) { /* sandboxed page */ }
+}
+
+function openFromHash() {
+    const [tab, subtab] = location.hash.replace(/^#/, '').split('/');
+    if (tab) goTo(tab, subtab);
+}
+
+/** Brings an element into view and flashes it, once the render that draws it is done. */
+function reveal(id) {
+    setTimeout(() => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.animate([{ background: 'var(--primary-soft)' }, { background: 'transparent' }], { duration: 1400 });
+    }, 60);
+}
+
+function showPeer(domain) {
+    goTo('peers', 'peers-list');
+    expandedPeerRooms.add(domain);
+    renderPeers(lastData.peers || []);
+    reveal('peer-row-' + jidToElemId(domain));
+}
+
+function showRoom(jid) {
+    goTo('rooms', 'room-sharing');
+    const room = (lastData.localRooms || []).find(r => r.jid === jid);
+    if (room && room.federated) expandedRoomVis.add(jid);
+    renderLocalRooms(lastData.localRooms || []);
+    reveal('room-row-' + jidToElemId(jid));
+}
+
+function showReceivedList(origin) {
+    goTo('users', 'contact-sharing');
+    cardState.set('contact-received|' + origin, false);
+    renderUsersTab(lastData.contactLists || {});
+    reveal('cm-' + jidToElemId(origin));
 }
 
 // Fetches the status once, for immediate feedback after an action; pollLoop() delivers every other update.
@@ -66,13 +109,24 @@ async function pollLoop() {
             const data = await r.json();
             if (data.error) throw new Error(data.error);
             statusHash = data.hash || '';
+            setLive(true);
             renderAll(data);
         } catch (err) {
             // Server restart, expired admin session, network blip — back off and reconnect.
             console.error('Federation poll error:', err);
+            setLive(false);
             await new Promise(res => setTimeout(res, 3000));
         }
     }
+}
+
+/** Says in the header whether the page still hears from the server. */
+function setLive(up) {
+    const dot = document.getElementById('fed-live-dot');
+    const text = document.getElementById('fed-live-text');
+    if (dot) dot.classList.toggle('down', !up);
+    if (text) text.textContent = up ? 'Live — updates as things change'
+                                    : 'Connection lost — retrying. You may need to sign in again.';
 }
 
 function renderAll(data) {
@@ -96,6 +150,8 @@ function renderAll(data) {
     renderAvScanLog(data.avScanLog || []);
     renderRejectedFiles(data.rejectedFiles || []);
     renderFileConfig(data.fileConfig || {});
+    renderStoreUsage(data);
+    renderOverview(data);
 }
 
 function updateStatusBadge(peers) {
@@ -103,6 +159,21 @@ function updateStatusBadge(peers) {
     const reachable = peers.filter(p => p.status === 'REACHABLE').length;
     badge.textContent = reachable + '/' + peers.length + ' peers reachable';
     badge.className = 'fed-badge ' + (reachable > 0 ? 'ok' : peers.length === 0 ? 'neutral' : 'warn');
+}
+
+/** Opens or closes the add-peer form under the peers header. */
+function toggleAddPeer(open) {
+    const box = document.getElementById('add-peer-box');
+    if (!box) return;
+    const show = open == null ? !box.classList.contains('open') : open;
+    box.classList.toggle('open', show);
+    if (show) document.getElementById('input-peer-domain').focus();
+}
+
+/** Takes the admin to the add-peer form, from the overview. */
+function startAddPeer() {
+    goTo('peers', 'peers-list');
+    toggleAddPeer(true);
 }
 
 function bindPeerForm() {
@@ -123,6 +194,7 @@ function bindPeerForm() {
             if (!result || !result.ok) return;
             domainField.value = '';
             if (untrustedCb) untrustedCb.checked = false;
+            toggleAddPeer(false);
         });
     });
 }
@@ -138,10 +210,27 @@ function isForeignDomain(domain) {
     return parentOf(domain) !== parentOf(lastData.localDomain);
 }
 
+const PEER_STATUS_LABELS = { REACHABLE: 'Reachable', UNREACHABLE: 'Unreachable', UNKNOWN: 'Not checked yet' };
+
+/** "3 min ago", kept current by tickClocks; the exact time is in the tooltip. */
+function agoSpan(at) {
+    return `<span class="ago" data-at="${at}" title="${escHtml(new Date(at).toLocaleString())}">${agoText(at)}</span>`;
+}
+
+function agoText(at) {
+    const secs = Math.max(0, Math.round((Date.now() - at) / 1000));
+    if (secs < 10) return 'just now';
+    if (secs < 60) return secs + ' s ago';
+    if (secs < 3600) return Math.round(secs / 60) + ' min ago';
+    if (secs < 86400) return Math.round(secs / 3600) + ' h ago';
+    return Math.round(secs / 86400) + ' d ago';
+}
+
 function renderPeers(peers) {
     const tbody = document.getElementById('peers-tbody');
     if (peers.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty">No peers configured yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No peers yet. Add the first one with '
+            + '<strong>+ Add peer</strong>.</td></tr>';
         return;
     }
     // Captured before the rebuild, so a refresh mid-edit keeps the admin's unsaved changes.
@@ -165,10 +254,11 @@ function renderPeers(peers) {
             statusLabel = 'Pending <span class="retry-countdown">waiting for the remote to add this server as a peer</span>';
         else if (p.status === 'TRUST_MISMATCH')
             statusLabel = 'Trust mismatch — both ends must set the same trust level';
-        else                           statusLabel = p.status;
+        else                           statusLabel = PEER_STATUS_LABELS[p.status] || p.status;
         if (isUnreachable) {
             const retryAt = p.nextRetryAt || 0;
-            statusLabel += ` <span class="retry-countdown" data-retry-at="${retryAt}">${retryCountdownText(retryAt)}</span>`;
+            statusLabel += ` <span class="retry-countdown" data-retry-at="${retryAt}">${retryCountdownText(retryAt)}</span>`
+                + ` <button class="btn-small btn-ghost" style="margin-left:6px" onclick="retryPeer('${jsArg(p.domain)}')">Retry now</button>`;
         }
 
         const untrustedBadge = p.untrusted
@@ -178,7 +268,7 @@ function renderPeers(peers) {
         // A changed certificate gets an alert with an accept button; a pinned one a quiet lock.
         const certBadge = p.certMismatch
             ? `<span class="badge badge-untrusted" title="The S2S certificate changed since it was first pinned">⚠ cert changed</span>`
-            : (p.certPinned ? `<span class="badge badge-in" title="S2S certificate pinned (trust-on-first-use)">🔒 pinned</span>` : '');
+            : (p.certPinned ? `<span class="badge badge-in" style="margin-left:8px" title="S2S certificate pinned (trust-on-first-use)">🔒 pinned</span>` : '');
 
         // Summary next to the expand arrow.
         const sumParts = [];
@@ -187,10 +277,10 @@ function renderPeers(peers) {
         const dom = jsArg(p.domain);
 
         let row = `
-        <tr>
-            <td data-sort="${escHtml(p.domain)}">${dom}${untrustedBadge}${certBadge}</td>
+        <tr id="peer-row-${jidToElemId(p.domain)}">
+            <td data-sort="${escHtml(p.domain)}"><strong>${dom}</strong>${untrustedBadge}${certBadge}</td>
             <td data-sort="${escHtml(p.status)}"><span class="status-dot ${statusClass(p.status)}"></span> ${statusLabel}</td>
-            <td data-sort="${p.lastSeen || ''}">${p.lastSeen ? new Date(p.lastSeen).toLocaleString() : '—'}</td>
+            <td data-sort="${p.lastSeen || ''}">${p.lastSeen ? agoSpan(p.lastSeen) : '—'}</td>
             <td class="room-detail-cell">
                 <span class="room-detail-sum">${sumParts.join(' · ')}</span>
                 <button class="room-expand-btn ${expanded ? 'open' : ''}"
@@ -352,18 +442,19 @@ function togglePeerRooms(domain) {
     renderPeers(lastData.peers || []);
 }
 
-function setUntrusted(domain, untrusted) {
-    if (untrusted && !confirm('Mark ' + domain + ' as untrusted?\n\n'
+async function setUntrusted(domain, untrusted) {
+    if (untrusted && !await ask('Mark ' + domain + ' as untrusted?\n\n'
         + 'It will immediately stop receiving routing updates and room advertisements. '
-        + 'Use the peer\'s settings panel (expand arrow) to choose exactly which servers it may see.')) return;
+        + 'Use the peer\'s settings panel (expand arrow) to choose exactly which servers it may see.',
+        'Make untrusted')) return;
     save({ action: 'set-untrusted', domain, untrusted }, untrusted ? 'Marked untrusted' : 'Marked trusted')
         .then(result => {
             if (result && result.ok && !untrusted) delete editedExposed[domain];   // exposure list no longer applies
         });
 }
 
-function acceptCert(domain) {
-    if (!confirm('Trust the new S2S certificate for ' + domain + '?\n\n'
+async function acceptCert(domain) {
+    if (!await ask('Trust the new S2S certificate for ' + domain + '?\n\n'
         + 'Only do this if you know the server was legitimately re-created or its certificate '
         + 'was renewed. The new certificate will be pinned and the alert cleared.')) return;
     save({ action: 'accept-cert', domain }, 'Certificate trusted');
@@ -396,8 +487,8 @@ function retryPeer(domain) {
     save({ action: 'retry-peer', domain }, 'Retry requested');
 }
 
-function disablePeer(domain) {
-    if (!confirm('Disable federation with ' + domain + '?\n\n'
+async function disablePeer(domain) {
+    if (!await ask('Disable federation with ' + domain + '?\n\n'
         + 'This tears down the connection like removing it, but the remote is told '
         + 'and cannot re-enable it from their side — even by deleting and re-adding it. '
         + 'Only you can re-enable it here.')) return;
@@ -464,9 +555,9 @@ function renderS2SSessions(sessions) {
 }
 
 /** Adds a peer straight from an active (non-federated) S2S session row. */
-function addPeerFromSession(domain) {
+async function addPeerFromSession(domain) {
     const untrusted = isForeignDomain(domain);
-    if (!confirm('Add ' + domain + ' as a federation peer?'
+    if (!await ask('Add ' + domain + ' as a federation peer?'
         + (untrusted ? '\n\nIt is under a different parent domain, so it will be added as UNTRUSTED '
                      + '(it sees nothing until you expose servers to it).' : ''))) return;
     save({ action: 'add-peer', domain, untrusted }, 'Peer added');
@@ -540,6 +631,12 @@ const SETTINGS = {
         key: 'filesStorageDir', def: '/var/lib/openfire/federation-files', action: 'set-files-storage-dir', param: 'dir',
         check: v => !v ? 'Storage directory cannot be empty.'
                   : /^(\/|[A-Za-z]:[\\/])/.test(v) || 'Please enter a full path, e.g. /var/lib/openfire/federation-files.' },
+    'files-maxstore-input': {
+        key: 'filesMaxStoreMB', def: 4096, action: 'set-files-max-store', param: 'mb',
+        check: v => v >= 0 || 'Store size limit must be 0 (no limit) or more.' },
+    'files-uploadports-input': {
+        key: 'filesUploadPorts', def: '', action: 'set-files-upload-ports', param: 'ports',
+        check: v => /^\s*(\d{1,5}\s*(,\s*\d{1,5}\s*)*)?$/.test(v) || 'Enter port numbers separated by commas, or leave blank.' },
     'files-extensions-input': {
         key: 'filesAllowedExtensions', def: '', action: 'set-files-allowed-extensions', param: 'extensions' },
     'files-av-toggle': {
@@ -552,6 +649,47 @@ const SETTINGS = {
         check: v => (v >= 1 && v <= 65535) || 'ClamAV port must be between 1 and 65535.' },
 };
 
+// The value the server last reported for each text or number setting, to tell an unsaved edit from it.
+const serverValues = {};
+
+function isDirty(id) {
+    const el = document.getElementById(id);
+    return !!el && id in serverValues && el.value.trim() !== serverValues[id];
+}
+
+/** Enables each Save button only while one of its inputs holds an unsaved edit, and marks those inputs. */
+function markDirtySettings() {
+    for (const [id, s] of Object.entries(SETTINGS)) {
+        if (s.states) continue;
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.classList.toggle('dirty', isDirty(id));
+        const ctl = el.closest('.setting-ctl');
+        const btn = ctl && ctl.querySelector('.btn-primary');
+        if (btn) btn.disabled = !Array.from(ctl.querySelectorAll('.num-input')).some(i => isDirty(i.id));
+    }
+}
+
+/** Enter saves a setting and Escape puts the saved value back. */
+function bindSettingInputs() {
+    for (const [id, s] of Object.entries(SETTINGS)) {
+        if (s.states) continue;
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener('input', markDirtySettings);
+        el.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const btn = el.closest('.setting-ctl').querySelector('.btn-primary');
+                if (btn && !btn.disabled) btn.click();
+            } else if (e.key === 'Escape' && id in serverValues) {
+                el.value = serverValues[id];
+                markDirtySettings();
+            }
+        });
+    }
+}
+
 function updateSettings(data) {
     for (const [id, s] of Object.entries(SETTINGS)) {
         const el = document.getElementById(id);
@@ -562,11 +700,35 @@ function updateSettings(data) {
             if (!editing) el.checked = !!v;
             const lbl = document.getElementById(id.replace(/-toggle$/, '-state'));
             if (lbl) lbl.textContent = s.states[v ? 1 : 0];
-        } else if (!editing) {
-            el.value = v;
+        } else {
+            // An edit that was typed but not saved yet survives a refresh.
+            const keep = editing || isDirty(id);
+            serverValues[id] = String(v);
+            if (!keep) el.value = v;
         }
     }
+    markDirtySettings();
     updateFilesLogPaths(data.filesScanLogPath, data.filesRejectionLogPath);
+}
+
+/** How full the relay's store is, against its limit. */
+function renderStoreUsage(data) {
+    const meter = document.getElementById('files-store-meter');
+    const text = document.getElementById('files-store-text');
+    if (!meter || !text) return;
+    const used = Number(data.filesStoreBytes) || 0;
+    const limitMb = Number(data.filesMaxStoreMB);
+    if (!(limitMb > 0)) {
+        meter.style.display = 'none';
+        text.textContent = fmtBytes(used) + ' used, no limit set.';
+        return;
+    }
+    const pct = Math.min(100, used / (limitMb * 1024 * 1024) * 100);
+    meter.style.display = '';
+    meter.className = 'meter' + (pct >= 100 ? ' bad' : pct >= 90 ? ' warn' : '');
+    meter.firstElementChild.style.width = (used > 0 ? Math.max(pct, 1) : 0) + '%';
+    text.textContent = fmtBytes(used) + ' of ' + fmtBytes(limitMb * 1024 * 1024) + ' used ('
+        + (pct < 10 ? pct.toFixed(1) : Math.round(pct)) + '%).';
 }
 
 /** A setting's current control value, or null (after telling the admin why) when it is invalid. */
@@ -579,17 +741,17 @@ function settingValue(id) {
             : el.value.trim();
     const verdict = s.check ? s.check(v) : true;
     if (verdict !== true) {
-        alert(verdict);
+        notify(verdict);
         return null;
     }
     return v;
 }
 
-function saveSetting(id) {
+async function saveSetting(id) {
     const s = SETTINGS[id];
     const v = settingValue(id);
     if (v === null) return;
-    if (s.confirmOn && v && !confirm(s.confirmOn)) {
+    if (s.confirmOn && v && !await ask(s.confirmOn)) {
         document.getElementById(id).checked = false;
         return;
     }
@@ -604,7 +766,7 @@ function updateFilesLogPaths(scanPath, rejectionPath) {
     if (rejEl && rejectionPath) rejEl.textContent = rejectionPath;
     const summary = document.getElementById('files-log-paths');
     if (summary && scanPath && rejectionPath) {
-        summary.textContent = ' Written to ' + scanPath + ' and ' + rejectionPath + '.';
+        summary.textContent = 'Written to ' + scanPath + ' and ' + rejectionPath + '.';
     }
 }
 
@@ -621,7 +783,7 @@ function saveFilesAvEndpoint() {
         .then(results => {
             const failed = results.find(r => !r || !r.ok);
             if (!failed) flashSaved('Saved');
-            else if (failed.error) alert(failed.error);
+            else if (failed.error) notify(failed.error);
             refresh();
         });
 }
@@ -636,13 +798,13 @@ function testFilesAvConnection() {
         });
 }
 
-function killSession(domain, direction) {
-    if (!confirm('Close ' + direction + ' S2S session with ' + domain + '?')) return;
+async function killSession(domain, direction) {
+    if (!await ask('Close the ' + direction + ' S2S session with ' + domain + '?', 'Close session')) return;
     save({ action: 'kill-session', domain, direction }, 'Session closed');
 }
 
-function removePeer(domain) {
-    if (!confirm('Remove peer ' + domain + '?')) return;
+async function removePeer(domain) {
+    if (!await ask('Remove peer ' + domain + '?')) return;
     save({ action: 'remove-peer', domain }, 'Peer removed');
 }
 
@@ -698,7 +860,8 @@ function fmtBytes(n) {
     n = Number(n) || 0;
     if (n < 1024) return n + ' B';
     if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    return (n / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
 function renderAvScanLog(entries) {
@@ -775,8 +938,8 @@ function renderRejectedFiles(entries) {
 }
 
 /** Denies a destination's route/room advertisements arriving from a specific peer. */
-function denyRoute(peerDomain, destination) {
-    if (!confirm('Deny the route to ' + destination + ' advertised by ' + peerDomain + '?\n\n'
+async function denyRoute(peerDomain, destination) {
+    if (!await ask('Deny the route to ' + destination + ' advertised by ' + peerDomain + '?\n\n'
         + 'This server will refuse that destination (and its rooms) whenever ' + peerDomain
         + ' advertises it — the entry stays in this table as disabled, and the deny is '
         + 'remembered even if the route is withdrawn and comes back. A route to the same '
@@ -793,6 +956,7 @@ function renderUsersTab(cl) {
     renderLocalGroups();
     renderReceivedLists(cl.received || [], cl.localGroups || [], !!cl.groupsReadOnly);
     renderSentLists(cl.sent || []);
+    renderDirectory(cl.directory || {});
 }
 
 // A contact as "Name <jid>" (or just the JID when its server gave no name).
@@ -1008,26 +1172,40 @@ function renderReceivedList(r, localGroups, readOnly) {
     const display = edit ? edit.displayName : (m ? m.displayName : o);
     const groups = new Set(edit ? edit.groups : (m ? m.groups : []));
     const everybody = groups.has('*');
+    const directory = edit ? edit.directory : !!(m && m.directory);
+    const denied = !!r.denied;
+    // A denied list keeps its mapping but is not used, so its controls are locked until it is allowed.
+    const locked = readOnly || denied;
 
     const received = r.receivedAt
         ? 'received ' + new Date(r.receivedAt).toLocaleString()
         : 'not received since restart';
-    const mapInfo = m ? '<span class="peer-map-count">mapped</span>' : '';
+    const mapInfo = denied
+        ? '<span class="badge badge-untrusted" title="Every list this server sends is dropped">denied</span>'
+        : (m && m.groups.length ? '<span class="peer-map-count">in rosters</span>' : '')
+          + (m && m.directory ? '<span class="peer-map-count">searchable</span>' : '');
     const untrustedBadge = r.crossedUntrusted
         ? '<span class="badge badge-untrusted" title="An untrusted server relayed this list and could have altered it. '
           + 'Check the contacts before mapping it.">via untrusted link</span>' : '';
-    const status = m
-        ? `Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
-          + (m.groups.includes('*') ? 'all users' : escHtml(m.groups.join(', ')))
-          + ` as <strong>${escHtml(m.displayName)}</strong>. Untick everything and save to unmap.`
-        : 'Not mapped — no local user sees these contacts yet.';
+    const rosterStatus = !m ? 'Not mapped — no local user sees these contacts yet.'
+        : m.groups.length
+            ? `Openfire group <code>${escHtml(r.groupName)}</code>, shown to `
+              + (m.groups.includes('*') ? 'all users' : escHtml(m.groups.join(', ')))
+              + ` as <strong>${escHtml(m.displayName)}</strong>.`
+            : 'In no contact list.';
+    const status = denied
+        ? `Denied: every list ${escHtml(o)} sends is dropped, and these contacts are in no contact list or directory.`
+          + (m ? ' Your mapping is kept; Allow uses it again.' : ' Allow accepts its lists again.')
+        : rosterStatus
+          + (m && m.directory ? ' Your users can find these contacts in the federated directory.' : '')
+          + (m ? ' Untick everything and save to unmap.' : '');
     const error = r.error ? `<p class="hint" style="color:var(--red-ink);margin:6px 0 0">${escHtml(r.error)}</p>` : '';
 
     const listId = 'cmgroups-' + id;
     const groupRows = localGroups.map(g => `
         <label class="exposed-room">
             <input type="checkbox" class="cm-group" value="${escHtml(g)}" ${groups.has(g) ? 'checked' : ''}
-                   ${everybody || readOnly ? 'disabled' : ''} onchange="captureContactMapEdit('${oj}')">
+                   ${everybody || locked ? 'disabled' : ''} onchange="captureContactMapEdit('${oj}')">
             <span>${escHtml(g)}</span>
         </label>`).join('');
 
@@ -1038,13 +1216,23 @@ function renderReceivedList(r, localGroups, readOnly) {
               ? `<tr><td colspan="2" class="hint">… and ${r.count - r.contacts.length} more</td></tr>` : '');
 
     return card({
-        list: 'contact-received', key: o, id: 'cm-' + id,
+        list: 'contact-received', key: o, id: 'cm-' + id, startCollapsed: true,
         header: `<span class="status-dot ${r.reachable ? 'green' : 'grey'}" title="${r.reachable ? 'reachable' : 'unreachable'}"></span>
             <strong>${escHtml(o)}</strong>
             <span class="peer-room-count">${r.count} contact(s)</span>
             ${mapInfo}
             ${untrustedBadge}
-            <span class="hint" style="margin-left:auto">${received}</span>`,
+            <span class="hint" style="margin-left:auto">${received}</span>
+            <span class="cm-actions" style="display:inline-flex;gap:4px;margin-left:10px" onclick="event.stopPropagation()">
+                ${denied
+                    ? `<button class="btn-small btn-ghost cm-allow" title="Accept the lists ${escHtml(o)} sends again"
+                               onclick="allowContactList('${oj}')">Allow</button>`
+                    : `<button class="btn-small btn-warn cm-deny" title="Drop every list ${escHtml(o)} sends; this entry stays"
+                               onclick="denyContactList('${oj}')">Deny</button>`}
+                <button class="btn-small btn-danger cm-delete"
+                        title="Remove this entry; if ${escHtml(o)} shares a list again, it shows up as new"
+                        onclick="deleteContactList('${oj}')">Delete</button>
+            </span>`,
         body: `
             <div class="exposed-cols" style="padding:12px 14px;align-items:flex-start">
                 <div class="exposed-col" style="flex:0 0 300px">
@@ -1055,21 +1243,32 @@ function renderReceivedList(r, localGroups, readOnly) {
                     <label style="display:flex;flex-direction:column;font-size:12px;color:#555;margin-bottom:8px">
                         Roster group name
                         <input type="text" id="cm-name-${id}" value="${escHtml(display)}" style="margin-top:3px"
-                               oninput="captureContactMapEdit('${oj}')" ${readOnly ? 'disabled' : ''}>
+                               oninput="captureContactMapEdit('${oj}')" ${locked ? 'disabled' : ''}>
                     </label>
                     <label class="exposed-room" style="font-weight:600">
-                        <input type="checkbox" class="cm-all" ${everybody ? 'checked' : ''} ${readOnly ? 'disabled' : ''}
+                        <input type="checkbox" class="cm-all" ${everybody ? 'checked' : ''} ${locked ? 'disabled' : ''}
                                onchange="captureContactMapEdit('${oj}')">
                         <span>Show to all users</span>
                     </label>
                     ${filteredChecklist(listId, groupRows, 'Filter groups…', checklistFilters,
                         '<p class="empty" style="margin:4px 0">No local groups — create one in Openfire, or show the list to all users.</p>')}
-                    <div style="margin-top:8px">
-                        <button class="btn-small btn-primary" onclick="saveContactMapping('${oj}')" ${readOnly ? 'disabled' : ''}>
+                    <div style="margin-top:8px;display:flex;gap:4px">
+                        <button class="btn-small btn-primary" onclick="saveContactMapping('${oj}')" ${denied ? 'disabled' : ''}>
                             ${m ? 'Save' : 'Map'}</button>
-                        ${edit ? `<button class="btn-small btn-ghost" style="margin-left:4px"
+                        ${edit ? `<button class="btn-small btn-ghost"
                                           onclick="discardContactMapEdit('${oj}')">Discard</button>` : ''}
                     </div>
+                </div>
+                <div class="exposed-col" style="flex:0 0 230px">
+                    <div class="exposed-col-h">Federated directory
+                        <span class="exposed-col-sub">Your users can look these contacts up and add the ones they
+                            want. Nothing is put in any contact list. Applied with the ${m ? 'Save' : 'Map'} button.</span>
+                    </div>
+                    <label class="exposed-room" style="font-weight:600">
+                        <input type="checkbox" class="cm-dir" ${directory ? 'checked' : ''} ${denied ? 'disabled' : ''}
+                               onchange="captureContactMapEdit('${oj}')">
+                        <span>Searchable in the federated directory</span>
+                    </label>
                 </div>
                 <div class="exposed-col">
                     <div class="exposed-col-h">Contacts
@@ -1091,10 +1290,13 @@ function readContactMapForm(origin) {
     const card = document.getElementById('cm-' + id);
     if (!card) return null;
     const all = card.querySelector('.cm-all');
-    const groups = all && all.checked
-        ? ['*']
+    const dir = card.querySelector('.cm-dir');
+    // A read-only group provider cannot hold a roster group, so only the directory choice is sent.
+    const readOnly = !!(lastData.contactLists && lastData.contactLists.groupsReadOnly);
+    const groups = readOnly ? []
+        : all && all.checked ? ['*']
         : [...card.querySelectorAll('.cm-group:checked')].map(i => i.value);
-    return { displayName: document.getElementById('cm-name-' + id).value, groups };
+    return { displayName: document.getElementById('cm-name-' + id).value, groups, directory: !!(dir && dir.checked) };
 }
 
 function captureContactMapEdit(origin) {
@@ -1115,25 +1317,127 @@ function discardContactMapEdit(origin) {
 function saveContactMapping(origin) {
     const f = readContactMapForm(origin);
     if (!f) return;
-    if (!f.groups.length) {
+    if (!f.groups.length && !f.directory) {
         // Nothing ticked on a mapped list = unmap it; on an unmapped one there is nothing to save.
         if (lastMappingOf(origin)) { unmapContactList(origin); return; }
-        alert('Choose at least one group, or Show to all users.');
+        notify('Choose at least one group or Show to all users, or make the list searchable.');
         return;
     }
-    save({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n') },
-         'Mapping saved')
+    save({ action: 'map-contact-list', origin, displayName: f.displayName.trim(), groups: f.groups.join('\n'),
+           directory: f.directory }, 'Mapping saved')
         .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
 }
 
-function lastMappingOf(origin) {
+function receivedEntry(origin) {
     const received = (lastData.contactLists && lastData.contactLists.received) || [];
-    const r = received.find(x => x.origin === origin);
+    return received.find(x => x.origin === origin) || null;
+}
+
+function lastMappingOf(origin) {
+    const r = receivedEntry(origin);
     return r ? r.mapping : null;
 }
 
 function unmapContactList(origin) {
     save({ action: 'unmap-contact-list', origin }, 'Mapping removed')
+        .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
+}
+
+// Unsaved ticks under "Searches from other servers", or null when the server's list is shown as is.
+let editedSearchAllowed = null;
+
+function renderDirectory(d) {
+    const status = document.getElementById('directory-status');
+    if (status) status.innerHTML = directoryStatus(d);
+    const el = document.getElementById('search-allowed-container');
+    if (!el) return;
+    const allowed = editedSearchAllowed || new Set(d.allowedServers || []);
+    const refusals = new Map((d.refusals || []).map(r => [r.server, r]));
+    const rows = (d.servers || []).map(s => {
+        const r = refusals.get(s);
+        const refused = r
+            ? `<span class="badge badge-out" title="Last: ${escHtml(r.lastFrom)} searched ${escHtml(r.lastTo)}">`
+              + `refused ${r.count}× · last ${escHtml(new Date(r.lastAt).toLocaleString())}</span>` : '';
+        return `
+            <label class="exposed-room">
+                <input type="checkbox" class="search-allow-cb" value="${escHtml(s)}" ${allowed.has(s) ? 'checked' : ''}
+                       onchange="captureSearchAllowedEdits()">
+                <span>${escHtml(s)}</span> ${refused}
+            </label>`;
+    }).join('');
+    const focus = rememberFocus(el);
+    el.innerHTML = filteredChecklist('search-allowed', rows, 'Filter servers…', checklistFilters,
+            '<p class="empty" style="margin:4px 0">No other server is known yet.</p>')
+        + `<div style="margin-top:8px">
+               <button class="btn-small btn-primary" onclick="saveSearchAllowed()">Save</button>
+               ${editedSearchAllowed ? `<button class="btn-small btn-ghost" style="margin-left:4px"
+                                                onclick="discardSearchAllowed()">Discard</button>` : ''}
+           </div>`;
+    reapplyChecklistFilters();
+    restoreFocus(focus);
+}
+
+function directoryStatus(d) {
+    const addr = `<code>${escHtml(d.address || '')}</code>`;
+    if (d.error) return `<span class="status-dot orange"></span> ${escHtml(d.error)}`;
+    if (!d.running) {
+        return `<span class="status-dot grey"></span> Not running. Tick <em>Searchable in the federated directory</em> `
+            + `on a received list under Contact Sharing to start it at ${addr}.`;
+    }
+    return `<span class="status-dot green"></span> Running at ${addr}: ${d.contacts} contact(s) from `
+        + `${d.lists} server(s) searchable.`;
+}
+
+function currentSearchAllowed() {
+    const d = (lastData.contactLists && lastData.contactLists.directory) || {};
+    return new Set(d.allowedServers || []);
+}
+
+function captureSearchAllowedEdits() {
+    const set = captureChecks('.search-allow-cb', editedSearchAllowed || currentSearchAllowed());
+    if (set) editedSearchAllowed = set;
+}
+
+function discardSearchAllowed() {
+    editedSearchAllowed = null;
+    refresh();
+}
+
+function saveSearchAllowed() {
+    const servers = Array.from(editedSearchAllowed || currentSearchAllowed());
+    save({ action: 'set-search-allowed', servers: servers.join(',') },
+         servers.length ? 'Searches allowed' : 'Searches refused from every server')
+        .then(result => { if (result && result.ok) editedSearchAllowed = null; });
+}
+
+// What removing a mapping does, for the confirmations: "<roster part> and <directory part>".
+function mappingEffect(m) {
+    const parts = [];
+    if (m.groups.length) parts.push('these contacts leave every contact list');
+    if (m.directory) parts.push('they leave the federated directory');
+    return parts.join(' and ');
+}
+
+async function denyContactList(origin) {
+    const m = lastMappingOf(origin);
+    if (m && !await ask('Deny contact lists from ' + origin + '?\n\n'
+            + 'Every list it sends is dropped, and while it stays denied ' + mappingEffect(m) + '. '
+            + 'The entry and your mapping stay; Allow undoes this.')) return;
+    save({ action: 'deny-contact-list', origin }, 'Denied');
+}
+
+function allowContactList(origin) {
+    save({ action: 'allow-contact-list', origin }, 'Allowed — its list was requested');
+}
+
+async function deleteContactList(origin) {
+    const r = receivedEntry(origin);
+    const m = r && r.mapping;
+    if ((m || (r && r.denied)) && !await ask('Delete the contact list from ' + origin + '?\n\n'
+            + (m ? 'Its mapping goes too: ' + mappingEffect(m) + '. ' : '')
+            + (r.denied ? 'It is no longer denied. ' : '')
+            + 'If ' + origin + ' shares a list again, it shows up here as a new one.')) return;
+    save({ action: 'delete-contact-list', origin }, 'Deleted')
         .then(result => { if (result && result.ok) delete contactMapEdits[origin]; });
 }
 
@@ -1160,7 +1464,7 @@ function renderRoomDefaults(rules) {
             <td data-sort="${r.autoMap ? 1 : 0}">${yn(r.autoMap)}</td>
             <td data-sort="${r.filesEnabled ? 1 : 0}">${yn(r.filesEnabled)}</td>
             <td style="text-align:right">
-                <button class="btn btn-small" onclick="editRoomDefault('${pj}')">Edit</button>
+                <button class="btn btn-small btn-plain" onclick="editRoomDefault('${pj}')">Edit</button>
                 <button class="btn btn-small btn-danger" onclick="deleteRoomDefault('${pj}')">Delete</button>
             </td>
         </tr>`;
@@ -1184,12 +1488,8 @@ function bindRoomDefaultForm() {
             visible:     document.getElementById('rd-visible').value.trim()
         }, 'Rule saved').then(result => {
             if (!result || !result.ok) return;
-            document.getElementById('rd-pattern').value = '';
-            document.getElementById('rd-visible').value = '';
-            document.getElementById('rd-federated').checked = true;
-            document.getElementById('rd-autoaccept').checked = false;
-            document.getElementById('rd-automap').checked = false;
-            document.getElementById('rd-files').checked = true;
+            document.getElementById('form-room-default').reset();
+            resetRoomDefaultForm();
         });
     });
 }
@@ -1205,16 +1505,22 @@ function editRoomDefault(pattern) {
     document.getElementById('rd-files').checked = r.filesEnabled !== false;   // default on
     document.getElementById('rd-visible').value =
         (r.visible && r.visible.length) ? r.visible.join(', ') : '';
+    document.getElementById('rd-form-title').textContent = 'Edit rule ' + r.pattern;
     document.getElementById('rd-pattern').focus();
 }
 
-function deleteRoomDefault(pattern) {
-    if (!confirm('Delete the rule for "' + pattern + '"?')) return;
+/** Back to "Add a rule" after a save or Clear (the form's own reset restores the fields). */
+function resetRoomDefaultForm() {
+    document.getElementById('rd-form-title').textContent = 'Add a rule';
+}
+
+async function deleteRoomDefault(pattern) {
+    if (!await ask('Delete the rule for "' + pattern + '"?')) return;
     save({ action: 'delete-room-default', pattern }, 'Rule deleted');
 }
 
-function applyRoomDefaultsNow() {
-    if (!confirm('Apply the default-settings rules to every existing room now?')) return;
+async function applyRoomDefaultsNow() {
+    if (!await ask('Apply the default-settings rules to every existing room now?')) return;
     save({ action: 'apply-room-defaults-now' }, result => 'Applied to ' + (result.applied || 0) + ' room(s)');
 }
 
@@ -1243,6 +1549,10 @@ function pingAgeText(secs) {
 function tickClocks() {
     document.querySelectorAll('.retry-countdown[data-retry-at]').forEach(el => {
         el.textContent = retryCountdownText(parseInt(el.dataset.retryAt, 10));
+    });
+    document.querySelectorAll('.ago[data-at]').forEach(el => {
+        const text = agoText(parseInt(el.dataset.at, 10));
+        if (el.textContent !== text) el.textContent = text;
     });
     document.querySelectorAll('.mapping-ping[data-pong-at]').forEach(el => {
         const secs = Math.max(0, Math.round((Date.now() - parseInt(el.dataset.pongAt, 10)) / 1000));
@@ -1278,6 +1588,7 @@ function watchRenders() {
     const observer = new MutationObserver(() => {
         applyAllFilters();
         sortAllTables();
+        restoreSelects();
         observer.takeRecords();
     });
     observer.observe(document.body, { childList: true, subtree: true });
@@ -1477,7 +1788,7 @@ function renderLocalRooms(rooms) {
                         onclick="toggleRoomDetail('${jsArg(r.jid)}')">▸</button>`;
         }
         let row = `
-        <tr>
+        <tr id="room-row-${jidToElemId(r.jid)}">
             <td data-sort="${escHtml(r.name || r.jid)}"><strong>${escHtml(r.name || r.jid)}</strong><br><small>${escHtml(r.jid)}</small>${renderRoomDuplicates(r)}</td>
             <td>${escHtml(r.description || '—')}</td>
             <td data-sort="${occList.length > 0 ? occList.length : (Number(r.occupants) || 0)}">${occCell}</td>
@@ -1520,7 +1831,10 @@ function renderRoomOccupants(r) {
 }
 
 function setRoomFederated(jid, federated) {
-    save({ action: 'set-room', jid, federated: federated.toString() });
+    // A room that was just federated opens, since choosing who sees it is the next step.
+    if (federated) expandedRoomVis.add(jid); else expandedRoomVis.delete(jid);
+    save({ action: 'set-room', jid, federated: federated.toString() },
+         federated ? 'Room federated — choose who sees it' : 'Room no longer federated');
 }
 
 function setRoomAutoAccept(jid, autoAccept) {
@@ -1689,9 +2003,10 @@ function renderPendingRequests(reqs) {
 /** Full-width detail row behind the expand arrow: every federation setting for one room in one view. */
 function renderRoomDetailRow(r) {
     const jid = jsArg(r.jid);
-    const mappings = (r.mappings && r.mappings.length > 0)
+    const mappings = ((r.mappings && r.mappings.length > 0)
         ? r.mappings.map(m => renderMappingRow(r.jid, m)).join('')
-        : '<p class="empty" style="margin:6px 0">Not mapped yet — pick this room next to a remote room in the “Remote rooms” list below.</p>';
+        : '<p class="empty" style="margin:6px 0">Not linked to any remote room yet.</p>')
+        + renderMapPicker(r);
     return `
     <tr class="detail-row exposed-editor-row room-detail-row">
         <td colspan="5">
@@ -1726,6 +2041,55 @@ function renderRoomDetailRow(r) {
             </div>
         </td>
     </tr>`;
+}
+
+// What the admin picked in each mapping dropdown, so a re-render does not reset it.
+const selectMemory = {};
+
+function restoreSelects() {
+    for (const [id, value] of Object.entries(selectMemory)) {
+        const sel = document.getElementById(id);
+        if (!sel) continue;
+        if (Array.from(sel.options).some(o => o.value === value)) sel.value = value;
+        else delete selectMemory[id];
+    }
+}
+
+/** Under a room's mappings: link it to a remote room without going to the "Remote rooms" list. */
+function renderMapPicker(r) {
+    const remote = lastData.remoteRooms || {};
+    const mappedDomains = new Set((r.mappings || []).map(m => m.remoteDomain));
+    const groups = Object.keys(remote).sort()
+        .filter(peer => !mappedDomains.has(peer) && remote[peer].length)
+        .map(peer => `<optgroup label="${escHtml(peer)}">`
+            + remote[peer].map(x => `<option value="${escHtml(peer + '|' + x.jid)}">${escHtml(x.name || x.jid)}</option>`).join('')
+            + '</optgroup>').join('');
+    if (!groups) {
+        return (r.mappings || []).length ? ''
+            : '<p class="hint" style="margin:4px 0 0">No remote room is on offer yet. A room shows up once another '
+              + 'server federates it and makes it visible to this server.</p>';
+    }
+    const selId = 'roommap_' + jidToElemId(r.jid);
+    return `
+        <div class="mapping-row" style="margin-top:10px">
+            <select id="${selId}" class="fed-select" onchange="selectMemory[this.id]=this.value">
+                <option value="">— link to a remote room —</option>
+                ${groups}
+            </select>
+            <button class="btn-small btn-primary" onclick="mapRoomFrom('${jsArg(r.jid)}','${selId}')">Map</button>
+        </div>`;
+}
+
+function mapRoomFrom(localJid, selId) {
+    const sel = document.getElementById(selId);
+    if (!sel || !sel.value) {
+        notify('Choose a remote room to link to first.');
+        return;
+    }
+    const cut = sel.value.indexOf('|');
+    delete selectMemory[selId];
+    save({ action: 'map-room', localJid, remoteJid: sel.value.slice(cut + 1), remoteDomain: sel.value.slice(0, cut) },
+         'Mapping requested');
 }
 
 /** The visibility ACL editor section (used inside the room settings panel). */
@@ -1824,9 +2188,9 @@ function saveRoomVis(jid) {
  * Removes a mapping.  If remoteDomain is provided, only that spoke's mapping
  * is removed (targeted unmap).  If omitted, all mappings for the room are removed.
  */
-function unmapRoom(localJid, remoteDomain) {
+async function unmapRoom(localJid, remoteDomain) {
     const target = remoteDomain || 'all peers';
-    if (!confirm('Remove mapping between ' + localJid + ' and ' + target + '?')) return;
+    if (!await ask('Remove mapping between ' + localJid + ' and ' + target + '?')) return;
     const params = { action: 'unmap-room', localJid };
     if (remoteDomain) params.remoteDomain = remoteDomain;
     save(params, 'Mapping removed');
@@ -1876,7 +2240,7 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
                     const options = available.map(l =>
                         `<option value="${escHtml(l.jid)}">${escHtml(l.jid)}</option>`
                     ).join('');
-                    mapCell = `<select id="${selId}" style="font-size:12px;padding:2px 4px;max-width:200px">
+                    mapCell = `<select id="${selId}" class="fed-select" onchange="selectMemory[this.id]=this.value">
                                    <option value="">— choose local room —</option>
                                    ${options}
                                </select>
@@ -1916,9 +2280,10 @@ function renderRemoteRooms(remoteRooms, localRooms, mappings) {
 function mapRoom(remoteJid, remoteDomain, selId) {
     const sel = document.getElementById(selId);
     if (!sel || !sel.value) {
-        alert('Please select a local room to map to.');
+        notify('Choose a local room to map to first.');
         return;
     }
+    delete selectMemory[selId];
     save({ action: 'map-room', localJid: sel.value, remoteJid, remoteDomain }, 'Mapping requested');
 }
 
@@ -1976,13 +2341,62 @@ function jidToElemId(jid) {
 
 // Shows the "change applied" toast, which survives the re-render an inline badge would not.
 let _toastTimer = null;
-function flashSaved(label) {
+function showToast(text, error) {
     const t = document.getElementById('fed-toast');
     if (!t) return;
-    t.textContent = '✓ ' + (label || 'Saved');
+    t.textContent = text;
+    t.classList.toggle('error', !!error);
     t.classList.add('show');
+    t.onclick = () => t.classList.remove('show');
     clearTimeout(_toastTimer);
-    _toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
+    _toastTimer = setTimeout(() => t.classList.remove('show'), error ? 8000 : 2000);
+}
+
+function flashSaved(label) {
+    showToast('✓ ' + (label || 'Saved'));
+}
+
+/** Tells the admin something went wrong or is missing; stays up longer, and a click dismisses it. */
+function notify(message) {
+    showToast(String(message), true);
+}
+
+let dialogAnswer = null;
+
+function bindDialog() {
+    const dlg = document.getElementById('fed-dialog');
+    if (!dlg || !dlg.showModal) return;
+    const done = yes => { const answer = dialogAnswer; dialogAnswer = null; if (dlg.open) dlg.close(); if (answer) answer(yes); };
+    document.getElementById('fed-dialog-ok').addEventListener('click', () => done(true));
+    document.getElementById('fed-dialog-cancel').addEventListener('click', () => done(false));
+    dlg.addEventListener('cancel', e => { e.preventDefault(); done(false); });          // Escape
+    dlg.addEventListener('click', e => { if (e.target === dlg) done(false); });          // the backdrop
+}
+
+const DANGER_WORDS = /^(Remove|Delete|Disable|Deny|Close|Make untrusted)/;
+
+/**
+ * Asks the admin to confirm, in a dialog on the page. `message` is a question, then optionally a blank
+ * line and an explanation. The confirm button is named `okLabel`, or after the question's first word.
+ * Resolves to true when confirmed.
+ */
+function ask(message, okLabel) {
+    const dlg = document.getElementById('fed-dialog');
+    if (!dlg || !dlg.showModal) return Promise.resolve(window.confirm(message));
+    const cut = message.indexOf('\n\n');
+    const title = cut < 0 ? message : message.slice(0, cut);
+    const label = okLabel || title.split(/\s+/)[0] || 'OK';
+    document.getElementById('fed-dialog-title').textContent = title;
+    document.getElementById('fed-dialog-text').textContent = cut < 0 ? '' : message.slice(cut + 2);
+    const ok = document.getElementById('fed-dialog-ok');
+    ok.textContent = label;
+    ok.className = 'btn ' + (DANGER_WORDS.test(label) ? 'btn-danger-solid' : 'btn-primary');
+    if (dialogAnswer) dialogAnswer(false);
+    return new Promise(resolve => {
+        dialogAnswer = resolve;
+        if (!dlg.open) dlg.showModal();
+        document.getElementById('fed-dialog-cancel').focus();
+    });
 }
 
 /**
@@ -1993,7 +2407,7 @@ function flashSaved(label) {
 function save(params, okLabel = 'Saved') {
     return post(params).then(result => {
         if (result && result.ok) flashSaved(typeof okLabel === 'function' ? okLabel(result) : okLabel);
-        else if (result && result.error) alert(result.error);
+        else if (result && result.error) notify(result.error);
         if (result) refresh();
         return result;
     });
@@ -2005,7 +2419,10 @@ function post(params) {
     const body = new URLSearchParams(csrf ? Object.assign({}, params, { csrf }) : params);
     return fetch(API_URL, { method: 'POST', body, credentials: 'same-origin' })
         .then(r => r.json())
-        .catch(err => console.error('POST error:', err));
+        .catch(err => {
+            console.error('POST error:', err);
+            notify('The server did not answer. Your change was not saved — check that you are still signed in.');
+        });
 }
 
 function getCookie(name) {
@@ -2035,4 +2452,258 @@ function jsArg(s) {
         .replace(/</g, '\\x3C')
         .replace(/&/g, '&amp;')
         .replace(/"/g, '&quot;');
+}
+
+
+// The overview: what needs the admin, the numbers at a glance, and a map of who is reached through whom.
+
+/**
+ * Everything that wants the admin's attention, worst first. Each item names the tab it belongs to (for
+ * the tab badges), says what is wrong, and carries the buttons that fix it or lead to it.
+ */
+function attentionItems(data) {
+    const items = [];
+    const add = (level, tab, title, detail, actions) => items.push({ level, tab, title, detail, actions: actions || [] });
+    const btn = (label, call, kind) => `<button class="btn-small ${kind || 'btn-plain'}" onclick="${call}">${label}</button>`;
+    const peers = data.peers || [];
+    const cl = data.contactLists || {};
+
+    if (peers.length === 0) {
+        add('info', '', 'Add your first peer',
+            'Federation starts with one other Openfire server running this plugin. Its admin adds this server too.',
+            [btn('Add peer', 'startAddPeer()', 'btn-primary')]);
+    }
+    peers.forEach(p => {
+        const d = escHtml(p.domain), view = btn('Open', `showPeer('${jsArg(p.domain)}')`);
+        if (p.certMismatch) {
+            add('bad', 'peers', `${d} presented a different certificate`,
+                'It was re-created or its certificate renewed, or someone is impersonating it. It is untrusted until you decide.',
+                [btn('Trust new cert', `acceptCert('${jsArg(p.domain)}')`, 'btn-warn'), view]);
+        }
+        switch (p.status) {
+            case 'UNREACHABLE':
+                add('bad', 'peers', `${d} is unreachable`,
+                    `<span class="retry-countdown" data-retry-at="${p.nextRetryAt || 0}">${retryCountdownText(p.nextRetryAt || 0)}</span>`
+                    + (p.lastSeen ? ` · last seen ${agoSpan(p.lastSeen)}` : ''),
+                    [btn('Retry now', `retryPeer('${jsArg(p.domain)}')`, 'btn-warn'), view]);
+                break;
+            case 'TRUST_MISMATCH':
+                add('warn', 'peers', `${d}: trust levels differ`, 'Both ends must set the same trust level before the link carries anything.', [view]);
+                break;
+            case 'WITHDRAWN':
+                add('warn', 'peers', `${d} disconnected this server`, 'Its admin removed the link from their side.',
+                    [btn('Reconnect', `retryPeer('${jsArg(p.domain)}')`, 'btn-warn'), view]);
+                break;
+            case 'REMOTE_DISABLED':
+                add('warn', 'peers', `${d} disabled the link`, 'Only its admin can enable it again.', [view]);
+                break;
+            case 'PENDING':
+                add('info', 'peers', `Waiting for ${d}`, 'Its admin has not added this server as a peer yet.', [view]);
+                break;
+            case 'DISABLED':
+                add('info', '', `${d} is disabled`, 'You disabled this peer.',
+                    [btn('Enable', `enablePeer('${jsArg(p.domain)}')`, 'btn-primary'), view]);
+                break;
+        }
+    });
+    // A federation link that is not encrypted.
+    const plain = new Set((data.s2sSessions || []).filter(x => x.fedPeer && !x.encrypted).map(x => x.domain));
+    plain.forEach(dom => add('bad', 'peers', `The link with ${escHtml(dom)} is not encrypted`,
+        'Federation traffic to this peer crosses the network in the clear.',
+        [btn('S2S sessions', "goTo('peers','peers-sessions')")]));
+
+    (data.pendingRequests || []).forEach(req => add('warn', 'rooms',
+        `${escHtml(req.remoteDomain)} asks to link a room`,
+        `${escHtml(req.remoteRoomJid)} ↔ your ${escHtml(req.localJid)}`,
+        [btn('Accept', `mappingAction('accept-mapping','${jsArg(req.localJid)}','${jsArg(req.remoteDomain)}')`, 'btn-primary'),
+         btn('Reject', `mappingAction('reject-mapping','${jsArg(req.localJid)}','${jsArg(req.remoteDomain)}')`, 'btn-warn')]));
+
+    (data.localRooms || []).forEach(r => {
+        const name = escHtml(r.name || r.jid), view = btn('Open', `showRoom('${jsArg(r.jid)}')`);
+        (r.mappings || []).forEach(m => {
+            const remote = escHtml(m.remoteRoomJid);
+            if (m.state === 'ACTIVE' && m.connected === false) {
+                const why = m.pathBroken ? 'A route exists but the far server does not answer; a server on the path may be refusing this traffic.'
+                          : m.routeMissing ? 'No route to its server: a peer on the way is not advertising it.'
+                          : 'The route to its server is down.';
+                add('bad', 'rooms', `${name} lost its link to ${remote}`, why, [view]);
+            } else if (m.state === 'REJECTED') {
+                add('warn', 'rooms', `${escHtml(m.remoteDomain)} rejected the link for ${name}`, `Requested room: ${remote}`, [view]);
+            } else if (m.state === 'DISABLED_REMOTE') {
+                add('info', '', `${escHtml(m.remoteDomain)} disabled the link for ${name}`, `Mapped room: ${remote}`, [view]);
+            } else if (m.state === 'PENDING_OUT') {
+                add('info', '', `${name} is waiting for ${escHtml(m.remoteDomain)}`, `Its admin has not accepted the link to ${remote} yet.`, [view]);
+            }
+        });
+        if ((r.mappings || []).some(m => m.state === 'ACTIVE' && m.duplicates)) {
+            add('warn', 'rooms', `${name} is mapped in a loop`,
+                'Copies of messages it already has keep arriving and are dropped. Remove one of the mappings marked ⚠.', [view]);
+        }
+    });
+
+    (cl.received || []).forEach(r => {
+        const o = escHtml(r.origin), view = btn('Open', `showReceivedList('${jsArg(r.origin)}')`);
+        if (r.error) add('bad', 'users', `Contact list from ${o} could not be applied`, escHtml(r.error), [view]);
+        else if (!r.denied && !r.mapping && r.count > 0) {
+            add('info', '', `${o} shares ${r.count} contact${r.count === 1 ? '' : 's'} with you`,
+                'No local user sees them until you map the list or make it searchable.', [view]);
+        }
+    });
+    if (cl.directory && cl.directory.error) {
+        add('warn', 'users', 'Federated directory problem', escHtml(cl.directory.error),
+            [btn('Open', "goTo('users','contact-directory')")]);
+    }
+
+    if (data.filesEnabled && data.filesRelayAvailable === false) {
+        add('bad', 'files', 'File relay could not start', 'Shared files keep their original links. Check the storage directory.',
+            [btn('Open', "goTo('files','files-sharing')")]);
+    }
+    const limit = Number(data.filesMaxStoreMB) * 1024 * 1024;
+    if (limit > 0 && Number(data.filesStoreBytes) >= limit * 0.9) {
+        const full = Number(data.filesStoreBytes) >= limit;
+        add(full ? 'bad' : 'warn', 'files', full ? 'File store is full' : 'File store is almost full',
+            `${fmtBytes(data.filesStoreBytes)} of ${fmtBytes(limit)} used. `
+            + (full ? 'New files keep their original links until older ones are purged.' : ''),
+            [btn('Open', "goTo('files','files-sharing')")]);
+    }
+    const dayAgo = Date.now() - 86400000;
+    const rejected = (data.rejectedFiles || []).filter(e => e.when >= dayAgo).length;
+    if (rejected) {
+        add('info', '', `${rejected} file${rejected === 1 ? ' was' : 's were'} rejected in the last 24 hours`, '',
+            [btn('Activity log', "goTo('files','files-activity')")]);
+    }
+    const infected = (data.avScanLog || []).filter(e => e.when >= dayAgo && String(e.verdict).toUpperCase() === 'INFECTED').length;
+    if (infected) {
+        add('warn', 'files', `${infected} infected file${infected === 1 ? '' : 's'} blocked in the last 24 hours`, '',
+            [btn('Scan log', "goTo('files','files-scanning')")]);
+    }
+
+    ((data.fileConfig || {}).warnings || []).slice(0, 5).forEach(w =>
+        add('warn', 'settings', 'Config file warning', escHtml(w), [btn('Open', "goTo('settings')")]));
+
+    const rank = { bad: 0, warn: 1, info: 2 };
+    return items.sort((a, b) => rank[a.level] - rank[b.level]);
+}
+
+function renderOverview(data) {
+    const items = attentionItems(data);
+    renderTabBadges(items);
+    renderOverviewStats(data);
+    renderNetworkMap(data);
+
+    const count = document.getElementById('ov-attention-count');
+    if (count) count.textContent = items.length ? String(items.length) : '';
+    const el = document.getElementById('ov-attention');
+    if (!el) return;
+    const marks = { bad: '!', warn: '!', info: 'i' };
+    const html = items.length === 0
+        ? `<div class="ov-allgood"><span class="ov-allgood-mark">✓</span>
+               <span>Everything is working<small>Every peer is reachable and every room link answers.</small></span></div>`
+        : items.map(it => `
+            <div class="ov-item ${it.level}">
+                <span class="ov-item-mark">${marks[it.level]}</span>
+                <div class="ov-item-main">
+                    <div class="ov-item-title">${it.title}</div>
+                    ${it.detail ? `<div class="ov-item-detail">${it.detail}</div>` : ''}
+                </div>
+                <div class="ov-item-actions">${it.actions.join('')}</div>
+            </div>`).join('');
+    setHtml(el, html);
+}
+
+/** Replaces an element's content only when it changed, so a poll does not restart hover or focus. */
+function setHtml(el, html) {
+    if (el._html === html) return;
+    el._html = html;
+    el.innerHTML = html;
+}
+
+/** A count on each tab that has a problem behind it: red when something is broken, amber otherwise. */
+function renderTabBadges(items) {
+    document.querySelectorAll('.tab-badge[data-badge-for]').forEach(badge => {
+        const mine = items.filter(it => it.tab === badge.dataset.badgeFor);
+        badge.textContent = mine.length ? String(mine.length) : '';
+        badge.className = 'tab-badge ' + (mine.some(it => it.level === 'bad') ? 'bad' : 'warn');
+        badge.title = mine.map(it => it.title.replace(/<[^>]*>/g, '')).join('\n');
+    });
+}
+
+function renderOverviewStats(data) {
+    const el = document.getElementById('ov-stats');
+    if (!el) return;
+    const peers = data.peers || [];
+    const reachable = peers.filter(p => p.status === 'REACHABLE').length;
+    const untrusted = peers.filter(p => p.untrusted).length;
+    const routes = (data.routing || []).filter(r => !r.denied);
+    const servers = new Set(routes.map(r => r.destination));
+    const maxHops = routes.reduce((m, r) => Math.max(m, r.hops || 0), 0);
+    const rooms = data.localRooms || [];
+    const federated = rooms.filter(r => r.federated).length;
+    const mapped = rooms.reduce((n, r) => n + (r.mappings || []).filter(m => m.state === 'ACTIVE').length, 0);
+    const remote = Object.values(data.remoteRooms || {}).reduce((n, list) => n + list.length, 0);
+    const cl = data.contactLists || {};
+    const sent = (cl.sent || []).length, received = (cl.received || []).filter(r => !r.denied).length;
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+    const tile = (label, value, sub, call, cls) => `
+        <button type="button" class="ov-stat ${cls || ''}" onclick="${call}">
+            <div class="ov-stat-label">${label}</div>
+            <div class="ov-stat-value">${value}</div>
+            <div class="ov-stat-sub">${sub}</div>
+        </button>`;
+    setHtml(el, [
+        tile('Peers', `${reachable}<small> / ${peers.length} reachable</small>`,
+             untrusted ? `${untrusted} untrusted` : (peers.length ? 'all trusted' : 'none added yet'),
+             "goTo('peers','peers-list')", peers.length && reachable < peers.length ? 'bad' : ''),
+        tile('Servers in reach', String(servers.size),
+             servers.size ? `up to ${plural(maxHops, 'hop')} away` : 'no routes yet', "goTo('peers','peers-routing')"),
+        tile('Rooms', `${federated}<small> / ${rooms.length} federated</small>`,
+             `${plural(mapped, 'active link')} · ${plural(remote, 'remote room')} on offer`, "goTo('rooms','room-sharing')"),
+        tile('Contact lists', `${sent}<small> sent</small> · ${received}<small> received</small>`,
+             cl.directory && cl.directory.running ? `directory: ${plural(cl.directory.contacts || 0, 'contact')}` : 'directory not running',
+             "goTo('users','contact-sharing')"),
+        tile('File relay', data.filesEnabled ? (data.filesRelayAvailable === false ? 'Failed' : 'On') : 'Off',
+             (data.filesAvEnabled ? 'virus scanning on' : 'virus scanning off') + ` · ${fmtBytes(data.filesStoreBytes)} stored`,
+             "goTo('files','files-sharing')",
+             !data.filesEnabled ? 'off' : data.filesRelayAvailable === false ? 'bad' : ''),
+    ].join(''));
+}
+
+/**
+ * The network as this server sees it: one lane per peer, then the servers reached through that peer
+ * in order of hop count. Only the next hop of a route is known, so servers at the same distance are
+ * stacked rather than drawn as a chain.
+ */
+function renderNetworkMap(data) {
+    const el = document.getElementById('ov-network');
+    if (!el) return;
+    const peers = data.peers || [];
+    const routes = (data.routing || []).filter(r => !r.denied);
+    // Open federation can route through a server that was never added as a peer.
+    const lanes = peers.map(p => ({ domain: p.domain, peer: p }));
+    routes.forEach(r => { if (!lanes.some(l => l.domain === r.nextHop)) lanes.push({ domain: r.nextHop, peer: null }); });
+    if (lanes.length === 0) {
+        setHtml(el, '<p class="empty" style="margin:0">No peers yet — the map fills in as servers connect.</p>');
+        return;
+    }
+    const node = (domain, cls, extra) => `<span class="net-node ${cls}" title="${escHtml(domain)}">${extra || ''}<span class="net-name">${escHtml(domain)}</span></span>`;
+    const laneHtml = lanes.map(l => {
+        const p = l.peer;
+        const up = !p || p.status === 'REACHABLE';
+        const dot = `<span class="status-dot ${p ? statusClass(p.status) : 'green'}"></span>`;
+        const tag = p && p.untrusted ? '<span class="net-tag">untrusted</span>' : '';
+        const head = p
+            ? `<button type="button" class="net-node" title="${escHtml(p.domain)} — ${escHtml(PEER_STATUS_LABELS[p.status] || p.status.toLowerCase().replace(/_/g, ' '))}"
+                       onclick="showPeer('${jsArg(p.domain)}')">${dot}<span class="net-name">${escHtml(p.domain)}</span>${tag}</button>`
+            : node(l.domain, '', dot);
+        const byHops = new Map();
+        routes.filter(r => r.nextHop === l.domain && r.destination !== l.domain)
+              .sort((a, b) => a.hops - b.hops || a.destination.localeCompare(b.destination))
+              .forEach(r => { if (!byHops.has(r.hops)) byHops.set(r.hops, []); byHops.get(r.hops).push(r.destination); });
+        const beyond = Array.from(byHops.entries()).map(([hops, dests]) => `
+                <span class="net-link"></span>
+                <div class="net-group" title="${hops} hops away">${dests.map(d => node(d, 'far')).join('')}</div>`).join('');
+        return `<div class="net-lane"><span class="net-link ${up ? '' : 'down'}"></span>${head}${beyond}</div>`;
+    }).join('');
+    setHtml(el, `<div class="net">${node(data.localDomain || 'this server', 'self')}<div class="net-lanes">${laneHtml}</div></div>`);
 }

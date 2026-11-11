@@ -12,10 +12,13 @@ import com.igniterealtime.openfire.plugin.federation.protocol.FederationSender;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
 import com.igniterealtime.openfire.plugin.federation.protocol.MucTrafficHandler;
 import com.igniterealtime.openfire.plugin.federation.protocol.RedundantArrivals;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomCatchup;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomJournal;
 import com.igniterealtime.openfire.plugin.federation.protocol.RoomMessageIds;
 import org.dom4j.Element;
 import org.jivesoftware.openfire.SessionManager;
 import org.jivesoftware.openfire.XMPPServer;
+import org.jivesoftware.openfire.component.InternalComponentManager;
 import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.muc.MUCEventDispatcher;
 import org.jivesoftware.openfire.muc.MUCRoom;
@@ -27,6 +30,7 @@ import org.jivesoftware.util.JiveGlobals;
 import org.jivesoftware.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xmpp.component.ComponentException;
 import org.xmpp.packet.IQ;
 import org.xmpp.packet.JID;
 import org.xmpp.packet.Message;
@@ -66,17 +70,24 @@ public class FederationManager {
     private final ContactListManager     contactLists      = new ContactListManager(this);
     private final FederationFileConfig   fileConfig        = new FederationFileConfig();
     private final RoomMessageIds         roomMessageIds    = new RoomMessageIds();
+    private final RoomJournal            roomJournal       = RoomJournal.inDataDirectory();
     private final RedundantArrivals      redundantArrivals = new RedundantArrivals();
     private final PresenceRelay          presenceRelay     = new PresenceRelay(this);
     private final OccupantSync           occupantSync      = new OccupantSync(this);
     private final MappingProbe           mappingProbe      = new MappingProbe(this);
     private final CertificatePinning     certificatePinning = new CertificatePinning(this);
+    private final RemoteSearchGuard      searchGuard       = new RemoteSearchGuard();
     private final AtomicBoolean          roomsFloodPending = new AtomicBoolean(false);
     private       FileRelayManager       fileRelay;
     private       S2SMonitor             s2sMonitor;
     private       FederationIQHandler    iqHandler;
     private       FederationPacketInterceptor interceptor;
     private       RoomEventListener      roomListener;
+    private volatile FederatedDirectory  directory;
+    /** Serializes registering and removing the directory; the status page reads it without waiting. */
+    private final Object                 directoryLock     = new Object();
+    /** Why the directory could not be registered, for the admin page; empty when it could. */
+    private volatile String              directoryError    = "";
 
     /** Loads persisted state, starts the subsystems and registers the Openfire hooks. */
     public void start() {
@@ -87,12 +98,15 @@ public class FederationManager {
         roomManager.load();
         roomDefaults.load();
         contactLists.load();
+        roomJournal.load();
+        refreshDirectory();
         LegacyBookmarkCleanup.runOnceInBackground();
 
         fileRelay = new FileRelayManager(this);
         fileRelay.start();
 
         iqHandler   = FederationIQHandler.create(this);
+        iqHandler.getRoomCatchup().start();
         interceptor = new FederationPacketInterceptor(this);
         XMPPServer.getInstance().getIQRouter().addHandler(iqHandler);
         InterceptorManager.getInstance().addInterceptor(interceptor);
@@ -124,6 +138,9 @@ public class FederationManager {
         stopStep("packet interceptor", () -> {
             if (interceptor != null) InterceptorManager.getInstance().removeInterceptor(interceptor);
         });
+        stopStep("room catch-up", () -> { if (iqHandler != null) iqHandler.getRoomCatchup().stop(); });
+        stopStep("room journal", roomJournal::close);
+        stopStep("federated directory", this::removeDirectory);
         stopStep("contact lists", contactLists::stop);
         stopStep("file relay", () -> { if (fileRelay != null) fileRelay.stop(); });
         Log.info("Federation plugin stopped.");
@@ -137,6 +154,46 @@ public class FederationManager {
             Log.warn("Could not stop the {} cleanly", what, e);
         }
     }
+
+    /** Registers the federated directory while some received list is searchable, and removes it when none is. */
+    public void refreshDirectory() {
+        synchronized (directoryLock) {
+            if (!contactLists.hasSearchableList()) {
+                removeDirectory();
+                return;
+            }
+            if (directory != null) return;
+            FederatedDirectory d = new FederatedDirectory(contactLists::searchableLists);
+            try {
+                InternalComponentManager.getInstance().addComponent(FederatedDirectory.SUBDOMAIN, d);
+                directory = d;
+                directoryError = "";
+                Log.info("Federated directory started at {}", directoryAddress());
+            } catch (ComponentException e) {
+                directoryError = "Openfire would not register " + directoryAddress()
+                        + "; another service may already use that address.";
+                Log.warn("Could not start the federated directory at {}", directoryAddress(), e);
+            }
+        }
+    }
+
+    private void removeDirectory() {
+        synchronized (directoryLock) {
+            directoryError = "";
+            if (directory == null) return;
+            InternalComponentManager.getInstance().removeComponent(FederatedDirectory.SUBDOMAIN, directory);
+            directory = null;
+            Log.info("Federated directory at {} stopped", directoryAddress());
+        }
+    }
+
+    /** The federated directory's address. */
+    public static String directoryAddress() {
+        return FederatedDirectory.SUBDOMAIN + "." + localDomain();
+    }
+
+    public boolean isDirectoryRunning() { return directory != null; }
+    public String  getDirectoryError()  { return directoryError; }
 
     /** Re-reads the {@code <federation>} block of openfire.xml, as the admin console's Reload does. */
     public FederationFileConfig.IngestResult reloadConfigFile() {
@@ -985,11 +1042,13 @@ public class FederationManager {
     public FederationFileConfig   getFileConfig()         { return fileConfig; }
     public FileRelayManager       getFileRelay()          { return fileRelay; }
     public RoomMessageIds         getRoomMessageIds()     { return roomMessageIds; }
+    public RoomJournal            getRoomJournal()        { return roomJournal; }
     public RedundantArrivals      getRedundantArrivals()  { return redundantArrivals; }
     public PresenceRelay          getPresenceRelay()      { return presenceRelay; }
     public OccupantSync           getOccupantSync()       { return occupantSync; }
     public MappingProbe           getMappingProbe()       { return mappingProbe; }
     public CertificatePinning     getCertificatePinning() { return certificatePinning; }
+    public RemoteSearchGuard      getSearchGuard()        { return searchGuard; }
 
     /** The room traffic handler, or null before the plugin has started. */
     public MucTrafficHandler getMucTraffic() {
@@ -999,5 +1058,10 @@ public class FederationManager {
     /** The 1:1 traffic handler, or null before the plugin has started. */
     public DirectTrafficHandler getDirectTraffic() {
         return iqHandler == null ? null : iqHandler.getDirectTraffic();
+    }
+
+    /** Catch-up after a split, or null before the plugin has started. */
+    public RoomCatchup getRoomCatchup() {
+        return iqHandler == null ? null : iqHandler.getRoomCatchup();
     }
 }

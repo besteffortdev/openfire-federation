@@ -45,26 +45,36 @@
 </ul>
 
 <h2>The Federation tab</h2>
-<p>After the plugin loads, a <strong>Federation</strong> tab appears in the admin console with three views.
-   The page auto‑refreshes every 5&nbsp;seconds.</p>
+<p>After the plugin loads, a <strong>Federation</strong> tab appears in the admin console with six views.
+   The page updates live as things change.</p>
 
 <table>
     <tr><th>View</th><th>What it does</th></tr>
-    <tr><td><strong>Peer Servers</strong></td>
-        <td>Add, remove or disable peer servers; see their status and last‑seen time; watch live S2S sessions;
-            and tune connection settings (keepalive &amp; reconnect).</td></tr>
-    <tr><td><strong>Routing Table</strong></td>
-        <td>Shows every destination the server can reach, the next hop toward it, and the hop count.
-            A hop count of <strong>1</strong> means a direct S2S link. Routes are learned automatically.</td></tr>
+    <tr><td><strong>Overview</strong></td>
+        <td>Opens first. The numbers at a glance, a <em>Needs attention</em> list of everything that wants you
+            (worst first, each with the button that fixes it or takes you to it), and a map of the servers
+            reached through each peer. The other tabs show a count when something behind them needs you.</td></tr>
+    <tr><td><strong>Peers</strong></td>
+        <td>Add, remove or disable peer servers and see their status and last‑seen time. Its
+            <em>Routing table</em> sub‑tab shows every destination the server can reach, the next hop toward it,
+            and the hop count (<strong>1</strong> means a direct S2S link; routes are learned automatically).
+            Its <em>S2S sessions</em> sub‑tab shows the live sessions.</td></tr>
     <tr><td><strong>Rooms</strong></td>
         <td>Turn federation on or off per local room, see and manage room mappings, and browse the rooms your
-            peers have advertised.</td></tr>
+            peers have advertised. <em>Rules for new rooms</em> sets defaults by room name.</td></tr>
+    <tr><td><strong>Users</strong></td>
+        <td>Share groups of users with other servers as contacts, use the lists they share with you, and run
+            the federated directory.</td></tr>
+    <tr><td><strong>Files</strong></td>
+        <td>The file relay, its storage limits, virus scanning, and the log of scanned and rejected files.</td></tr>
+    <tr><td><strong>Settings</strong></td>
+        <td>Security switches, message and presence relays, connection timers, and the config file reload.</td></tr>
 </table>
 
 <h2>Step‑by‑step: federate a room</h2>
 
 <div class="step"><strong>1. Add your peers.</strong>
-    On the <strong>Peer Servers</strong> tab, under <em>Add peer server</em>, enter the other server's XMPP
+    On the <strong>Peers</strong> tab, click <em>+ Add peer</em>, enter the other server's XMPP
     domain (for example <code>chat.example.com</code>) and click <em>Add peer</em>. Do this on each server for
     its neighbours. Watch the status dot:
     <span class="dot green"></span>reachable,
@@ -98,6 +108,16 @@
     chained layout. Presence, typing, and message history forwarding all follow the mappings.
 </div>
 
+<div class="tip">
+    <strong>When a link drops:</strong> each server's copy of a mapped room keeps working for its own users.
+    When the path comes back (the link reconnects, a route is re‑learned, a server restarts), the two sides
+    swap what they missed. The missed messages arrive exactly once, stamped with the time they were written,
+    and travel on through hubs. The archive files them when they arrive, so clients reading it through MAM
+    may show that time instead. Each server keeps the last 24&nbsp;hours of its mapped rooms for this
+    (<code>plugin.federation.catchup.windowHours</code>; turn it off with
+    <code>plugin.federation.catchup.enabled</code>). Both servers need 1.13.0 or later.
+</div>
+
 <h2>Direct (1:1) federation</h2>
 <p>
     Beyond rooms, the overlay relays one‑to‑one traffic to contacts on servers you can only reach through
@@ -121,7 +141,7 @@
     expand a local group (▸) and tick the servers to share it with. Only groups are shared, never single
     users. Each server receives one list: the members of every group shared with it, kept in step with
     group membership. A list crosses an untrusted link only where the server sending across it allows
-    it: tick <em>Send shared contact lists</em> in the untrusted peer's settings panel (Peer Servers
+    it: tick <em>Send shared contact lists</em> in the untrusted peer's settings panel (Peers
     tab). Nothing is needed on the receiving side of the link. The list still follows the link's exposed
     servers: the sharing server must be exposed on the way out, the destination on the way in.
     To block lists from an untrusted neighbour, tick <em>Refuse contact lists</em> in its settings
@@ -137,6 +157,27 @@
     contacts, and those contacts see your users only if you share them back. If the other server stops
     sharing someone, they're removed. Removing the mapping deletes the group and its contacts from
     every roster.
+</p>
+<p>
+    Instead of or as well as rosters, tick <em>Searchable in the federated directory</em> on a received
+    list. The plugin then runs a user search service (XEP‑0055) at <code>directory.&lt;your domain&gt;</code>,
+    which your users find in their client's user search or service discovery. They look people up by
+    name or address and add or message the ones they want; nothing is put in any roster and no group is
+    created for a list that is only searchable. Only this server's users can search it.
+</p>
+<p>
+    Each card's header has two buttons. <em>Deny</em> keeps the entry, marked <em>denied</em>, but drops
+    every list that server sends and stops using its contacts: they leave rosters and the directory, while
+    your mapping is kept. <em>Allow</em> undoes it and asks for a fresh list. <em>Delete</em> removes the
+    entry, its list and its mapping, for a server that stopped sharing or no longer exists; if it shares
+    again, its list shows up as a new one. Neither is sent to the other server, and what you share with it
+    does not change.
+</p>
+<p>
+    The <em>Directory search</em> sub‑tab shows the directory's state and the servers allowed to search
+    <em>this</em> server's users. Openfire's Search plugin answers anyone with every user on the server,
+    whatever you share, so the plugin refuses user searches from other servers' users unless their server
+    is ticked there. Servers that tried are listed with a count, so you can see who is asking.
 </p>
 <p>
     This replaces the online‑user directory and the XEP‑0048 bookmark push from 1.10.12 and earlier.
@@ -197,7 +238,7 @@
 </p>
 
 <h2>Connection settings</h2>
-<p>On the <strong>Peer Servers</strong> tab, the <em>Connection settings</em> box exposes:</p>
+<p>On the <strong>Settings</strong> tab, the <em>Connection timers</em> box exposes:</p>
 <table>
     <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
     <tr><td>S2S keepalive interval</td><td>240&nbsp;s</td>
@@ -247,10 +288,10 @@
         <em>Untrusted</em> automatically; same‑parent peers default trusted.</li>
     <li><strong>Deny a route advertisement (per‑link).</strong> Exposure controls what you <em>send</em>; each side
         can also refuse what it <em>receives</em>. If a peer advertises a route to a server you don't want, click
-        <em>Deny</em> — on the Routing Table row, or next to that server in the peer's settings panel. The
+        <em>Deny</em> — on the row of the Peers tab's <em>Routing table</em>, or next to that server in the peer's settings panel. The
         destination is refused whenever <strong>that</strong> peer advertises it: any installed route via that peer
         is removed at once (rooms and ghost occupants cleaned up) and later advertisements are dropped. The entry
-        stays in the Routing Table as a disabled row and the deny is remembered even if the route is withdrawn and
+        stays in the routing table as a disabled row and the deny is remembered even if the route is withdrawn and
         advertised again later. A route to the same destination via a different peer is unaffected, and nothing is
         negotiated with the peer — the deny is entirely yours. <em>Allow</em> lifts it — on the disabled row, or in
         the peer's settings panel. Servers on the far side of a deny (whose own routing table still shows a
@@ -298,8 +339,8 @@
         connection</em> button) scans received content before it becomes servable; a scan that can't complete fails
         closed rather than serving unscanned content. A transit hop never decodes file content at all, so none of
         this affects traffic just passing through.</li>
-    <li><strong>File activity logs.</strong> The <em>Files</em> tab's <em>Activity Log</em> sub‑tab lists scanned
-        and rejected files. Both are written to plain tab‑separated files in Openfire's log directory
+    <li><strong>File activity logs.</strong> The <em>Files</em> tab lists scanned files under <em>Virus scanning</em>
+        and rejected files under <em>Activity log</em>. Both are written to plain tab‑separated files in Openfire's log directory
         (<code>logs/federation-file-scans.log</code>, <code>logs/federation-file-rejections.log</code>), so they can
         be read or collected straight from the file system and survive a plugin reload or a server restart. Entries
         older than <em>Activity log retention</em> (default 180 days) are pruned at startup and every six hours.</li>
@@ -320,16 +361,16 @@
 <table>
     <tr><th>Symptom</th><th>Where to look</th></tr>
     <tr><td>Peer stays <span class="dot red"></span>unreachable</td>
-        <td>Check DNS/SRV for the peer domain, firewall/ports, and TLS. The Routing Table won't list a peer
+        <td>Check DNS/SRV for the peer domain, firewall/ports, and TLS. The routing table won't list a peer
             you can't reach directly or via a hop.</td></tr>
     <tr><td>Remote room doesn't appear</td>
         <td>Confirm the room's <em>Federated</em> toggle is on at the origin, and that a route to that server
-            exists in the Routing Table.</td></tr>
+            exists in the routing table.</td></tr>
     <tr><td>Users don't see each other</td>
         <td>Confirm the rooms are <em>mapped</em> (not just federated) and the mapping shows
             <span style="color:#28a745;font-weight:600">connected</span>.</td></tr>
     <tr><td>Mapping shows <span style="color:#dc3545;font-weight:600">disconnected</span></td>
-        <td>The route to the remote server is down — check the peer status and the path in the Routing Table.</td></tr>
+        <td>The route to the remote server is down — check the peer status and the path in the routing table (Peers tab).</td></tr>
 </table>
 
 <p style="margin-top:32px;color:#6c757d;font-size:13px">

@@ -64,6 +64,9 @@ Add the `fed-file` annotation and `file-request`/`-offer`/`-chunk`/`-error`.
 - `mapping-ping` / `mapping-pong` — never answering simply means peers never flag your mappings as
   broken. Costs you diagnostics, breaks nothing.
 - `contact-list` / `contact-list-request` — ignore the actions and no peer notices.
+- `room-catchup-request` / `room-catchup-done` ([05](05-muc-traffic.md#catch-up-after-a-split))
+  — never requesting means a split loses the room traffic sent during it, as it always has. Never
+  answering means a peer's requests time out. Answering needs a journal of each mapped room.
 - `peer-disable` — treat an inbound one as a withdrawal you refuse to re-establish automatically.
 - Untrusted-peer mode — if you have no exposure model, omit the `untrusted` attribute and treat all
   peers as trusted. You will be blocked by a peer that considers you untrusted, which is the correct
@@ -111,6 +114,18 @@ Ordered by how expensive the mistake is to find later.
       and archive the stamped copy
 - [ ] Add the same `<occupant-id/>` to injected presence
 - [ ] Handle an injected `<retract><moderated/></retract>` as a moderation, never as an ordinary message
+
+**Catch-up** (only if you implement it)
+- [ ] Persist a watermark per mapping, and reset it whenever the mapping becomes ACTIVE
+- [ ] Answer only from the window and from after the mapping's activation, and leave out what came
+      from the requester, its users' messages, and anything whose `hubs` names it
+- [ ] Return a `next` cursor past the last entry *examined*, so a page of skipped entries still advances
+- [ ] Relay `sent` and `catchup` unchanged
+- [ ] Never ask for or accept a replay older than your own duplicate record, so a lost record cannot
+      bring the whole window back twice
+- [ ] On a replay: check duplicates across the whole window, replace `<delay/>` with the room's own
+      stamped `sent`, archive it on arrival without moving it back to `sent`, and fan out without
+      `catchup`
 
 **Security** — every rule in [09-validation.md](09-validation.md), especially:
 - [ ] Payload `from` validation at **every** hop, relay included
@@ -347,6 +362,7 @@ ones fall back to a documented default. The consequences that actually bite:
 | Moderation relay (1.10.12) | older receivers inject the announcement as an ordinary message | A body-less groupchat from a room nick. Clients ignore it as a moderation, so the message stays visible on that receiver only. Older senders never relay moderations. |
 | Sender-side acceptance gate on room traffic (1.10.11) | older peers forward refused traffic | Only the sender can enforce it, so a refused message or join from behind an older peer still reaches you. Nothing on the receiving side detects it. |
 | Egress exposure gate on 1:1 traffic and advertisement relay (1.10.9) | older peers do not check | Enforced by the server **in front of** the untrusted edge, so it protects only the topology behind a gateway that implements it. A 1.10.8+ receiver still drops the claimed-origin advertisements an older gateway leaks, and logs them. |
+| Catch-up actions, `sent` and `catchup` on `muc-forward` (1.13.0) | older peers ignore them | An older peer never asks and never answers, so a split on that mapping stays lossy; a newer peer retries three times and gives up. An older **relay** rebuilds `muc-forward` without the two attributes, so replays crossing it arrive as live traffic: shown at arrival time, not counted against their page, kept out only by the receiver's duplicate check. An older spoke behind a newer hub gets the hub's fan-out of replays the same way. Upgrade both ends of a mapping, every relay on its path, and every spoke behind a hub. |
 
 Two upgrades in this implementation's history required coordinated action, worth knowing if you meet a
 mixed mesh:

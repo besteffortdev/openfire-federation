@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -66,5 +67,22 @@ class FederationApiServletTest {
 
         assertEquals(FederationApiServlet.fingerprint(quiet), FederationApiServlet.fingerprint(busier));
         assertFalse(FederationApiServlet.fingerprint(quiet).equals(FederationApiServlet.fingerprint(cleared)));
+    }
+
+    @Test
+    @DisplayName("the CSRF cookie is never sent on a cross-site request, and is Secure over HTTPS")
+    void csrfCookieAttributes() {
+        assertEquals("fed-csrf=abc123; Path=/; SameSite=Strict", FederationApiServlet.csrfCookieHeader("abc123", false));
+        assertTrue(FederationApiServlet.csrfCookieHeader("abc123", true).endsWith("; Secure"));
+    }
+
+    @Test
+    @DisplayName("the extra upload ports are saved as a clean list, and anything that is not a port is refused")
+    void uploadPortListIsValidated() {
+        assertEquals("8443,9443", FederationApiServlet.cleanPortList(" 8443, 9443 ,"));
+        assertEquals("", FederationApiServlet.cleanPortList("  "));
+        assertNull(FederationApiServlet.cleanPortList("8443,abc"));
+        assertNull(FederationApiServlet.cleanPortList("0"));
+        assertNull(FederationApiServlet.cleanPortList("70000"));
     }
 }

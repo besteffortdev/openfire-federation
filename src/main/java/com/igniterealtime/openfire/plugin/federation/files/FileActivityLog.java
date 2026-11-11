@@ -1,5 +1,6 @@
 package com.igniterealtime.openfire.plugin.federation.files;
 
+import com.igniterealtime.openfire.plugin.federation.TabSeparated;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -110,7 +111,7 @@ final class FileActivityLog {
     /** Appends one record stamped with the current time; never throws, so logging cannot break a relay. */
     synchronized void append(String... values) {
         StringBuilder sb = new StringBuilder(160).append(Instant.now().truncatedTo(ChronoUnit.MILLIS));
-        for (String v : values) sb.append('\t').append(escape(v));
+        for (String v : values) sb.append('\t').append(TabSeparated.escape(v));
         sb.append('\n');
         Path file = path();
         try {
@@ -215,45 +216,8 @@ final class FileActivityLog {
             return null;
         }
         List<String> fields = new ArrayList<>(parts.length - 1);
-        for (String p : Arrays.asList(parts).subList(1, parts.length)) fields.add(unescape(p));
+        for (String p : Arrays.asList(parts).subList(1, parts.length)) fields.add(TabSeparated.unescape(p));
         return new Row(when, fields);
-    }
-
-    private static String escape(String v) {
-        if (v == null || v.isEmpty()) return "";
-        StringBuilder sb = new StringBuilder(v.length() + 8);
-        for (int i = 0; i < v.length(); i++) {
-            char c = v.charAt(i);
-            switch (c) {
-                case '\\' -> sb.append("\\\\");
-                case '\t' -> sb.append("\\t");
-                case '\n' -> sb.append("\\n");
-                case '\r' -> sb.append("\\r");
-                default   -> sb.append(c);
-            }
-        }
-        return sb.toString();
-    }
-
-    private static String unescape(String v) {
-        if (v == null || v.indexOf('\\') < 0) return v == null ? "" : v;
-        StringBuilder sb = new StringBuilder(v.length());
-        for (int i = 0; i < v.length(); i++) {
-            char c = v.charAt(i);
-            if (c != '\\' || i == v.length() - 1) {
-                sb.append(c);
-                continue;
-            }
-            char next = v.charAt(++i);
-            switch (next) {
-                case '\\' -> sb.append('\\');
-                case 't'  -> sb.append('\t');
-                case 'n'  -> sb.append('\n');
-                case 'r'  -> sb.append('\r');
-                default   -> sb.append('\\').append(next);
-            }
-        }
-        return sb.toString();
     }
 
     private static void deleteQuietly(Path p) {

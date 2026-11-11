@@ -4,7 +4,6 @@ import com.igniterealtime.openfire.plugin.federation.model.PeerServer;
 import org.dom4j.Document;
 import org.dom4j.DocumentException;
 import org.dom4j.Element;
-import org.dom4j.io.SAXReader;
 import org.jivesoftware.util.JiveGlobals;
 import org.jivesoftware.util.SystemProperty;
 import org.slf4j.Logger;
@@ -46,15 +45,6 @@ public class FederationFileConfig {
         return JiveGlobals.getHomePath().resolve("conf").resolve("openfire.xml");
     }
 
-    /** A {@link SAXReader} that refuses DOCTYPEs and external entities (CERT IDS17-J). */
-    private static SAXReader hardenedReader() throws SAXException {
-        SAXReader reader = new SAXReader();
-        reader.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-        reader.setFeature("http://xml.org/sax/features/external-general-entities", false);
-        reader.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-        return reader;
-    }
-
     public IngestResult lastResult() { return lastResult; }
 
     public Long lastLoadedAtMillis() { return lastLoadedAtMillis; }
@@ -69,7 +59,7 @@ public class FederationFileConfig {
 
         Element fedEl;
         try {
-            Document doc = hardenedReader().read(file);
+            Document doc = SafeXml.hardenedReader().read(file);
             Element root = doc.getRootElement();
             fedEl = root == null ? null : root.element(CONFIG_ELEMENT);
         } catch (DocumentException | SAXException e) {

@@ -35,7 +35,7 @@ tag. This stops a peer from siphoning the roster of, or injecting into, a room i
 `plugin.federation.peerAllowlist` defaults to `true`: only configured peers (those you **Add** in the admin
 console) may drive federation; every action from any other server is rejected. A peer is "configured" if you
 added it, so **both ends must add each other** — with the allowlist on, auto-registration of unknown peers is
-suppressed. Set it to `false` (or use the **Security** toggle on the Peer Servers tab) for open federation,
+suppressed. Set it to `false` (or use the **Security** toggle on the Settings tab) for open federation,
 where any server that can connect is accepted and auto-registered — **as an untrusted peer with nothing
 exposed** (since 1.10.8). A stranger therefore links only if it also declares itself untrusted, and sees
 nothing until you expose servers to it or promote it to trusted. Before 1.10.8 auto-registered peers were
@@ -89,12 +89,12 @@ only a curated set of servers.
 ## Deniable route advertisements (per-link inbound filter)
 
 The exposure controls above govern what you *send*; each side can also refuse what it *receives*. If a peer
-advertises a route (and rooms) for a destination you don't want, click **Deny** — on the Routing Table row,
+advertises a route (and rooms) for a destination you don't want, click **Deny** — on the row of the Peers tab's *Routing table*,
 or next to that server in the peer's settings panel (right column). The destination is refused whenever
 **that** peer advertises it: any installed route via that peer is torn down immediately (with room/ghost
 clean-up) and future advertisements are dropped on receive. A route to the same destination via a *different*
 peer is unaffected, and the deny is one-sided — nothing is negotiated with the peer. The denied entry stays
-listed in the Routing Table as a disabled (struck-through) row, and the deny is remembered even if the peer
+listed in the routing table as a disabled (struck-through) row, and the deny is remembered even if the peer
 withdraws the route and advertises it again later. **Allow** (on the disabled row, or in the peer's settings
 panel) lifts it and re-solicits the peer so the route re-appears. Denies are persisted per peer
 (`federation.peer.deniedroutes.<domain>`).
@@ -225,6 +225,42 @@ server's copy of the room only. A client cannot fake a moderation by sending the
 message: it arrives from a room nick, not the room, and is dropped. See
 [09](protocol/09-validation.md#room-moderation--only-the-authors-server).
 
+## Catch-up after a split
+
+Since 1.13.0 a mapping whose path comes back replays the room traffic it missed
+([05](protocol/05-muc-traffic.md#catch-up-after-a-split)). The controls (09 § Room catch-up):
+
+- **A request needs the standing of a lifecycle action.** It is answered only for a federated room with
+  an ACTIVE mapping to the requester's room, with the mapping's token, from an origin that passes the
+  claimed-origin check, and over an untrusted link only when this server is exposed to it. Anything else
+  is dropped as `SECURITY:`. A request reads a day of a room's traffic, so it gets no less scrutiny than
+  disabling the mapping.
+- **Nothing from before consent is replayed.** A mapping records when it last became ACTIVE. Neither end
+  replays or accepts traffic from before then, so a disabled period or the time before the mapping
+  existed never comes back.
+- **Nothing older than the receiver's journal is accepted.** A server whose journal was lost cannot
+  tell what it already has. It refuses replays from before its journal began, so the loss costs one
+  catch-up rather than a day of messages delivered twice.
+- **A replay is checked like live traffic, and more.** It passes the same origin, mapping and exposure
+  checks.
+  - One that claims to answer a request must answer a page this server asked for on that mapping, and
+    no more items than the page asked for.
+  - Its `sent` must fall within the window. A stamp far in the future is taken as now.
+  - Its own `<delay/>` elements are replaced with the room's.
+  - Replayed subject changes are dropped.
+- **Bounded.**
+  - Responder: pages of at most 100 items, one page at a time per mapping, 2,000 items per mapping per
+    hour.
+  - Requester: 1,000 items per catch-up.
+- **The journal holds message text.** It keeps the window's traffic of every mapped room, 24 hours by
+  default, in `federation-journal/journal.tsv` beside Openfire's plugins directory (`/var/lib/openfire` in
+  the Docker image). The file is created `rw-------` in a
+  `rwx------` directory, and expired entries are pruned hourly. Treat it like Openfire's own message
+  archive when backing up or wiping a server.
+
+**Residual risk:** `sent` is the responder's word. A mapped peer can backdate the messages it carries
+by up to the window. That is no more than a trusted peer can already do with the users it relays.
+
 ## Presence and PEP privacy
 
 Two server-side answers given on a user's behalf follow that user's own access rules (since 1.10.8):
@@ -236,11 +272,71 @@ Two server-side answers given on a user's behalf follow that user's own access r
   check Openfire applies to a local request. A refused read gets `forbidden`. Without this, private
   nodes such as XEP-0402 bookmarks (which can hold room passwords) were readable by any peer.
 
+## User searches from other servers
+
+Openfire's Search plugin (and any other XEP-0055 service on the server) answers every requester with every
+matching user: username, name and email, `*` listing them all. It has no notion of a remote requester. Its
+only restriction, `plugin.search.groupOnly`, limits local users too. Federation made this reachable from
+every server on the overlay, multi-hop included, whatever contact lists the admin chose to share.
+
+Since 1.12.0 the packet interceptor refuses a `jabber:iq:search` request (`get` for the form, `set` for
+results) when its sender is on another server and its target is this server or one of its services, unless
+the sender's server, or a server it is a subdomain of, is listed in `plugin.federation.search.allowedServers`
+(*Users → Directory search*). The default list is empty.
+
+- **Both arrival paths.** Openfire runs interceptors in `IQRouter.route`, which a search reaches both from a
+  native S2S session and from an `iq-forward` the overlay delivers, so one check covers both.
+- **The requester gets an answer.** On a rejection Openfire only answers a local client session, so a remote
+  searcher would time out. The guard sends `forbidden` (type `auth`) itself; it travels back natively or over
+  the overlay like any reply.
+- **Local users are unaffected,** including their searches of other servers' services.
+- Refusals are counted per server for the admin page (the 64 most recent servers) and logged at INFO at most
+  once a minute per server.
+
+The plugin's own **federated directory** holds other servers' contacts, so it answers only this server's
+users, whatever the allowed list says.
+
 ## Admin API CSRF
 
 The Federation tab's API uses a double-submit token (a `fed-csrf` cookie echoed back as a request
 parameter), so a forged request from another site cannot trigger peer/room changes in a logged-in admin's
 browser. After upgrading, reload an already-open Federation tab once so its scripts pick up the token.
+
+## Markers and annotations are not credentials
+
+Two elements in the plugin's namespace steer its own processing: `fed-origin`, which makes the
+interceptor leave a stanza alone, and `fed-file`, which makes a server pull a file and rewrite a link.
+Anyone can write either into a stanza, so since 1.14.0 neither is believed on sight:
+
+- **`fed-origin`** counts only on a packet this server marked itself. A stanza that arrives carrying
+  the element goes through every check like any other. Before 1.14.0 it skipped the user-search guard,
+  the room-traversal policy and the leak guard.
+- **`fed-file`** on a stanza that reaches the router from a client or over native S2S is acted on only
+  when the sender's server is a reachable peer and names itself as the file's origin. Any other is
+  removed, so a user cannot make this server and every mapped one request files and fill their
+  transfer tables.
+- **A forwarded stanza must name its sender.** A `muc-forward` or 1:1 forward whose payload has no
+  `from`, or one that does not parse, is dropped and logged as `SECURITY:`. Clients read a stanza
+  without a sender as coming from their own account or server.
+
+## Pinned peers and unencrypted links
+
+A link without TLS presents no certificate, so there is nothing to compare with the pin. Since 1.14.0 a
+peer that has a pinned key and is reached over an **unencrypted link this server opened** is treated
+like a changed key: it is auto-marked untrusted and flagged. Restore TLS and make the peer trusted
+again, or remove and re-add it to forget the pin. An incoming-only link proves nothing either way and
+is not judged. Setting Openfire's S2S TLS policy to *required* rules the case out altogether.
+
+## File relay limits
+
+- **Store size.** `plugin.federation.files.maxStoreMB` (4096) bounds the complete and arriving files
+  together. Past it, pulls, offers and local stagings are refused and logged at most once a minute.
+- **Staging reads the upload service only.** The local-upload check accepts a URL without a port, the
+  HTTP-bind ports, the upload plugin's announced port and those in
+  `plugin.federation.files.uploadPorts`. The fetch does not follow redirects. A user can therefore not
+  have the server read another HTTP service on itself and relay the answer.
+- **The storage directory is restricted only when it is the relay's own:** new, empty, or holding relay
+  files only. A directory that already holds something else keeps its permissions, with a warning.
 
 ## File type filtering & scanning
 

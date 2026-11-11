@@ -66,6 +66,13 @@ the server on its list, which is exactly what room B needs and nothing more.*
   groups and the contacts appear in those users' rosters, with presence and avatars and no approval
   prompts. Presence is one‑way: each server decides which of its own users the others may see. Lists
   cross an untrusted link only where both admins allow it on that link (per‑peer setting).
+- **Federated directory** — make a received contact list *searchable* instead of (or as well as) putting it
+  in rosters: your users look people up from their client's user search (XEP‑0055) at
+  `directory.<your domain>` and add the ones they want. A list that is only searchable puts nothing in any
+  roster and creates no user or group. Only local users can search it.
+- **User-search guard** — Openfire's Search plugin answers anyone with every user on the server. The plugin
+  refuses `jabber:iq:search` from other servers' users, over native S2S or the overlay, unless the admin
+  allowed that server.
 - **Multi‑hop forwarding** — rooms federate across servers that aren't directly connected, relayed hop‑by‑hop.
 - **Dynamic routing** — a distance‑vector (Bellman‑Ford) routing table is learned automatically via gossip
   when peers connect, and reconverges when the topology changes.
@@ -74,6 +81,13 @@ the server on its list, which is exactly what room B needs and nothing more.*
   so links stay up and rosters re‑sync without users rejoining.
 - **Ghost‑occupant cleanup** — when a peer or route drops, *or a remote user disconnects (including several
   hops away)*, that user is cleanly removed from every local room across the federation.
+- **Catch-up after a split** — each copy of a mapped room keeps working while the link is down, and
+  when the path comes back (reconnect, route re-learned, a server restart) each side asks the other for
+  the room traffic it missed. Replays arrive exactly once, stamped with the time they were written, and
+  spread on through hubs to the spokes behind them. The archive files them when they arrive, so MAM
+  paging stays intact. A per-room journal of the
+  last 24 hours answers the requests; it lives beside Openfire's plugins directory (`/var/lib/openfire` in
+  the Docker image and the Debian package), readable by Openfire only.
 - **Access control** — federation traffic only ever touches rooms you explicitly enable; an optional peer
   allowlist restricts who may federate at all; **untrusted peers** see only the servers you expose to them
   (ideal for an edge server fronting a partner network); the admin API is CSRF‑protected. See [Security](#security).
@@ -126,7 +140,7 @@ Install the plugin on **every** server you want to participate in the federation
 ## Quick start
 
 1. **Install** the plugin on each server and open **Admin Console → Federation**.
-2. **Add a peer** (Peer Servers tab → *Add peer server*): enter the other server's XMPP domain. The peer
+2. **Add a peer** (Peers tab → *+ Add peer*): enter the other server's XMPP domain. The peer
    shows **Pending** while it waits for the other side to add you back; the dot turns green (*Reachable*)
    only once the remote's federation plugin confirms the mutual add. Repeat so every server knows its
    neighbours — they don't all need to be directly connected; routes propagate. A non‑federated server
@@ -145,18 +159,23 @@ The in‑console **documentation/readme** link has a fuller, screenshot‑level 
 
 ## Admin console reference
 
-The **Federation** tab has three sub‑views:
+The **Federation** page has six tabs. The one you are on is kept in the address, so a reload or a bookmark returns to it.
 
 | Tab | What it shows |
 |-----|----------------|
-| **Peer Servers** | Add/remove/disable peers, configured peer status & last‑seen (*Pending* = waiting for the remote to add us back), live S2S sessions (with one‑click **Add peer** for non‑federated servers), and connection settings (keepalive & reconnect). |
-| **Routing Table** | Learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
-| **Rooms** | Local rooms with a per‑room *Federated* toggle and current mappings; remote rooms advertised by peers, one collapsed card per server showing how many federated rooms it offers. |
-| **Users** | *Contact Sharing*: local groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups. *Sent lists*: what each server currently receives. |
+| **Overview** | Opens first. Five tiles with the numbers at a glance; *Needs attention*, a list of everything that wants the admin (an unreachable peer, a changed certificate, a room link that stopped answering, a pending mapping request, a room loop, an unmapped contact list, a full file store…), worst first, each with the button that fixes it or leads to it; and *Network*, a map with one lane per peer and the servers reached through it by hop count. Every other tab shows a red or amber count when something behind it needs attention. |
+| **Peers** | *Peers*: add (**+ Add peer**), remove or disable peers, and see their status & last‑seen (*Pending* = waiting for the remote to add us back); each row opens a panel with its trust, exposure and deny settings. *S2S sessions*: live sessions, with one‑click **Add peer** for non‑federated servers. *Routing table*: learned destinations with next hop, hop count, and last update. Hop count `1` = directly connected. **Deny** refuses a destination whenever its next‑hop peer advertises it (per‑link); the entry stays listed as a disabled row — surviving withdrawals and re‑advertisements — until **Allow** lifts it. |
+| **Rooms** | *Room sharing*: local rooms with a per‑room *Federated* toggle; a federated room opens a panel with its sharing options, visibility, current mappings and a picker to link it to a remote room. Below, the remote rooms advertised by peers, one collapsed card per server, where a room can be mapped from the other side. *Rules for new rooms*: default settings by name pattern. |
+| **Users** | *Contact Sharing*: local groups, each with an expandable panel to choose the servers it's shared with; below, the contact lists peers share with this server, each mapped to local groups, made searchable in the federated directory, or both. Each card's header has *Deny* (keep the entry, drop every list that server sends and stop using its contacts; *Allow* undoes it) and *Delete* (remove the entry of a server that stopped sharing or is gone; a later list shows up as new). *Sent lists*: what each server currently receives. *Directory search*: the federated directory's state, and which servers may search this server's users (refused attempts are counted per server). |
+| **Files** | *File sharing*: the relay switch, size limit, allowed extensions and extra upload ports, then storage: the store size limit with a usage bar, retention and the storage directory. *Virus scanning*: the ClamAV switch and endpoint, and the recently scanned files. *Activity log*: rejected files and the log retention. |
+| **Settings** | Security switches (peer allowlist, remote room traversal), message and presence relays, the connection timers (keepalive, reconnect, mapping probe), and the reload of the `openfire.xml` block. |
 
 Every table sorts by any column: click its header for ascending, again for descending, a third time for
 the original order (numbers sort as numbers, anything else alphabetically; the choice is remembered per
-browser). Each list has a filter box. The page updates live as things change.
+browser). Each list has a filter box. The page updates live as things change, and its header says so when
+the connection to the server is lost. A setting's *Save* button lights up once its value is edited (Enter
+saves, Escape puts the saved value back), and an unsaved edit survives a refresh. Destructive actions ask
+first in a dialog on the page.
 
 ---
 
@@ -216,18 +235,23 @@ Notes:
 
 ## Configuration properties
 
-Set under **Admin Console → Server → System Properties** (or via the Connection settings UI for the first two).
+Set under **Admin Console → Server → System Properties**. The timers and switches are also on the *Settings* tab, and the file relay's properties on the *Files* tab.
 
 | Property | Default | Meaning |
 |----------|---------|---------|
 | `plugin.federation.keepaliveSeconds` | `240` | Interval for lightweight keepalive pings to reachable peers. Min 30. Auto‑clamped below Openfire's S2S idle timeout. |
 | `plugin.federation.reconnectSeconds` | `30` | Back‑off **cap** for reconnecting UNREACHABLE peers. Retries grow 5→10→20→… up to this cap, then reset on reconnect. Min 5. |
 | `plugin.federation.disableS2SIdle` | `true` | On startup, disable Openfire's server‑wide S2S idle reaper (`xmpp.server.idle`). See note below. |
+| `plugin.federation.catchup.enabled` | `true` | When a mapping's path comes back, ask for the room traffic it missed and answer the far end's requests. See [05 § Catch-up](docs/protocol/05-muc-traffic.md#catch-up-after-a-split). |
+| `plugin.federation.catchup.windowHours` | `24` | Hours of room traffic the journal keeps (`federation-journal/journal.tsv` beside the plugins directory, followed through symlinks) and a catch-up may replay. At most 168. |
+| `plugin.federation.search.allowedServers` | *(empty)* | Comma‑separated servers whose users may search this server's users (XEP‑0055), for example through Openfire's Search plugin. Empty refuses every other server. Also in *Users → Directory search*. |
 | `plugin.federation.peerAllowlist` | `true` | Secure‑by‑default trust mode. Only configured peers may drive federation; every action from any other peer is rejected. Set `false` for open federation. See [Security](#security). |
 | `plugin.federation.files.enabled` | `true` | Federate HTTP File Upload shares: relay content to the servers that deliver the message and rewrite the link to their local `/federation-files` endpoint (HTTP‑bind port). Also in the *Files* tab. |
 | `plugin.federation.files.maxSizeMB` | `25` | Largest file the relay will stage, transfer, or accept. Also in the *Files* tab. |
 | `plugin.federation.files.chunkBytes` | `131072` | Raw bytes per `file-chunk` IQ (base64 adds ~33%; keep well under the S2S stanza‑size limit). |
 | `plugin.federation.files.chunkDelayMs` | `20` | Pause between chunk sends so a big file can't starve chat traffic on the link. |
+| `plugin.federation.files.maxStoreMB` | `4096` | Most disk space the relay's store may hold. A file that would pass it is not pulled or staged, and its share keeps the original link. `0` removes the limit. |
+| `plugin.federation.files.uploadPorts` | *(empty)* | Extra comma‑separated ports an upload URL may name. The HTTP‑bind ports, the upload plugin's announced port and URLs without a port are always accepted; any other port is not treated as this server's upload service. |
 | `plugin.federation.files.retentionDays` | `90` | Days a relayed file is kept in the storage directory before purge. Also in the *Files* tab. |
 | `plugin.federation.files.storageDir` | `/var/lib/openfire/federation-files` | Full path of the directory where relayed file content is stored. Changing it live moves existing files. Also in the *Files* tab. |
 | `plugin.federation.files.publicUrlBase` | *(auto)* | Base URL for rewritten links to this server's download endpoint. Blank derives `https://<domain>:<http-bind-secure-port>/federation-files`; set explicitly behind a proxy. |
@@ -266,7 +290,7 @@ those definitions — bring the container up once while online to seed the initi
 of signatures), after that it keeps working with no network access at all. Use the *Files* tab →
 *Test connection* to confirm the plugin can reach it before turning `avEnabled` on.
 
-the *Files* tab → *Activity Log* also lists *Recently scanned files (ClamAV)* — the last 200 received files
+the *Files* tab → *Virus scanning* also lists *Recently scanned files* — the last 200 received files
 this server has scanned (time, name, size, sending peer, verdict, and AV detail), newest first — plus
 *Rejected files*, every file blocked by any gate (extension allowlist, content sniff, SHA‑256 mismatch, AV).
 Transit hops are never scanned or listed. A quick way to confirm scanning is actually happening and see
@@ -317,6 +341,8 @@ talking to. The controls at a glance:
 | **Anti‑spoofing** | Every forwarded stanza's `from` is validated per hop — no peer may speak for your users or from the wrong direction. |
 | **Per‑room visibility** | Each room lists which servers may see it (default: none); the set travels with the advertisement so off‑path servers never learn it exists. |
 | **Mapping consent** | Mapping requires the other admin's **Accept**; each lifecycle message is valid only from the matching state, a per‑mapping token is re‑checked on every later one, and room traffic must arrive through a mapping on that room. |
+| **Catch-up standing** | A catch-up request is answered only for an ACTIVE mapping with its token; nothing from before the mapping last became ACTIVE, or before the receiver's journal began, is replayed or accepted; a replay must answer a page this server asked for. |
+| **User-search guard** | `jabber:iq:search` from another server's user is refused (`forbidden`) unless that server is allowed, so the Search plugin cannot hand out your user list. The federated directory serves local users only. |
 | **Presence & PEP privacy** | Relayed presence probes are answered only for subscribers; relayed PEP reads honour each node's access model. |
 | **Admin API CSRF** | A double‑submit `fed-csrf` token guards all Federation‑tab API calls. |
 | **File filtering & AV** | Extension allowlist (egress + ingress) + magic‑number sniff + optional ClamAV (fails closed); transit hops never decode content. |
@@ -339,7 +365,8 @@ The plugin exchanges control messages with peers using IQ stanzas in the `urn:xm
 | `routing-solicit` | Ask peers to re‑send routing + room info after topology loss. |
 | `room-advertisement` | Announce a federated local room (relayed multi‑hop). |
 | `room-mapping` / `room-unmap` | Link / unlink a local room to a remote room (relayed multi‑hop). |
-| `muc-forward` | Carries the actual MUC presence/message traffic between mapped rooms. |
+| `muc-forward` | Carries the actual MUC presence/message traffic between mapped rooms; with `sent`, a replay of a message missed during a split. |
+| `room-catchup-request` / `room-catchup-done` | One page of catch-up after a split: what the requester missed since its newest message from that mapping, answered from the room journal as replayed `muc-forward`s. |
 | `direct-forward` | Carries 1:1 chat messages to a multi‑hop contact (and message‑embedded XEPs: typing, receipts, reactions, OOB/upload links). |
 | `presence-forward` | Carries 1:1 presence and subscription stanzas to a multi‑hop contact. |
 | `iq-forward` | Carries user‑addressed IQs to a multi‑hop contact — **vCard/avatar (XEP‑0054/0153)**, plus disco/version/ping when answered by the contact's client. The vCard reply is built at the contact's server and relayed back, correlated by `id`. |

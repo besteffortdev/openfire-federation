@@ -92,6 +92,18 @@ public final class FederationProperties {
     public static final SystemProperty<Integer> MAPPING_PING_SECONDS =
         intProp("plugin.federation.mappingPingSeconds", 30, 0);
 
+    /** Whether a mapping whose path comes back replays the room traffic it missed (default true). */
+    public static final SystemProperty<Boolean> CATCHUP_ENABLED =
+        boolProp("plugin.federation.catchup.enabled", true, true);
+
+    /** Hours of room traffic the journal keeps and a catch-up may replay; values above 168 are lowered to 168. */
+    public static final SystemProperty<Integer> CATCHUP_WINDOW_HOURS =
+        intProp("plugin.federation.catchup.windowHours", 24, 1);
+
+    /** Comma-separated servers whose users may search this server's users (XEP-0055); blank allows none. */
+    public static final SystemProperty<String> SEARCH_ALLOWED_SERVERS =
+        stringProp("plugin.federation.search.allowedServers", "");
+
     /** Whether HTTP File Upload shares are relayed to the servers that deliver them (default true). */
     public static final SystemProperty<Boolean> FILES_ENABLED =
         boolProp("plugin.federation.files.enabled", true, true);
@@ -107,6 +119,14 @@ public final class FederationProperties {
     /** Pause between chunks in milliseconds, so a large file cannot starve chat traffic on the link. */
     public static final SystemProperty<Integer> FILES_CHUNK_DELAY_MS =
         intProp("plugin.federation.files.chunkDelayMs", 20, 0);
+
+    /** Most disk space the relay's store may hold, in megabytes; a pull or staging past it is refused. 0 means no limit. */
+    public static final SystemProperty<Integer> FILES_MAX_STORE_MB =
+        intProp("plugin.federation.files.maxStoreMB", 4096, 0);
+
+    /** Extra comma-separated ports an upload URL may name, besides the HTTP-bind ports and the upload plugin's own. */
+    public static final SystemProperty<String> FILES_UPLOAD_PORTS =
+        stringProp("plugin.federation.files.uploadPorts", "");
 
     /** Days a relayed file is kept before it is purged. */
     public static final SystemProperty<Integer> FILES_RETENTION_DAYS =

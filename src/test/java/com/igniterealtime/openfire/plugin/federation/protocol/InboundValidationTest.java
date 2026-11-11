@@ -69,4 +69,17 @@ class InboundValidationTest {
         assertFalse(InboundValidation.hasControlCharacters(forward));
         assertFalse(InboundValidation.hasControlCharacters(advertisement));
     }
+
+    @Test
+    @DisplayName("a forwarded payload needs a sender that parses: a client reads a missing one as its own server")
+    void payloadNeedsSender() {
+        assertTrue(InboundValidation.hasUsableSender("alice@2501-xmpp.example.net/phone"));
+        assertTrue(InboundValidation.hasUsableSender("lobby@conference.2501-xmpp.example.net"));
+
+        assertFalse(InboundValidation.hasUsableSender(null));
+        assertFalse(InboundValidation.hasUsableSender(""));
+        assertFalse(InboundValidation.hasUsableSender("   "));
+        assertFalse(InboundValidation.hasUsableSender("alice@"));
+        assertFalse(InboundValidation.hasUsableSender("@/"));
+    }
 }

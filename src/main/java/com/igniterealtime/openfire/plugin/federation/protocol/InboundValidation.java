@@ -94,15 +94,14 @@ final class InboundValidation {
      */
     boolean payloadOriginOk(String fromDomain, String payloadFrom, String what,
                             boolean rejectLocalClaim, String claimedEntry) {
-        if (payloadFrom == null || payloadFrom.isEmpty()) return true;
-        boolean untrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
-        String domain = domainOf(payloadFrom);
-        if (domain == null || domain.isEmpty()) {
-            if (!untrusted) return true;
-            Log.warn("SECURITY: dropping {} from untrusted peer {} — unparseable payload from '{}'",
-                     what, fromDomain, LogSafe.text(payloadFrom));
+        // A client takes a stanza without a sender as coming from its own account or server.
+        if (!hasUsableSender(payloadFrom)) {
+            Log.warn("SECURITY: dropping {} from {} — its payload has no sender, or one that does not "
+                   + "parse ('{}')", what, fromDomain, LogSafe.text(payloadFrom));
             return false;
         }
+        boolean untrusted = manager.getPeerRegistry().isUntrusted(fromDomain);
+        String domain = domainOf(payloadFrom);
         String localDomain = localDomain();
         String host = originHost(domain, fromDomain, localDomain);
         if (host.equals(localDomain) || isLocalConferenceDomain(domain)) {
@@ -127,6 +126,13 @@ final class InboundValidation {
                + "which routes via {} (forged identity from the wrong direction)",
                  what, fromDomain, payloadFrom, host, hop.get());
         return false;
+    }
+
+    /** Whether a forwarded payload names a sender that parses as a JID with a domain. */
+    static boolean hasUsableSender(String payloadFrom) {
+        if (payloadFrom == null || payloadFrom.isBlank()) return false;
+        String domain = domainOf(payloadFrom);
+        return domain != null && !domain.isEmpty();
     }
 
     /** The server a payload's domain belongs to: itself, or its parent for a component such as conference.X. */

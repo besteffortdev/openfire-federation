@@ -266,6 +266,8 @@ is not enough:
 | `OccupantSync` | Virtual occupants: syncing rosters to mapped rooms and evicting the unreachable | 05 |
 | `MappingProbe` | `mapping-ping` / `mapping-pong` end-to-end probes | 04 |
 | `CertificatePinning` | Trust on first use for peers' S2S keys | [security.md](security.md) |
+| `FederatedDirectory` | The XEP-0055 search service over received lists made searchable (1.12.0) | 08 |
+| `RemoteSearchGuard` | Refuses user searches from servers the admin did not allow (1.12.0) | [security.md](security.md) |
 | `FederationNames` | The local domain and the domain and JID syntax checks | 09 §7 |
 | `protocol.FederationIQHandler` | Dispatch; peering, routing, room advertisements, mapping lifecycle, probes, contact lists, files | 02–04, 07, 08 |
 | `protocol.MucTrafficHandler` | `muc-forward`: relaying and injecting room traffic | 05 |

@@ -64,7 +64,7 @@ public class FederationApiServlet extends HttpServlet {
 
         try {
             boolean poll = "poll".equals(req.getParameter("action"));
-            out.print(poll ? longPoll(req.getParameter("hash")) : buildStatusJson(plugin));
+            out.print(poll ? longPoll(req.getParameter("hash")) : status(plugin, 0).json());
         } catch (RuntimeException e) {
             Log.error("Admin API: could not build the status document", e);
             resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
@@ -85,8 +85,9 @@ public class FederationApiServlet extends HttpServlet {
      * then answers with the status JSON and its new fingerprint under {@code hash}.
      */
     private String longPoll(String clientHash) {
-        String json = buildStatusJson(FederationPlugin.getInstance());
-        String hash = fingerprint(json);
+        Status status = status(FederationPlugin.getInstance(), STATUS_SHARED_MS);
+        String json = status.json();
+        String hash = status.hash();
         if (clientHash != null && !clientHash.isEmpty() && hash.equals(clientHash)) {
             boolean hold = heldPolls.incrementAndGet() <= POLL_MAX_HELD;
             try {
@@ -101,14 +102,37 @@ public class FederationApiServlet extends HttpServlet {
                     }
                     FederationPlugin plugin = FederationPlugin.getInstance();
                     if (plugin == null) return error("Plugin not loaded");
-                    json = buildStatusJson(plugin);
-                    hash = fingerprint(json);
+                    status = status(plugin, STATUS_SHARED_MS);
+                    json = status.json();
+                    hash = status.hash();
                 }
             } finally {
                 heldPolls.decrementAndGet();
             }
         }
         return "{\"hash\":\"" + hash + "\"," + json.substring(1);
+    }
+
+    /** A built status document and its fingerprint. */
+    private record Status(String json, String hash, long builtAt) { }
+
+    /** How long held polls share one built status document, so several open tabs cost one build a second. */
+    private static final long STATUS_SHARED_MS = 900;
+    private static volatile Status lastStatus;
+    private static final Object STATUS_LOCK = new Object();
+
+    /** The status document, rebuilt unless one no older than {@code maxAgeMs} is at hand. */
+    private Status status(FederationPlugin plugin, long maxAgeMs) {
+        Status s = lastStatus;
+        if (s != null && System.currentTimeMillis() - s.builtAt() < maxAgeMs) return s;
+        synchronized (STATUS_LOCK) {
+            s = lastStatus;
+            if (s != null && System.currentTimeMillis() - s.builtAt() < maxAgeMs) return s;
+            String json = buildStatusJson(plugin);
+            s = new Status(json, fingerprint(json), System.currentTimeMillis());
+            lastStatus = s;
+            return s;
+        }
     }
 
     /**
@@ -333,6 +357,10 @@ public class FederationApiServlet extends HttpServlet {
         sb.append("\"filesRelayAvailable\":").append(relay != null && relay.isAvailable()).append(",");
         sb.append("\"filesMaxSizeMB\":").append(FederationProperties.FILES_MAX_MB.getValue()).append(",");
         sb.append("\"filesRetentionDays\":").append(FederationProperties.FILES_RETENTION_DAYS.getValue()).append(",");
+        sb.append("\"filesMaxStoreMB\":").append(FederationProperties.FILES_MAX_STORE_MB.getValue()).append(",");
+        sb.append("\"filesStoreBytes\":").append(relay == null ? 0 : relay.storeBytes()).append(",");
+        sb.append("\"filesUploadPorts\":\"")
+          .append(esc(FederationProperties.FILES_UPLOAD_PORTS.getValue())).append("\",");
         sb.append("\"filesStorageDir\":\"")
           .append(esc(FederationProperties.FILES_STORAGE_DIR.getValue())).append("\",");
         sb.append("\"filesAllowedExtensions\":\"")
@@ -510,12 +538,15 @@ public class FederationApiServlet extends HttpServlet {
         Map<String, String> errors = cl.getMappingErrors();
         Set<String> origins = new TreeSet<>(received.keySet());
         origins.addAll(mappings.keySet());
+        // A denied server stays listed even when no list from it is held, so it can be allowed again.
+        origins.addAll(cl.getDenied());
         sb.append(",\"received\":");
         array(sb, origins, (b, o) -> {
             ContactListManager.ReceivedList list = received.get(o);
             ContactListManager.ListMapping m = mappings.get(o);
             b.append("{\"origin\":\"").append(esc(o))
              .append("\",\"reachable\":").append(cl.canRequestFrom(o))
+             .append(",\"denied\":").append(cl.isDenied(o))
              .append(",\"receivedAt\":").append(list == null ? "null" : String.valueOf(list.receivedAt()))
              .append(",\"crossedUntrusted\":").append(list != null && list.crossedUntrusted())
              .append(",\"count\":").append(list == null ? 0 : list.contacts().size())
@@ -529,10 +560,43 @@ public class FederationApiServlet extends HttpServlet {
             } else {
                 b.append("{\"displayName\":\"").append(esc(m.displayName())).append("\",\"groups\":");
                 strings(b, m.groups());
-                b.append("}");
+                b.append(",\"directory\":").append(m.directory()).append("}");
             }
             b.append("}");
         });
+
+        sb.append(",\"directory\":");
+        appendDirectory(sb, mgr);
+        sb.append("}");
+    }
+
+    /** The federated directory, and which servers may search this server's users. */
+    private static void appendDirectory(StringBuilder sb, FederationManager mgr) {
+        Map<String, List<ContactListManager.Contact>> lists = mgr.getContactLists().searchableLists();
+        RemoteSearchGuard guard = mgr.getSearchGuard();
+        Set<String> allowed = guard.allowedServers();
+        Map<String, RemoteSearchGuard.Refusal> refusals = guard.refusals();
+        // Every server the admin may want to tick: known routes, plus any already allowed or refused.
+        Set<String> servers = new TreeSet<>(allowed);
+        servers.addAll(refusals.keySet());
+        for (RouteEntry e : mgr.getRoutingTable().getAll()) servers.add(e.destination());
+
+        sb.append("{\"address\":\"").append(esc(FederationManager.directoryAddress()))
+          .append("\",\"running\":").append(mgr.isDirectoryRunning())
+          .append(",\"error\":\"").append(esc(mgr.getDirectoryError()))
+          .append("\",\"lists\":").append(lists.size())
+          .append(",\"contacts\":").append(lists.values().stream().mapToInt(List::size).sum())
+          .append(",\"allowedServers\":");
+        strings(sb, allowed);
+        sb.append(",\"servers\":");
+        strings(sb, servers);
+        sb.append(",\"refusals\":");
+        array(sb, refusals.entrySet(), (b, e) -> b
+            .append("{\"server\":\"").append(esc(e.getKey()))
+            .append("\",\"count\":").append(e.getValue().count())
+            .append(",\"lastAt\":").append(e.getValue().lastAt())
+            .append(",\"lastFrom\":\"").append(esc(e.getValue().lastFrom()))
+            .append("\",\"lastTo\":\"").append(esc(e.getValue().lastTo())).append("\"}"));
         sb.append("}");
     }
 
@@ -561,7 +625,10 @@ public class FederationApiServlet extends HttpServlet {
 
         String action = req.getParameter("action");
         try {
-            out.print(runAction(action == null ? "" : action, req, plugin.getManager()));
+            String reply = runAction(action == null ? "" : action, req, plugin.getManager());
+            // The page reloads the status right after an action and must see its effect.
+            lastStatus = null;
+            out.print(reply);
         } catch (RuntimeException e) {
             Log.error("Admin API: action '{}' failed", LogSafe.text(action), e);
             resp.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
@@ -808,6 +875,17 @@ public class FederationApiServlet extends HttpServlet {
             case "set-files-retention":
                 return applyBoundedInt(req, "days", FederationProperties.FILES_RETENTION_DAYS,
                                        "filesRetentionDays", 1, Integer.MAX_VALUE, "days must be at least 1");
+            case "set-files-max-store":
+                return applyBoundedInt(req, "mb", FederationProperties.FILES_MAX_STORE_MB,
+                                       "filesMaxStoreMB", 0, Integer.MAX_VALUE, "mb must be 0 (no limit) or more");
+            case "set-files-upload-ports": {
+                String ports = req.getParameter("ports");
+                if (ports == null) return required("ports");
+                String cleaned = cleanPortList(ports);
+                if (cleaned == null) return error("ports must be a comma-separated list of numbers from 1 to 65535");
+                FederationProperties.FILES_UPLOAD_PORTS.setValue(cleaned);
+                return okText("filesUploadPorts", FederationProperties.FILES_UPLOAD_PORTS.getValue());
+            }
             case "set-files-av-port":
                 return applyBoundedInt(req, "port", FederationProperties.FILES_AV_PORT,
                                        "filesAvPort", 1, 65535, "port must be between 1 and 65535");
@@ -859,7 +937,7 @@ public class FederationApiServlet extends HttpServlet {
         }
     }
 
-    /** Contact-list sharing: what this server shares with whom, and where received lists appear. */
+    /** Contact-list sharing, where received lists appear, and which servers may search this server's users. */
     private String contactListAction(String action, HttpServletRequest req, FederationManager mgr) {
         ContactListManager cl = mgr.getContactLists();
         switch (action) {
@@ -888,7 +966,6 @@ public class FederationApiServlet extends HttpServlet {
             case "map-contact-list": {
                 String origin = domainParam(req, "origin");
                 if (origin == null) return required("origin");
-                if (cl.groupsReadOnly()) return error("the group provider is read-only, so lists cannot be mapped");
                 List<String> groups = new ArrayList<>();
                 String raw = req.getParameter("groups");
                 if (raw != null) {
@@ -902,8 +979,14 @@ public class FederationApiServlet extends HttpServlet {
                         groups.add(t);
                     }
                 }
-                if (groups.isEmpty()) return error("choose at least one group, or all users");
-                cl.setMapping(origin, param(req, "displayName"), groups);
+                boolean directory = Boolean.parseBoolean(req.getParameter("directory"));
+                if (groups.isEmpty() && !directory) {
+                    return error("choose at least one group or all users, or make the list searchable");
+                }
+                if (!groups.isEmpty() && cl.groupsReadOnly()) {
+                    return error("the group provider is read-only, so lists cannot be put in rosters");
+                }
+                cl.setMapping(origin, param(req, "displayName"), groups, directory);
                 return OK;
             }
             case "unmap-contact-list": {
@@ -912,9 +995,35 @@ public class FederationApiServlet extends HttpServlet {
                 cl.removeMapping(origin);
                 return OK;
             }
+            case "deny-contact-list": {
+                String origin = domainParam(req, "origin");
+                if (origin == null) return required("origin");
+                cl.denyOrigin(origin);
+                return OK;
+            }
+            case "allow-contact-list": {
+                String origin = domainParam(req, "origin");
+                if (origin == null) return required("origin");
+                cl.allowOrigin(origin);
+                return OK;
+            }
+            case "delete-contact-list": {
+                String origin = domainParam(req, "origin");
+                if (origin == null) return required("origin");
+                cl.deleteOrigin(origin);
+                return OK;
+            }
             case "resend-contact-lists":
                 cl.resendAll();
                 return OK;
+            case "set-search-allowed": {
+                List<String> servers = csvDomains(req, "servers");
+                for (String s : servers) {
+                    if (!isPlausibleDomain(s)) return error("not a server address: " + s);
+                }
+                mgr.getSearchGuard().setAllowedServers(servers);
+                return OK;
+            }
             default:
                 return null;
         }
@@ -1065,6 +1174,22 @@ public class FederationApiServlet extends HttpServlet {
         return ok(jsonKey, prop.getValue());
     }
 
+    /** A comma-separated port list with blanks dropped, or null when an entry is not a port. Empty is allowed. */
+    static String cleanPortList(String raw) {
+        List<String> ports = new ArrayList<>();
+        for (String part : raw.split(",")) {
+            if (part.isBlank()) continue;
+            try {
+                int port = Integer.parseInt(part.strip());
+                if (port < 1 || port > 65535) return null;
+                ports.add(String.valueOf(port));
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return String.join(",", ports);
+    }
+
     /** Smallest AV scan timeout that leaves clamd time to answer. */
     private static final int MIN_AV_TIMEOUT_MS = 1000;
 
@@ -1074,10 +1199,13 @@ public class FederationApiServlet extends HttpServlet {
     private void ensureCsrfCookie(HttpServletRequest req, HttpServletResponse resp) {
         Cookie existing = CookieUtils.getCookie(req, CSRF_COOKIE);
         if (existing != null && existing.getValue() != null && !existing.getValue().isEmpty()) return;
-        Cookie c = new Cookie(CSRF_COOKIE, StringUtils.randomString(24));
-        c.setPath("/");
-        c.setMaxAge(-1);
-        resp.addCookie(c);
+        // Written as a header: the servlet API's Cookie has no SameSite. The value is alphanumeric.
+        resp.addHeader("Set-Cookie", csrfCookieHeader(StringUtils.randomString(24), req.isSecure()));
+    }
+
+    /** The Set-Cookie value of a session CSRF cookie that browsers never send on a cross-site request. */
+    static String csrfCookieHeader(String value, boolean secure) {
+        return CSRF_COOKIE + "=" + value + "; Path=/; SameSite=Strict" + (secure ? "; Secure" : "");
     }
 
     /** Double-submit CSRF check: the {@code csrf} parameter must equal the cookie. */

@@ -4,9 +4,11 @@ import com.igniterealtime.openfire.plugin.federation.FederatedRoomManager.Virtua
 import com.igniterealtime.openfire.plugin.federation.model.RoomMapping;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationSender;
 import com.igniterealtime.openfire.plugin.federation.protocol.FederationStanzaFactory;
+import com.igniterealtime.openfire.plugin.federation.protocol.RoomCatchup;
 import org.dom4j.Element;
 import org.jivesoftware.openfire.muc.MUCOccupant;
 import org.jivesoftware.openfire.muc.MUCRoom;
+import org.jivesoftware.openfire.user.UserNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.JID;
@@ -177,7 +179,7 @@ public final class OccupantSync {
                         p.getElement().addElement("status").setText(statusEl.getText());
                     }
                 }
-                if (markForwarded || syncTriggerSent) FederationStanzaFactory.markAsForwarded(p);
+                if (markForwarded || syncTriggerSent) FederationStanzaFactory.addSyncMarker(p);
                 syncTriggerSent = true;
                 FederationSender.send("occupant " + kind, remoteDomain, () -> FederationStanzaFactory.mucForward(
                         nextHop, remoteDomain, remoteRoomJid, localDomain, localDomain, p));
@@ -219,7 +221,7 @@ public final class OccupantSync {
             FederationSender.send("virtual occupant", toDomain, () -> {
                 Presence vsync = new Presence();
                 vsync.setFrom(new JID(vo.nick()));
-                FederationStanzaFactory.markAsForwarded(vsync);
+                FederationStanzaFactory.addSyncMarker(vsync);
                 return FederationStanzaFactory.mucForward(
                         nextHop, toDomain, remoteRoomJid, localDomain, localDomain, vsync);
             });
@@ -238,7 +240,7 @@ public final class OccupantSync {
                 Presence vleave = new Presence();
                 vleave.setFrom(new JID(leavingNick));
                 vleave.setType(Presence.Type.unavailable);
-                FederationStanzaFactory.markAsForwarded(vleave);
+                FederationStanzaFactory.addSyncMarker(vleave);
                 return FederationStanzaFactory.mucForward(
                         nextHop, toDomain, m.remoteRoomJid(), localDomain, localDomain, vleave);
             });
@@ -247,14 +249,19 @@ public final class OccupantSync {
                   leavingNick, localRoom, origin, arrivedVia);
     }
 
-    /** Re-sends our occupants to every mapped room on destinations that just became reachable. */
+    /**
+     * Re-sends our occupants to every mapped room on destinations that just became reachable, and
+     * starts a catch-up on each active mapping for the room traffic the outage lost.
+     */
     public void resyncMappedDestinations(Collection<String> destinations) {
+        RoomCatchup catchup = manager.getRoomCatchup();
         for (String dest : destinations) {
             if (!manager.getRoutingTable().isReachable(dest)) continue;
             for (List<RoomMapping> mappings : rooms().getLocalMappings().values()) {
                 for (RoomMapping m : mappings) {
                     if (m.remoteDomain().equals(dest)) {
                         pushInitialSyncPresences(m.localRoomJid(), dest, m.remoteRoomJid());
+                        if (catchup != null) catchup.pathBack(m);
                     }
                 }
             }
@@ -268,14 +275,11 @@ public final class OccupantSync {
     public void forwardLocalOccupantPresence(JID user, Presence presence) {
         if (user == null || user.getNode() == null) return;
         JID bareUser = user.asBareJID();
-        for (String localRoomJid : rooms().getLocalMappings().keySet()) {
+        for (String localRoomJid : rooms().getRoomsWithActiveMappings()) {
             List<RoomMapping> mappings = rooms().getMappingsForLocal(localRoomJid);
             if (mappings.isEmpty()) continue;
             MUCRoom room = manager.findLocalMucRoom(localRoomJid);
-            if (room == null) continue;
-            boolean present = room.getOccupants().stream().anyMatch(o ->
-                    o.getUserAddress() != null && bareUser.equals(o.getUserAddress().asBareJID()));
-            if (!present) continue;
+            if (room == null || !isOccupant(room, bareUser)) continue;
 
             JID roomJid = new JID(localRoomJid);
             Presence fwd = new Presence();
@@ -287,9 +291,21 @@ public final class OccupantSync {
                 if (presence.getShow()   != null) fwd.setShow(presence.getShow());
                 if (presence.getStatus() != null) fwd.setStatus(presence.getStatus());
             }
+            // A status change is not a join: without the marker every mapped room would answer it with
+            // its whole roster, which the far end then delivers to each of its occupants.
+            FederationStanzaFactory.addSyncMarker(fwd);
             for (RoomMapping m : mappings) {
                 forwardMucPresence(fwd, m);
             }
+        }
+    }
+
+    /** Whether any session of {@code bareUser} is in {@code room}, by the room's own lookup. */
+    private static boolean isOccupant(MUCRoom room, JID bareUser) {
+        try {
+            return !room.getOccupantsByBareJID(bareUser).isEmpty();
+        } catch (UserNotFoundException notInRoom) {
+            return false;
         }
     }
 
